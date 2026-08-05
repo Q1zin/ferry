@@ -8,20 +8,28 @@
 //! - запрос — три поля «`u32` LE длина + байты»: токен, рабочий каталог, команда для shell;
 //! - ответ — куски общего stdout+stderr в том же формате, затем пустое поле и `i32` LE код выхода.
 //!
+//! Пустая команда — `ferry stop`: демон убивает деревья всех команд, которые сейчас выполняет.
+//!
 //! Клиент после запроса ничего не шлёт. Если соединение закрылось раньше, чем команда
 //! завершилась, демон убивает её дерево процессов.
 
+use std::collections::HashSet;
 use std::collections::hash_map::RandomState;
 use std::ffi::OsString;
 use std::hash::BuildHasher;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
+
+use crate::exit_code;
+
+/// pid команд, которые демон выполняет прямо сейчас, — для `ferry stop`.
+type Jobs = Arc<Mutex<HashSet<u32>>>;
 
 /// Предел поля запроса: мусор на порту не должен заставить демон выделить гигабайты.
 const MAX_FIELD: u32 = 1 << 20;
@@ -39,14 +47,67 @@ pub fn daemon() -> io::Result<i32> {
     write_state(&format!("{} {token}\n", listener.local_addr()?.port()))?;
     detach_console();
     let token: Arc<str> = token.into();
+    let jobs = Jobs::default();
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        let token = token.clone();
+        let (token, jobs) = (token.clone(), jobs.clone());
         thread::spawn(move || {
-            let _ = serve(stream, &token);
+            let _ = serve(stream, &token, &jobs);
         });
     }
     Ok(0)
+}
+
+pub fn stop() -> io::Result<i32> {
+    run("")
+}
+
+/// Снимок всего экрана в PNG. Запускать на рабочем столе (`ferry desk`): в Session 0 экрана нет.
+pub fn screenshot(file: &str) -> io::Result<i32> {
+    let file = std::path::absolute(file)?;
+    Ok(exit_code(screenshot_command()?.arg(file).status()?))
+}
+
+#[cfg(windows)]
+fn screenshot_command() -> io::Result<Command> {
+    // Без SetProcessDPIAware на экране с масштабом снимется только часть.
+    const SCRIPT: &str = r#"
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name Dpi -Namespace Ferry
+[Ferry.Dpi]::SetProcessDPIAware() | Out-Null
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+"#;
+    let script = std::env::temp_dir().join("ferry-screenshot.ps1");
+    std::fs::write(&script, SCRIPT)?;
+    let mut command = Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(script);
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn screenshot_command() -> io::Result<Command> {
+    let mut command = Command::new("screencapture");
+    command.arg("-x");
+    Ok(command)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn screenshot_command() -> io::Result<Command> {
+    Err(io::Error::other(
+        "снимок экрана есть только на Windows и macOS",
+    ))
 }
 
 pub fn run(cmd: &str) -> io::Result<i32> {
@@ -90,7 +151,7 @@ pub fn run(cmd: &str) -> io::Result<i32> {
     Ok(i32::from_le_bytes(code))
 }
 
-fn serve(stream: TcpStream, token: &str) -> io::Result<()> {
+fn serve(stream: TcpStream, token: &str, jobs: &Jobs) -> io::Result<()> {
     let mut input = &stream;
     if read_field(&mut input)? != token.as_bytes() {
         return Ok(());
@@ -100,6 +161,26 @@ fn serve(stream: TcpStream, token: &str) -> io::Result<()> {
 
     // Ответ пишут двое — насос вывода и итоговый код; `None` — ответ уже закрыт.
     let out = Arc::new(Mutex::new(Some(stream.try_clone()?)));
+
+    if cmd.is_empty() {
+        let pids: Vec<u32> = jobs.lock().unwrap().iter().copied().collect();
+        let failed: Vec<String> = pids
+            .iter()
+            .filter_map(|&pid| kill_tree(pid).err().map(|e| format!("{pid}: {e}")))
+            .collect();
+        if failed.is_empty() {
+            let msg = format!("ferry: остановлено команд: {}\n", pids.len());
+            return finish(&out, msg.as_bytes(), 0);
+        }
+        let msg = format!(
+            "ferry: остановлено {} из {}; не удалось — {}\n",
+            pids.len() - failed.len(),
+            pids.len(),
+            failed.join(", ")
+        );
+        return finish(&out, msg.as_bytes(), 1);
+    }
+
     let (reader, writer) = io::pipe()?;
     let mut command = shell(&cmd);
     command
@@ -137,16 +218,20 @@ fn serve(stream: TcpStream, token: &str) -> io::Result<()> {
     let watch_done = done.clone();
     let watch = stream.try_clone()?;
     let pid = child.id();
+    jobs.lock().unwrap().insert(pid);
     thread::spawn(move || {
         // Клиент больше ничего не шлёт: чтение вернётся только при закрытии соединения.
         let _ = (&watch).read(&mut [0]);
         if !watch_done.load(Ordering::SeqCst) {
-            kill_tree(pid);
+            let _ = kill_tree(pid);
         }
     });
 
-    let status = child.wait()?;
+    let status = child.wait();
+    // Сразу после выхода: иначе stop мог бы убить чужой процесс, получивший тот же pid.
+    jobs.lock().unwrap().remove(&pid);
     done.store(true, Ordering::SeqCst);
+    let status = status?;
     let _ = tail_rx.recv_timeout(TAIL);
     finish(&out, &[], exit_code(status))
 }
@@ -180,20 +265,13 @@ fn write_field(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
 }
 
 fn state_path() -> io::Result<PathBuf> {
-    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let home = std::env::var_os(var).ok_or_else(|| io::Error::other(format!("не задан {var}")))?;
-    Ok(PathBuf::from(home).join(".ferry").join("desk"))
+    Ok(crate::ferry_home()?.join("desk"))
 }
 
 fn write_state(text: &str) -> io::Result<()> {
     let path = state_path()?;
     std::fs::create_dir_all(path.parent().unwrap())?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    // На Windows профиль и так доступен только владельцу.
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(text.as_bytes())
+    crate::write_private(&path, text)
 }
 
 // ponytail: токен из ключей SipHash, которые std берёт у ОС, а не из CSPRNG; для сокета
@@ -238,29 +316,34 @@ fn shell_path() -> OsString {
 
 // ponytail: taskkill /t идёт по ссылкам на родителя, поэтому процессы, чей родитель уже
 // вышел, переживут обрыв; если начнут мешать — Job Object с KILL_ON_JOB_CLOSE.
-fn kill_tree(pid: u32) {
+fn kill_tree(pid: u32) -> io::Result<()> {
     #[cfg(windows)]
-    {
+    let mut command = {
         use std::os::windows::process::CommandExt;
-        let _ = Command::new("taskkill")
+        let mut command = Command::new("taskkill");
+        command
             .args(["/pid", &pid.to_string(), "/t", "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+            .creation_flags(CREATE_NO_WINDOW);
+        command
+    };
     #[cfg(unix)]
-    let _ = Command::new("kill")
-        .args(["-TERM", "--", &format!("-{pid}")])
-        .status();
-}
-
-fn exit_code(status: ExitStatus) -> i32 {
-    #[cfg(unix)]
-    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
-        return 128 + signal;
+    let mut command = {
+        let mut command = Command::new("kill");
+        command.args(["-TERM", "--", &format!("-{pid}")]);
+        command
+    };
+    // Все три потока — явно: после FreeConsole у демона нет годных std-дескрипторов, и
+    // унаследованный stdin валит spawn с «неверный дескриптор».
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(status.to_string()))
     }
-    status.code().unwrap_or(255)
 }
 
 /// Планировщик запускает консольный exe с окном консоли — отцепляемся, и окно закрывается.
