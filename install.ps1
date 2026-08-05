@@ -51,6 +51,20 @@ if (-not (Test-Path $reg)) { New-Item $reg | Out-Null }
 New-ItemProperty $reg -Name DefaultShell -Value $bash -PropertyType String -Force | Out-Null
 New-ItemProperty $reg -Name DefaultShellCommandOption -Value '-c' -PropertyType String -Force | Out-Null
 
+# Мёртвого клиента (хаб уснул, упал ssh) sshd замечает за ~30 с и сносит сессию. Команда с
+# выводом это ловит на первой же записи в закрытый канал: `ferry desk` падает, демон гасит
+# дерево. (Совсем молчаливую бесконечную команду так не убить — это и ssh -tt только через PTY.)
+# Вставляем ДО первого блока Match, иначе директивы уедут в его условную область.
+$cfg = Join-Path $env:ProgramData 'ssh\sshd_config'
+$body = @(Get-Content $cfg) | Where-Object { $_ -notmatch '^\s*ClientAlive(Interval|CountMax)\b' }
+$keepalive = @('ClientAliveInterval 15', 'ClientAliveCountMax 2')
+$at = [Array]::FindIndex([string[]]$body, [Predicate[string]] { param($l) $l -match '^\s*Match\b' })
+$lines =
+if ($at -gt 0) { $body[0..($at - 1)] + $keepalive + $body[$at..($body.Length - 1)] }
+elseif ($at -eq 0) { $keepalive + $body }  # Match первой строкой — кладём перед ней
+else { $body + $keepalive }                # Match нет — в конец, это и есть глобальная область
+Set-Content $cfg $lines -Encoding Ascii
+
 Step 'Брандмауэр: SSH только из локальной сети'
 $rule = 'OpenSSH-Server-In-TCP'
 if (-not (Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue)) {
