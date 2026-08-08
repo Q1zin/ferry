@@ -247,7 +247,7 @@ fn finish(out: &Mutex<Option<TcpStream>>, msg: &[u8], code: i32) -> io::Result<(
     stream.write_all(&code.to_le_bytes())
 }
 
-fn read_field(r: &mut impl Read) -> io::Result<Vec<u8>> {
+pub(crate) fn read_field(r: &mut impl Read) -> io::Result<Vec<u8>> {
     let mut len = [0; 4];
     r.read_exact(&mut len)?;
     let len = u32::from_le_bytes(len);
@@ -259,7 +259,7 @@ fn read_field(r: &mut impl Read) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_field(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
+pub(crate) fn write_field(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
     w.write_all(&(data.len() as u32).to_le_bytes())?;
     w.write_all(data)
 }
@@ -276,7 +276,7 @@ fn write_state(text: &str) -> io::Result<()> {
 
 // ponytail: токен из ключей SipHash, которые std берёт у ОС, а не из CSPRNG; для сокета
 // на 127.0.0.1 этого хватает, понадобится строже — крейт getrandom.
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     let state = RandomState::new();
     (0..2u64)
         .map(|i| format!("{:016x}", state.hash_one(i)))

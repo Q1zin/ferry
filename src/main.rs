@@ -1,5 +1,8 @@
 mod desk;
+mod doctor;
 mod hub;
+mod project;
+mod relay;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -11,20 +14,29 @@ ferry — разработка на нескольких машинах: это�
 На хабе:
   ferry add <узел> <user@адрес>     записать узел и проверить связь
   ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол
+  ferry doctor <узел>               готов ли узел собирать этот проект: инструменты,
+                                    доступ к git-зависимостям, файлы проекта
   ferry sync <узел>                 рабочее дерево проекта → ~/ferry/<проект> на узле
   ferry run <узел> [--desk] [--no-sync] [--] <команда>
                                     sync, затем команда в том же подкаталоге проекта на узле;
                                     --desk — на рабочем столе узла (окна, фокус, GUI-тесты)
   ferry pull <узел>                 правки, сделанные на узле, — сюда
+  ferry put <узел> <файл>...        файлы отсюда — на то же место в проекте на узле
+  ferry get <узел> <путь> [куда]    файл или каталог с узла — сюда (~/… — от дома узла)
   ferry shot <узел> [файл.png]      снимок экрана узла (по умолчанию ~/.ferry/shots/<узел>.png)
   ferry stop <узел>                 снять все команды, запущенные через --desk
   ferry update <узел> <ferry.exe>   заменить ferry на узле и перезапустить демон
+  ferry restart <узел>              перезапустить демон (подхватит новый PATH)
+  ferry trust [<хост>]              git с хоста на узлах — через ключи этого хаба (только
+                                    чтение); без аргумента — список доверенных хостов
 
 На узле:
   ferry daemon                      принимать команды рабочего стола (запускает планировщик)
   ferry desk <команда>              выполнить команду на рабочем столе этой машины
   ferry screenshot <файл.png>       снимок экрана этой машины (запускать через desk)
   ferry stop                        снять все команды рабочего стола
+
+Служебные: ferry relay — релей git на хабе, ferry ssh — ssh для git на узле.
 ";
 
 fn main() {
@@ -36,10 +48,19 @@ fn main() {
         ["sync", host] => hub::sync(host),
         ["run", host, rest @ ..] => run(host, rest),
         ["pull", host] => hub::pull(host),
+        ["put", host, paths @ ..] if !paths.is_empty() => hub::put(host, paths),
+        ["get", host, path] => hub::get(host, path, None),
+        ["get", host, path, dest] => hub::get(host, path, Some(dest)),
         ["shot", host] => hub::shot(host, None),
         ["shot", host, file] => hub::shot(host, Some(file)),
         ["stop", host] => hub::stop(host),
+        ["doctor", host] => hub::doctor(host),
         ["update", host, file] => hub::update(host, file),
+        ["restart", host] => hub::restart(host),
+        ["trust"] => relay::trust(None),
+        ["trust", host] => relay::trust(Some(host)),
+        ["relay"] => relay::serve(),
+        ["ssh", args @ ..] => relay::ssh(args),
         ["daemon"] => desk::daemon(),
         // Аргументы склеиваются через пробел и уходят в shell одной строкой, как у ssh.
         ["desk", cmd @ ..] if !cmd.is_empty() => desk::run(&cmd.join(" ")),
@@ -100,6 +121,11 @@ fn write_private(path: &Path, text: &str) -> io::Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options.open(path)?.write_all(text.as_bytes())
+}
+
+/// Строка в одинарных кавычках для POSIX-шелла узла (там Git Bash или zsh).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 fn exit_code(status: ExitStatus) -> i32 {
