@@ -39,7 +39,7 @@ const MAX_FIELD: u32 = 1 << 20;
 const TAIL: Duration = Duration::from_millis(500);
 
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn daemon() -> io::Result<i32> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -58,7 +58,12 @@ pub fn daemon() -> io::Result<i32> {
     Ok(0)
 }
 
+/// Узловой `ferry stop`: фоновые задачи и команды, которые сейчас выполняет демон.
 pub fn stop() -> io::Result<i32> {
+    let jobs = crate::jobs::kill_all()?;
+    if jobs > 0 {
+        println!("ferry: остановлено задач: {jobs}");
+    }
     run("")
 }
 
@@ -164,9 +169,23 @@ fn serve(stream: TcpStream, token: &str, jobs: &Jobs) -> io::Result<()> {
 
     if cmd.is_empty() {
         let pids: Vec<u32> = jobs.lock().unwrap().iter().copied().collect();
-        let failed: Vec<String> = pids
-            .iter()
-            .filter_map(|&pid| kill_tree(pid).err().map(|e| format!("{pid}: {e}")))
+        let errors: Vec<_> = pids.iter().map(|&pid| (pid, kill_tree(pid))).collect();
+        // Код taskkill не показатель (часть дерева умирает сама, пока его обходят) — провал
+        // только у тех, кто через пару секунд всё ещё числится выполняемым.
+        for _ in 0..20 {
+            if pids.iter().all(|pid| !jobs.lock().unwrap().contains(pid)) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let running = jobs.lock().unwrap().clone();
+        let failed: Vec<String> = errors
+            .into_iter()
+            .filter(|(pid, _)| running.contains(pid))
+            .map(|(pid, result)| match result {
+                Err(e) => format!("{pid}: {e}"),
+                Ok(()) => format!("{pid}: всё ещё работает"),
+            })
             .collect();
         if failed.is_empty() {
             let msg = format!("ferry: остановлено команд: {}\n", pids.len());
@@ -283,7 +302,7 @@ pub(crate) fn new_token() -> String {
         .collect()
 }
 
-fn shell(cmd: &str) -> Command {
+pub(crate) fn shell(cmd: &str) -> Command {
     let mut command = Command::new(shell_path());
     #[cfg(windows)]
     {
@@ -316,7 +335,7 @@ fn shell_path() -> OsString {
 
 // ponytail: taskkill /t идёт по ссылкам на родителя, поэтому процессы, чей родитель уже
 // вышел, переживут обрыв; если начнут мешать — Job Object с KILL_ON_JOB_CLOSE.
-fn kill_tree(pid: u32) -> io::Result<()> {
+pub(crate) fn kill_tree(pid: u32) -> io::Result<()> {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;

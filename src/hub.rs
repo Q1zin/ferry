@@ -102,15 +102,7 @@ pub fn sync(host: &str) -> io::Result<i32> {
 
 pub fn run(host: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
     node(host)?;
-    let dir = match repo()? {
-        Some(repo) => {
-            if sync {
-                sync_repo(host, &repo)?;
-            }
-            format!("ferry/{}/{}", repo.name, repo.prefix)
-        }
-        None => ".".into(),
-    };
+    let dir = project_dir(host, sync)?;
     // Команда разбирается шеллом узла ровно один раз — и в обычном режиме, и через desk.
     // Окружение для релея git — внутри неё: у демона рабочего стола своё окружение.
     let cmd = format!("{}{cmd}", crate::relay::node_env()?);
@@ -119,18 +111,166 @@ pub fn run(host: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
     } else {
         cmd
     };
+    exec_ssh(host, &format!("cd {} && {cmd}", sh_quote(&dir)))
+}
+
+/// Фоновая задача на рабочем столе узла — там же, где выполнился бы `run`.
+pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
+    node(host)?;
+    let dir = project_dir(host, sync)?;
+    // Окружение релея — у запуска задачи: надсмотрщик и команда наследуют его, а в списке
+    // задач остаётся сама команда.
+    let env = crate::relay::node_env()?;
+    let job = format!("{env}ferry job {} {}", sh_quote(name), sh_quote(cmd));
+    let remote = format!("cd {} && ferry desk {}", sh_quote(&dir), sh_quote(&job));
+    remote_status(host, &remote)
+}
+
+pub fn jobs(host: &str) -> io::Result<i32> {
+    node(host)?;
+    remote_status(host, "ferry jobs")
+}
+
+pub fn log(host: &str, name: &str, follow: bool) -> io::Result<i32> {
+    node(host)?;
+    let follow = if follow { " -f" } else { "" };
+    exec_ssh(host, &format!("ferry log {}{follow}", sh_quote(name)))
+}
+
+pub fn kill(host: &str, name: &str) -> io::Result<i32> {
+    node(host)?;
+    remote_status(host, &format!("ferry kill {}", sh_quote(name)))
+}
+
+/// Каталог на узле, где выполнять команду: тот же подкаталог проекта (после sync) или дом.
+fn project_dir(host: &str, sync: bool) -> io::Result<String> {
+    let Some(repo) = repo()? else {
+        return Ok(".".into());
+    };
+    if sync {
+        sync_repo(host, &repo)?;
+    }
+    Ok(format!("ferry/{}/{}", repo.name, repo.prefix))
+}
+
+/// ssh вместо себя: сигнал по pid ferry (Ctrl-C, kill, таймаут вызывающего) достаётся
+/// самому ssh, и канал на узле закрывается, а не висит за осиротевшим ssh.
+fn exec_ssh(host: &str, remote: &str) -> io::Result<i32> {
     let mut ssh = Command::new("ssh");
     if io::stdin().is_terminal() {
         ssh.arg("-t");
     }
-    let remote = format!("cd {} && {cmd}", sh_quote(&dir));
-    ssh.args([host, &remote]);
-    // exec, а не дочерний процесс: сигнал по pid ferry (Ctrl-C, kill, таймаут вызывающего)
-    // достаётся самому ssh, и канал на узле закрывается, а не висит за осиротевшим ssh.
+    ssh.args([host, remote]);
     #[cfg(unix)]
     return Err(std::os::unix::process::CommandExt::exec(&mut ssh));
     #[cfg(not(unix))]
     Ok(exit_code(ssh.status()?))
+}
+
+/// Без аргументов — открытые туннели; с узлом и портом — открыть (или закрыть, `close`).
+/// Порт тот же с обеих сторон: CDP отдаёт в `/json/version` ws-адрес со своим портом.
+/// Каждый туннель — своё фоновое ssh-соединение с сокетом `~/.ferry/tun-<узел>-<порт>`:
+/// живёт, пока не закроешь или узел не пропадёт, и не зависит от общего ControlMaster.
+pub fn tunnel(target: Option<(&str, &str)>, close: bool) -> io::Result<i32> {
+    let Some((host, port)) = target else {
+        return tunnels();
+    };
+    node(host)?;
+    let port: u16 = port
+        .parse()
+        .map_err(|_| io::Error::other(format!("порт — число, а не {port:?}")))?;
+    let socket = ferry_home()?.join(format!("tun-{host}-{port}"));
+    let log = socket.with_extension("log");
+    let open = tunnel_open(host, &socket);
+    if close {
+        if open {
+            let _ = Command::new("ssh")
+                .arg("-S")
+                .arg(&socket)
+                .args(["-O", "exit", host])
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = fs::remove_file(&log);
+        eprintln!("ferry: туннель {host}:{port} закрыт");
+        return Ok(0);
+    }
+    if open {
+        eprintln!("ferry: туннель уже открыт: 127.0.0.1:{port} → {host}:{port}");
+        return Ok(0);
+    }
+    if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        return Err(io::Error::other(format!(
+            "порт {port} здесь занят — запусти на узле на другом порту"
+        )));
+    }
+    // -E: ssh -f не закрывает stdio, поэтому ошибки — в файл, а не в наш stderr.
+    // LogLevel=ERROR: молчим о RemoteForward релея, который уже держит общее соединение.
+    let ok = Command::new("ssh")
+        .args([
+            "-f",
+            "-N",
+            "-M",
+            "-o",
+            "ControlPersist=no",
+            "-o",
+            "LogLevel=ERROR",
+        ])
+        .arg("-S")
+        .arg(&socket)
+        .arg("-E")
+        .arg(&log)
+        .arg("-L")
+        .arg(format!("127.0.0.1:{port}:127.0.0.1:{port}"))
+        .arg(host)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success();
+    if !ok || !tunnel_open(host, &socket) {
+        let why = fs::read_to_string(&log).unwrap_or_default();
+        return Err(io::Error::other(format!(
+            "туннель не открылся: {}",
+            why.trim()
+        )));
+    }
+    eprintln!("ferry: 127.0.0.1:{port} → {host}:{port}");
+    Ok(0)
+}
+
+fn tunnel_open(host: &str, socket: &Path) -> bool {
+    socket.exists()
+        && Command::new("ssh")
+            .arg("-S")
+            .arg(socket)
+            .args(["-O", "check", host])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
+fn tunnels() -> io::Result<i32> {
+    let mut found = false;
+    for entry in fs::read_dir(ferry_home()?)?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((host, port)) = name
+            .strip_prefix("tun-")
+            .filter(|n| !n.ends_with(".log"))
+            .and_then(|n| n.rsplit_once('-'))
+        else {
+            continue;
+        };
+        if tunnel_open(host, &entry.path()) {
+            println!("127.0.0.1:{port} → {host}:{port}");
+            found = true;
+        }
+    }
+    if !found {
+        eprintln!("ferry: туннелей нет; открыть — ferry tunnel <узел> <порт>");
+    }
+    Ok(0)
 }
 
 pub fn pull(host: &str) -> io::Result<i32> {
@@ -297,9 +437,11 @@ pub fn restart(host: &str) -> io::Result<i32> {
 }
 
 /// Демон перезапускает планировщик — так он снова окажется на рабочем столе, а не в Session 0.
+/// Ждём до минуты: новый ferry.exe с незнакомым хешем Defender перед первым запуском
+/// отправляет на облачную проверку («block at first sight»), это бывает дольше 10 секунд.
 const RESTART: &str = "schtasks //end //tn ferry >/dev/null 2>&1; rm -f ~/.ferry/desk \
     && schtasks //run //tn ferry >/dev/null \
-    && for i in $(seq 50); do [ -f ~/.ferry/desk ] && break; sleep 0.2; done \
+    && for i in $(seq 300); do [ -f ~/.ferry/desk ] && break; sleep 0.2; done \
     && ferry desk 'echo ferry: daemon restarted'";
 
 fn windows_node(host: &str) -> io::Result<()> {
