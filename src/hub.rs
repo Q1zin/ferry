@@ -38,9 +38,10 @@ pub fn add(name: &str, target: &str) -> io::Result<i32> {
     // BatchMode: ssh не ждёт пароль, а сразу падает — для Claude и скриптов это важнее.
     // ControlMaster: одно соединение на узел, остальные команды идут без handshake.
     // RemoteForward: порт на узле → релей git этого хаба (см. relay.rs).
+    // HostKeyAlias: ключ узла — под его именем; сменит адрес — ferry find узнает его по ключу.
     let relay = dir.join("relay.sock");
     text.push_str(&format!(
-        "Host {name}\n  HostName {addr}\n  User {user}\n  IdentityFile ~/.ssh/ferry\n  \
+        "Host {name}\n  HostName {addr}\n  HostKeyAlias {name}\n  User {user}\n  IdentityFile ~/.ssh/ferry\n  \
          IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking accept-new\n  \
          ServerAliveInterval 15\n  ControlMaster auto\n  ControlPath ~/.ferry/cm-%C\n  \
          ControlPersist 10m\n  RemoteForward 127.0.0.1:{} \"{}\"\n\n",
@@ -89,9 +90,35 @@ pub fn ls() -> io::Result<i32> {
             .collect()
     });
     for ((name, addr), state) in hosts.iter().zip(states) {
-        println!("{name:<14} {addr:<16} {state}");
+        if state != "нет связи" {
+            println!("{name:<14} {addr:<16} {state}");
+            continue;
+        }
+        // Не отвечает — может, сменил адрес: ищем по ключу хоста.
+        match crate::find::find(name, addr, true) {
+            Ok(Some(found)) if found != *addr => println!("{name:<14} {found:<16} {}", probe(name)),
+            _ => println!("{name:<14} {addr:<16} нет связи (ferry find {name} — подробнее)"),
+        }
     }
     Ok(0)
+}
+
+/// Узел сменил адрес — найти его по ключу хоста и записать новый.
+pub fn find(host: &str) -> io::Result<i32> {
+    node(host)?;
+    let addr = hosts()?
+        .into_iter()
+        .find(|(name, _)| name == host)
+        .map(|(_, addr)| addr)
+        .unwrap_or_default();
+    match crate::find::find(host, &addr, false)? {
+        Some(found) if found == addr => {
+            eprintln!("ferry: {host} на месте — {addr}");
+            Ok(0)
+        }
+        Some(_) => Ok(0),
+        None => Ok(1),
+    }
 }
 
 pub fn sync(host: &str) -> io::Result<i32> {
