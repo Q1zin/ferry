@@ -370,6 +370,72 @@ pub fn get(host: &str, path: &str, dest: Option<&str>) -> io::Result<i32> {
     Ok(0)
 }
 
+/// Окна и настоящий ввод на рабочем столе узла: `ferry input …` через desk.
+pub fn input(host: &str, args: &[&str]) -> io::Result<i32> {
+    node(host)?;
+    let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+    let input = format!("ferry input {}", quoted.join(" "));
+    remote_status(host, &format!("ferry desk {}", sh_quote(&input)))
+}
+
+/// Запись экрана узла кадрами — сюда, в `~/.ferry/recs/<узел>-<время>/`. В stdout — путь к
+/// листу-обзору: одна картинка вместо десятков кадров.
+pub fn rec(host: &str, seconds: &str, fps: &str) -> io::Result<i32> {
+    node(host)?;
+    let ok = |s: &str, max: f64| s.parse::<f64>().is_ok_and(|v| v > 0.0 && v <= max);
+    if !ok(seconds, 300.0) || !ok(fps, 15.0) {
+        return Err(io::Error::other(
+            "секунды — до 300, кадров в секунду — до 15",
+        ));
+    }
+    let record = format!("ferry record {seconds} {fps} .ferry/rec");
+    let frames =
+        text(Command::new("ssh").args([host, &format!("ferry desk {}", sh_quote(&record))]))?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let dir = ferry_home()?.join("recs").join(format!("{host}-{now}"));
+    fs::create_dir_all(&dir)?;
+    let mut ssh = Command::new("ssh")
+        .args([host, "tar -C .ferry/rec -cf - ."])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let unpacked = Command::new("tar")
+        .arg("-C")
+        .arg(&dir)
+        .args(["-xf", "-"])
+        .stdin(ssh.stdout.take().unwrap())
+        .status()?;
+    if !ssh.wait()?.success() || !unpacked.success() {
+        return Err(io::Error::other("кадры с узла не забрались"));
+    }
+
+    // ffmpeg необязателен: есть — склеим и видео.
+    let video = dir.join("video.mp4");
+    let encoded = Command::new("ffmpeg")
+        .args(["-loglevel", "error", "-y", "-framerate", fps, "-i"])
+        .arg(dir.join("frame-%04d.png"))
+        .args([
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        ])
+        .arg(&video)
+        .stdin(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let video = if encoded {
+        format!(", видео: {}", video.display())
+    } else {
+        String::new()
+    };
+    eprintln!("ferry: {} кадров в {}{video}", frames.trim(), dir.display());
+    println!("{}", dir.join("sheet.png").display());
+    Ok(0)
+}
+
 pub fn shot(host: &str, file: Option<&str>) -> io::Result<i32> {
     node(host)?;
     let file = match file {
