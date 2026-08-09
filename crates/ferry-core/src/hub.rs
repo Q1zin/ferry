@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::mode::{GUARD, Mode};
 use crate::{exit_code, ferry_home, home, sh_quote, write_private};
 
 const INCLUDE: &str = "Include ~/.ferry/ssh_config";
@@ -26,6 +27,11 @@ pub fn add(name: &str, target: &str) -> io::Result<i32> {
     // Всё это уходит в ssh_config как есть: пробел или перевод строки дописали бы свои опции.
     let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     check("имя узла", name, alias)?;
+    if Mode::parse(name).is_some() {
+        return Err(io::Error::other(format!(
+            "{name:?} — имя режима, назови узел иначе"
+        )));
+    }
     check("пользователь", user, |c| {
         !c.is_whitespace() && !c.is_control() && c != '"'
     })?;
@@ -153,6 +159,16 @@ pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
     remote_status(host, &remote)
 }
 
+/// Режим узла — его выбирают на самом узле, хаб только смотрит.
+pub fn mode(host: &str) -> io::Result<i32> {
+    node(host)?;
+    let status = Command::new("ssh")
+        .args([host, "ferry mode"])
+        .stdin(Stdio::null())
+        .status()?;
+    Ok(exit_code(status))
+}
+
 pub fn jobs(host: &str) -> io::Result<i32> {
     node(host)?;
     remote_status(host, "ferry jobs")
@@ -187,7 +203,7 @@ fn exec_ssh(host: &str, remote: &str) -> io::Result<i32> {
     if io::stdin().is_terminal() {
         ssh.arg("-t");
     }
-    ssh.args([host, remote]);
+    ssh.args([host, &format!("{GUARD}{remote}")]);
     #[cfg(unix)]
     return Err(std::os::unix::process::CommandExt::exec(&mut ssh));
     #[cfg(not(unix))]
@@ -379,10 +395,7 @@ pub fn get(host: &str, path: &str, dest: Option<&str>) -> io::Result<i32> {
     fs::create_dir_all(&dest)?;
 
     let pack = format!("tar -C {} -cf - {}", sh_quote(dir), sh_quote(name));
-    let mut ssh = Command::new("ssh")
-        .args([host, &pack])
-        .stdout(Stdio::piped())
-        .spawn()?;
+    let mut ssh = ssh_on(host, &pack).stdout(Stdio::piped()).spawn()?;
     let unpacked = Command::new("tar")
         .arg("-C")
         .arg(&dest)
@@ -416,16 +429,17 @@ pub fn rec(host: &str, seconds: &str, fps: &str) -> io::Result<i32> {
         ));
     }
     let record = format!("ferry record {seconds} {fps} .ferry/rec");
-    let frames =
-        text(Command::new("ssh").args([host, &format!("ferry desk {}", sh_quote(&record))]))?;
+    let frames = text(&mut ssh_on(
+        host,
+        &format!("ferry desk {}", sh_quote(&record)),
+    ))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let dir = ferry_home()?.join("recs").join(format!("{host}-{now}"));
     fs::create_dir_all(&dir)?;
-    let mut ssh = Command::new("ssh")
-        .args([host, "tar -C .ferry/rec -cf - ."])
+    let mut ssh = ssh_on(host, "tar -C .ferry/rec -cf - .")
         .stdout(Stdio::piped())
         .spawn()?;
     let unpacked = Command::new("tar")
@@ -473,7 +487,10 @@ pub fn shot(host: &str, file: Option<&str>) -> io::Result<i32> {
             dir.join(format!("{host}.png"))
         }
     };
-    output(Command::new("ssh").args([host, "ferry desk 'ferry screenshot .ferry/shot.png'"]))?;
+    output(&mut ssh_on(
+        host,
+        "ferry desk 'ferry screenshot .ferry/shot.png'",
+    ))?;
     output(
         Command::new("scp")
             .arg("-q")
@@ -489,13 +506,17 @@ pub fn stop(host: &str) -> io::Result<i32> {
     remote_status(host, "ferry stop")
 }
 
+/// ssh с командой на узле — с проверкой режима узла впереди: на паузе узел отказывает.
+fn ssh_on(host: &str, remote: &str) -> Command {
+    let mut ssh = Command::new("ssh");
+    ssh.args([host, &format!("{GUARD}{remote}")]);
+    ssh
+}
+
 /// ssh-команда без stdin: ей нечего с него читать, а в фоне (`ferry stop &`) ssh,
 /// читающий терминал, встал бы по SIGTTIN.
 fn remote_status(host: &str, cmd: &str) -> io::Result<i32> {
-    let status = Command::new("ssh")
-        .args([host, cmd])
-        .stdin(Stdio::null())
-        .status()?;
+    let status = ssh_on(host, cmd).stdin(Stdio::null()).status()?;
     Ok(exit_code(status))
 }
 
@@ -539,7 +560,7 @@ const RESTART: &str = "schtasks //end //tn ferry >/dev/null 2>&1; rm -f ~/.ferry
 
 fn windows_node(host: &str) -> io::Result<()> {
     node(host)?;
-    let os = text(Command::new("ssh").args([host, "uname -s"]))?;
+    let os = text(&mut ssh_on(host, "uname -s"))?;
     if os.starts_with("MINGW") || os.starts_with("MSYS") {
         return Ok(());
     }
@@ -639,7 +660,7 @@ fn sync_repo(host: &str, repo: &Repo) -> io::Result<()> {
         "cd {} && git checkout -q -f --detach {commit}",
         sh_quote(&dir)
     );
-    output(Command::new("ssh").args([host, &checkout]))?;
+    output(&mut ssh_on(host, &checkout))?;
 
     // Файлы мимо git (`.env`) — из настроек проекта на хабе.
     let mut extra = Vec::new();
@@ -677,11 +698,7 @@ fn send(host: &str, base: &Path, rels: &[PathBuf], dir: &str) -> io::Result<()> 
         .stdout(Stdio::piped())
         .spawn()?;
     let unpack = format!("mkdir -p {dir} && tar -C {dir} -xf -", dir = sh_quote(dir));
-    let unpacked = output(
-        Command::new("ssh")
-            .args([host, &unpack])
-            .stdin(tar.stdout.take().unwrap()),
-    );
+    let unpacked = output(ssh_on(host, &unpack).stdin(tar.stdout.take().unwrap()));
     if !tar.wait()?.success() {
         return Err(io::Error::other("tar здесь не собрал архив"));
     }
@@ -737,7 +754,7 @@ git add -A
 t=$(git write-tree)
 [ $t = $(git rev-parse 'HEAD^{{tree}}') ] || [ $t = {keep} ] || git diff --cached --binary HEAD"
     );
-    output(Command::new("ssh").args([host, &script]))
+    output(&mut ssh_on(host, &script))
 }
 
 fn save_patch(host: &str, repo: &Repo, patch: &[u8]) -> io::Result<PathBuf> {
@@ -779,7 +796,7 @@ fn node(name: &str) -> io::Result<()> {
 fn probe(host: &str) -> String {
     let out = Command::new("ssh")
         .args(["-o", "ConnectTimeout=3", host])
-        .arg("uname -s; ferry desk true >/dev/null 2>&1 && echo desk")
+        .arg("uname -s; cat ~/.ferry/mode 2>/dev/null || echo active; ferry desk true >/dev/null 2>&1 && echo desk")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
@@ -788,10 +805,16 @@ fn probe(host: &str) -> String {
     };
     let out = String::from_utf8_lossy(&out.stdout);
     let mut lines = out.lines();
-    match (lines.next(), lines.next()) {
-        (None, _) => "нет связи".into(),
-        (Some(os), Some("desk")) => format!("{os}, рабочий стол отвечает"),
-        (Some(os), _) => format!("{os}, рабочий стол НЕ отвечает"),
+    let (Some(os), mode, desk) = (lines.next(), lines.next(), lines.next()) else {
+        return "нет связи".into();
+    };
+    match (
+        Mode::parse(mode.unwrap_or_default()).unwrap_or(Mode::Active),
+        desk,
+    ) {
+        (Mode::Active, Some("desk")) => format!("{os}, рабочий стол отвечает"),
+        (Mode::Active, _) => format!("{os}, рабочий стол НЕ отвечает"),
+        (mode, _) => format!("{os}, на узле: {}", mode.label()),
     }
 }
 
