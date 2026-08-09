@@ -1,0 +1,8 @@
+[package]
+name = "ferry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ferry-core = { path = "../ferry-core" }

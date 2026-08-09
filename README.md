@@ -112,9 +112,9 @@ ferry trust git.logarithmica.ru     # один раз на хабе; ferry trust
 ```sh
 brew install mingw-w64
 ssh-keygen -t ed25519 -f ~/.ssh/ferry -N ''
-cargo install --path .                                    # ferry на хабе
+cargo install --path crates/ferry                                  # ferry на хабе
 cargo build --release --target x86_64-pc-windows-gnu      # ferry.exe для узла
-mkdir -p dist && cp target/x86_64-pc-windows-gnu/release/ferry.exe install.ps1 ~/.ssh/ferry.pub dist/
+mkdir -p dist && cp target/x86_64-pc-windows-gnu/release/ferry.exe node/install.ps1 ~/.ssh/ferry.pub dist/
 python3 -m http.server 8000 -d dist                       # раздать установщик на время установки
 ```
 
