@@ -7,6 +7,7 @@ pub mod find;
 pub mod hub;
 pub mod jobs;
 pub mod mode;
+pub mod nodes;
 pub mod project;
 pub mod relay;
 pub mod screen;

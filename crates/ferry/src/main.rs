@@ -11,6 +11,9 @@ ferry — разработка на нескольких машинах: это�
   ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол;
                                     сменивший адрес узел ищет сам
   ferry find <узел>                 найти узел по ключу хоста: tailnet, затем подсети хаба
+  ferry pause | resume <узел>       пауза на хабе: ferry не трогает узел (унесли домой)
+  ferry rename <узел> <новое имя>   переименовать узел
+  ferry remove <узел>               убрать узел с хаба (ferry на нём останется)
   ferry doctor <узел>               готов ли узел собирать этот проект: инструменты,
                                     доступ к git-зависимостям, файлы проекта
   ferry sync <узел>                 рабочее дерево проекта → ~/ferry/<проект> на узле
@@ -76,6 +79,10 @@ fn main() {
         ["add", name, target] => hub::add(name, target),
         ["ls"] => hub::ls(),
         ["find", host] => hub::find(host),
+        ["pause", host] => hub::pause(host, true),
+        ["resume", host] => hub::pause(host, false),
+        ["rename", old, new] => hub::rename(old, new),
+        ["remove", host] => hub::remove(host),
         ["sync", host] => hub::sync(host),
         ["run", host, rest @ ..] => run(host, rest),
         ["pull", host] => hub::pull(host),
