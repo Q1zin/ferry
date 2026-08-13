@@ -99,30 +99,35 @@ fn main() {
         ["stop", host] => hub::stop(host),
         ["doctor", host] => hub::doctor(host),
         ["start", host, name, rest @ ..] => start(host, name, rest),
+        // Раньше `jobs <узел>`: иначе `--tsv` приняли бы за имя узла.
+        ["jobs", "--tsv"] => jobs::list(true),
         ["jobs", host] => hub::jobs(host),
         ["log", host, name] if *name != "-f" => hub::log(host, name, false),
         ["log", host, name, "-f"] => hub::log(host, name, true),
-        ["kill", host, name] => hub::kill(host, name),
+        ["kill", host, name] => said(hub::kill(host, name)),
         ["tunnel"] => hub::tunnel(None, false),
         ["tunnel", host, port] => hub::tunnel(Some((host, port)), false),
         ["tunnel", host, port, "--close"] => hub::tunnel(Some((host, port)), true),
-        ["windows", host] => hub::input(host, &["windows"]),
-        ["move", host, x, y] => hub::input(host, &["move", x, y]),
+        ["windows", host] => hub::input(host, &["windows"]).map(|list| {
+            println!("{}", list.trim_end());
+            0
+        }),
+        ["move", host, x, y] => said(hub::input(host, &["move", x, y])),
         ["click", host, x, y, how @ ..] => {
-            hub::input(host, &[&["click", *x, *y][..], how].concat())
+            said(hub::input(host, &[&["click", *x, *y][..], how].concat()))
         }
-        ["scroll", host, clicks] => hub::input(host, &["scroll", clicks]),
+        ["scroll", host, clicks] => said(hub::input(host, &["scroll", clicks])),
         ["type", host, text @ ..] if !text.is_empty() => {
-            hub::input(host, &["type", text.join(" ").as_str()])
+            said(hub::input(host, &["type", text.join(" ").as_str()]))
         }
         ["key", host, combos @ ..] if !combos.is_empty() => {
-            hub::input(host, &[&["key"][..], combos].concat())
+            said(hub::input(host, &[&["key"][..], combos].concat()))
         }
         ["rec", host, seconds] => hub::rec(host, seconds, "5"),
         ["rec", host, seconds, fps] => hub::rec(host, seconds, fps),
         ["update", host, file] => hub::update(host, file),
-        ["restart", host] => hub::restart(host),
-        ["power", host, action] => hub::power(host, action),
+        ["restart", host] => said(hub::restart(host)),
+        ["power", host, action] => said(hub::power(host, action)),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["relay"] => relay::serve(),
@@ -144,7 +149,7 @@ fn main() {
         ["mode", host] => hub::mode(host),
         ["job", name, cmd @ ..] if !cmd.is_empty() => jobs::start(name, &cmd.join(" ")),
         ["job-supervise", name] => jobs::supervise(name),
-        ["jobs"] => jobs::list(),
+        ["jobs"] => jobs::list(false),
         ["log", name] => jobs::log(name, false),
         ["log", name, "-f"] => jobs::log(name, true),
         ["kill", name] => jobs::kill(name),
@@ -198,6 +203,15 @@ fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
         return usage();
     }
     hub::start(host, name, sync, &rest.join(" "))
+}
+
+/// Ответ действия — в stderr, как остальные сообщения ferry; stdout остаётся для данных.
+fn said(result: io::Result<String>) -> io::Result<i32> {
+    let text = result?;
+    if !text.trim().is_empty() {
+        eprintln!("{}", text.trim_end());
+    }
+    Ok(0)
 }
 
 fn usage() -> io::Result<i32> {

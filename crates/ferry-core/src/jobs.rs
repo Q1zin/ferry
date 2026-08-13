@@ -83,7 +83,36 @@ pub fn supervise(name: &str) -> io::Result<i32> {
     Ok(code)
 }
 
-pub fn list() -> io::Result<i32> {
+/// Задача узла — для `ferry jobs` и приложения хаба.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Job {
+    pub name: String,
+    /// `running`, `exit:<код>`, `killed` или `lost` (надсмотрщик умер, не записав код).
+    pub state: String,
+    /// Когда запущена, секунды Unix.
+    pub started: Option<u64>,
+    /// Первая строка команды.
+    pub cmd: String,
+}
+
+impl Job {
+    pub fn label(&self) -> String {
+        label(&self.state)
+    }
+
+    pub fn running(&self) -> bool {
+        self.state == "running"
+    }
+
+    pub fn ago(&self) -> String {
+        self.started
+            .map(|t| ago(now().saturating_sub(t)))
+            .unwrap_or_default()
+    }
+}
+
+/// Задачи этой машины по имени.
+pub fn rows() -> io::Result<Vec<Job>> {
     let mut names: Vec<String> = match fs::read_dir(crate::ferry_home()?.join("jobs")) {
         Ok(entries) => entries
             .flatten()
@@ -91,28 +120,58 @@ pub fn list() -> io::Result<i32> {
             .collect(),
         Err(_) => Vec::new(),
     };
-    if names.is_empty() {
-        eprintln!("ferry: задач нет");
-        return Ok(0);
-    }
     names.sort();
+    let mut jobs = Vec::new();
     for name in names {
         let dir = dir(&name)?;
-        let started = read(&dir, "started").and_then(|t| t.parse::<u64>().ok());
-        let ago = started
-            .map(|t| ago(now().saturating_sub(t)))
-            .unwrap_or_default();
-        let cmd: String = read(&dir, "cmd")
-            .unwrap_or_default()
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(70)
-            .collect();
-        println!("{name:<14} {:<22} {ago:<12} {cmd}", state(&dir));
+        let cmd = read(&dir, "cmd").unwrap_or_default();
+        jobs.push(Job {
+            state: code(&dir),
+            started: read(&dir, "started").and_then(|t| t.parse().ok()),
+            cmd: cmd.lines().next().unwrap_or_default().replace('\t', " "),
+            name,
+        });
+    }
+    Ok(jobs)
+}
+
+/// `ferry jobs [--tsv]`: таблица для человека или строки `имя\tсостояние\tзапущена\tкоманда`.
+pub fn list(tsv: bool) -> io::Result<i32> {
+    let jobs = rows()?;
+    if tsv {
+        for job in jobs {
+            let started = job.started.map(|s| s.to_string()).unwrap_or_default();
+            println!("{}\t{}\t{started}\t{}", job.name, job.state, job.cmd);
+        }
+        return Ok(0);
+    }
+    if jobs.is_empty() {
+        eprintln!("ferry: задач нет");
+    }
+    for job in jobs {
+        let cmd: String = job.cmd.chars().take(70).collect();
+        println!(
+            "{:<14} {:<22} {:<12} {cmd}",
+            job.name,
+            job.label(),
+            job.ago()
+        );
     }
     Ok(0)
+}
+
+pub fn parse_tsv(text: &str) -> Vec<Job> {
+    text.lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(4, '\t');
+            Some(Job {
+                name: fields.next()?.to_string(),
+                state: fields.next()?.to_string(),
+                started: fields.next()?.parse().ok(),
+                cmd: fields.next().unwrap_or_default().to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Лог задачи; с `follow` — дописывать новое, пока задача работает, и выйти с её кодом.
@@ -182,12 +241,28 @@ pub fn kill_all() -> io::Result<usize> {
 }
 
 fn state(dir: &Path) -> String {
+    label(&code(dir))
+}
+
+fn code(dir: &Path) -> String {
     match (read(dir, "killed"), read(dir, "exit")) {
-        (Some(_), _) => "остановлена".into(),
-        (None, Some(code)) => format!("завершилась, код {code}"),
-        (None, None) if running(dir) => "работает".into(),
+        (Some(_), _) => "killed".into(),
+        (None, Some(code)) => format!("exit:{code}"),
+        (None, None) if running(dir) => "running".into(),
+        (None, None) => "lost".into(),
+    }
+}
+
+fn label(code: &str) -> String {
+    match code {
+        "running" => "работает".into(),
+        "killed" => "остановлена".into(),
         // Надсмотрщик умер, не записав код: выход из системы, его убили вручную.
-        (None, None) => "пропала".into(),
+        "lost" => "пропала".into(),
+        other => match other.strip_prefix("exit:") {
+            Some(code) => format!("завершилась, код {code}"),
+            None => other.into(),
+        },
     }
 }
 
@@ -276,5 +351,24 @@ fn ago(secs: u64) -> String {
         0..60 => format!("{secs} с назад"),
         60..3600 => format!("{} мин назад", secs / 60),
         _ => format!("{} ч назад", secs / 3600),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tsv_round_trips_jobs() {
+        let text = "app\trunning\t1792300000\t./app.exe --port 9322\nbuild\texit:3\t1792300100\tcargo build\nold\tkilled\t\tsleep 300\n";
+        let jobs = parse_tsv(text);
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0].cmd, "./app.exe --port 9322");
+        assert!(jobs[0].running());
+        assert_eq!(jobs[1].label(), "завершилась, код 3");
+        assert_eq!(
+            (jobs[2].started, jobs[2].label().as_str()),
+            (None, "остановлена")
+        );
     }
 }
