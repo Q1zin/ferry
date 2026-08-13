@@ -562,6 +562,38 @@ pub fn update(host: &str, file: &str) -> io::Result<i32> {
     remote_status(host, &format!("{swap} && {RESTART}; {cleanup}"))
 }
 
+/// Питание узла. Перезагрузка и выключение — через 10 с, их можно отменить: `cancel`.
+pub fn power(host: &str, action: &str) -> io::Result<i32> {
+    windows_node(host)?;
+    let (remote, done) = match action {
+        "reboot" => (
+            "shutdown //r //t 10 //c 'ferry: перезагрузка с хаба'",
+            "перезагрузится через 10 с (отменить: ferry power <узел> cancel)",
+        ),
+        "shutdown" => (
+            "shutdown //s //t 10 //c 'ferry: выключение с хаба'",
+            "выключится через 10 с (отменить: ferry power <узел> cancel)",
+        ),
+        // Без ожидания: ssh оборвётся, когда узел уснёт. Разбудить по сети — только по кабелю.
+        "sleep" => (
+            "powershell -NoProfile -c 'Add-Type -AssemblyName System.Windows.Forms; \
+             [System.Windows.Forms.Application]::SetSuspendState([System.Windows.Forms.PowerState]::Suspend, $false, $false)'",
+            "засыпает",
+        ),
+        "cancel" => ("shutdown //a", "перезагрузка или выключение отменены"),
+        _ => {
+            return Err(io::Error::other(
+                "питание: reboot, sleep, shutdown или cancel",
+            ));
+        }
+    };
+    let code = remote_status(host, remote)?;
+    if code == 0 {
+        eprintln!("ferry: {host} {done}");
+    }
+    Ok(code)
+}
+
 /// Перезапустить демон: он снова прочитает окружение (новый PATH и т. п.).
 pub fn restart(host: &str) -> io::Result<i32> {
     windows_node(host)?;
