@@ -124,7 +124,7 @@ fn key(name: &str) -> Option<Key> {
 }
 
 #[cfg(windows)]
-fn powershell(name: &str, script: &str) -> io::Result<Command> {
+pub(crate) fn powershell(name: &str, script: &str) -> io::Result<Command> {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, script)?;
     let mut command = Command::new("powershell");

@@ -1,7 +1,7 @@
 use std::io;
 
 use ferry_core::mode::{self, Mode};
-use ferry_core::{desk, hub, jobs, relay, screen};
+use ferry_core::{desk, hub, info, jobs, relay, screen};
 
 const USAGE: &str = "\
 ferry — разработка на нескольких машинах: этот компьютер — хаб, остальные — узлы
@@ -10,6 +10,7 @@ ferry — разработка на нескольких машинах: это�
   ferry add <узел> <user@адрес>     записать узел и проверить связь
   ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол;
                                     сменивший адрес узел ищет сам
+  ferry info <узел>                 свойства узла: система, железо, питание, экран, ferry
   ferry find <узел>                 найти узел по ключу хоста: tailnet, затем подсети хаба
   ferry pause | resume <узел>       пауза на хабе: ferry не трогает узел (унесли домой)
   ferry rename <узел> <новое имя>   переименовать узел
@@ -64,6 +65,7 @@ ferry — разработка на нескольких машинах: это�
   ferry jobs | log <имя> [-f] | kill <имя>
                                     задачи этой машины
   ferry stop                        снять все команды рабочего стола и задачи
+  ferry info                        свойства этой машины (ключ=значение)
   ferry mode [active|no-desktop|paused]
                                     режим этой машины: работать, не трогать рабочий стол,
                                     отключиться от хаба
@@ -78,6 +80,7 @@ fn main() {
     let result = match args.as_slice() {
         ["add", name, target] => hub::add(name, target),
         ["ls"] => hub::ls(),
+        ["info", host] => hub::info_command(host),
         ["find", host] => hub::find(host),
         ["pause", host] => hub::pause(host, true),
         ["resume", host] => hub::pause(host, false),
@@ -128,6 +131,11 @@ fn main() {
         ["record", seconds, fps, dir] => screen::record(seconds, fps, dir),
         ["input", rest @ ..] => screen::input(rest),
         ["stop"] => desk::stop(),
+        ["info"] => info::command(),
+        ["version" | "--version"] => {
+            println!("ferry {}", ferry_core::VERSION);
+            Ok(0)
+        }
         ["mode"] => mode::command(None),
         ["mode", name] if Mode::parse(name).is_some() => mode::command(Some(name)),
         ["mode", host] => hub::mode(host),
