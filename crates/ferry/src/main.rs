@@ -202,7 +202,7 @@ fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    hub::start(host, name, sync, &rest.join(" "))
+    said(hub::start(host, name, sync, &rest.join(" ")))
 }
 
 /// Ответ действия — в stderr, как остальные сообщения ferry; stdout остаётся для данных.
