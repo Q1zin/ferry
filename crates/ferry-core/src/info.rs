@@ -121,10 +121,10 @@ pub fn warnings(pairs: &[(String, String)]) -> Vec<String> {
             crate::VERSION
         ));
     }
-    if let Some(mode) = get(pairs, "mode").and_then(crate::mode::Mode::parse) {
-        if mode != crate::mode::Mode::Active {
-            out.push(format!("на узле: {}", mode.label()));
-        }
+    if let Some(mode) = get(pairs, "mode").and_then(crate::mode::Mode::parse)
+        && mode != crate::mode::Mode::Active
+    {
+        out.push(format!("на узле: {}", mode.label()));
     }
     out
 }
