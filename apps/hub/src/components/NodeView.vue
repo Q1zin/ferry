@@ -30,8 +30,12 @@ const tab = ref<(typeof tabs)[number]['id']>('overview')
         <span class="muted">{{ node.user }}@{{ node.addr }}</span>
       </div>
       <p class="muted summary">
-        {{ node.summary }}
-        <template v-if="node.latency_ms != null"> · {{ node.latency_ms }} мс</template>
+        <template v-if="node.paused">пауза на хабе</template>
+        <template v-else-if="node.status">
+          {{ node.status.summary }}
+          <template v-if="node.status.latency_ms != null"> · {{ node.status.latency_ms }} мс</template>
+        </template>
+        <span v-else class="skeleton"></span>
       </p>
     </header>
 
@@ -60,6 +64,13 @@ const tab = ref<(typeof tabs)[number]['id']>('overview')
 </template>
 
 <style scoped>
+/* Во всю высоту main: «Экран» тянет снимок под окно. */
+.node-page {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
 header {
   margin-bottom: 16px;
 }
@@ -70,6 +81,7 @@ header h1 {
 
 .summary {
   margin: 4px 0 0 18px;
+  min-height: 1lh;
 }
 
 .tabs {

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api, type NodeRow } from '../api'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { api, blocked as why, type NodeRow } from '../api'
 
 const props = defineProps<{ node: NodeRow }>()
 const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
@@ -14,14 +14,7 @@ const pointer = ref<{ x: number; y: number } | null>(null)
 const img = ref<HTMLImageElement | null>(null)
 
 // Рабочий стол трогать можно, только если узел на связи и в режиме «работает».
-const blocked = computed(() => {
-  if (props.node.paused) return 'Узел на паузе на хабе.'
-  if (!props.node.online) return 'Узел не на связи.'
-  if (props.node.mode && props.node.mode !== 'работает') {
-    return `На узле режим «${props.node.mode}» — рабочий стол трогать нельзя.`
-  }
-  return ''
-})
+const blocked = computed(() => why(props.node, true))
 
 const keys = [
   ['Enter', 'enter'],
@@ -117,7 +110,14 @@ function pressCombo() {
   combo.value = ''
 }
 
-onMounted(shoot)
+// Первый снимок — как только узел ответил на опрос и разрешает рабочий стол.
+watch(
+  blocked,
+  (b) => {
+    if (!b && !image.value) shoot()
+  },
+  { immediate: true },
+)
 onUnmounted(() => {
   live.value = false
   clearTimeout(liveTimer)
@@ -130,14 +130,9 @@ onUnmounted(() => {
     <p v-if="blocked" class="card muted">{{ blocked }}</p>
     <template v-else>
       <div class="row toolbar">
-        <button :disabled="loading" @click="shoot">{{ loading ? 'Снимаю…' : 'Обновить' }}</button>
-        <button :class="{ primary: live }" @click="toggleLive">
-          {{ live ? 'Живой экран: вкл' : 'Живой экран' }}
-        </button>
-        <span class="muted">
-          Клик — клик на узле, правый — правый, двойной — двойной.
-          <template v-if="pointer"> · {{ pointer.x }}, {{ pointer.y }}</template>
-        </span>
+        <button :disabled="loading || live" :aria-busy="loading && !live" @click="shoot">Обновить</button>
+        <button :class="{ primary: live }" :aria-pressed="live" @click="toggleLive">Живой экран</button>
+        <span class="muted">Клики по снимку уходят на узел.</span>
       </div>
 
       <div class="frame">
@@ -152,23 +147,27 @@ onUnmounted(() => {
           @mouseleave="pointer = null"
         />
         <p v-else class="muted placeholder">{{ loading ? 'Снимаю экран узла…' : 'Снимка ещё нет' }}</p>
+        <span v-if="pointer" class="pointer">{{ pointer.x }}, {{ pointer.y }}</span>
       </div>
 
       <div class="row">
         <input v-model="text" class="grow" placeholder="Ввести текст на узле" @keydown.enter="typeText" />
         <button :disabled="!text" @click="typeText">Ввести</button>
-      </div>
-      <div class="row">
-        <button v-for="[title, k] in keys" :key="k" @click="send(['key', k])">{{ title }}</button>
-        <input v-model="combo" placeholder="своя: ctrl+shift+s" @keydown.enter="pressCombo" />
+        <input v-model="combo" class="combo" placeholder="клавиши: ctrl+shift+s" @keydown.enter="pressCombo" />
         <button :disabled="!combo.trim()" @click="pressCombo">Нажать</button>
+      </div>
+      <div class="row keys">
+        <button v-for="[title, k] in keys" :key="k" @click="send(['key', k])">{{ title }}</button>
       </div>
     </template>
   </div>
 </template>
 
 <style scoped>
+/* Снимок занимает остаток высоты окна, но не меньше 220px. Рамка не зависит от снимка:
+   пришёл он или нет, поле ввода и клавиши под ней не двигаются. */
 .screen {
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -179,32 +178,63 @@ onUnmounted(() => {
 }
 
 .frame {
+  position: relative;
+  flex: 1 1 220px;
+  min-height: 220px;
   border: 1px solid var(--line);
   border-radius: 10px;
   overflow: hidden;
   background: #000;
-  min-height: 200px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 
-/* Снимок — целиком в окне, поле ввода и клавиши под ним видны. Пропорции сохраняются без
-   полей по краям: пересчёт клика опирается на рамку картинки. */
+/* Вписан в рамку по центру с сохранением пропорций и без полей внутри картинки:
+   пересчёт клика опирается на её прямоугольник. */
 .frame img {
-  display: block;
-  width: auto;
-  height: auto;
+  position: absolute;
+  inset: 0;
+  margin: auto;
   max-width: 100%;
-  max-height: calc(100vh - 290px);
+  max-height: 100%;
   cursor: crosshair;
 }
 
 .placeholder {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: grid;
+  place-items: center;
   color: #999;
+}
+
+.pointer {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 0.6);
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 .grow {
   flex: 1;
+}
+
+.combo {
+  width: 170px;
+}
+
+/* Компактные: в минимальном окне все клавиши — одной строкой. */
+.keys {
+  gap: 6px;
+}
+
+.keys button {
+  padding: 4px 9px;
+  font-size: 13px;
 }
 </style>

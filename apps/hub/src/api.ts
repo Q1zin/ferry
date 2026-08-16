@@ -2,18 +2,23 @@
 // поэтому всё асинхронно, а ошибки — строки от ferry.
 import { invoke } from '@tauri-apps/api/core'
 
-export type NodeRow = {
+export type NodeEntry = {
   name: string
   addr: string
   user: string
   paused: boolean
+}
+
+export type Status = {
   online: boolean
   summary: string
   mode: string | null
   desk: boolean
   latency_ms: number | null
-  warnings: string[]
 }
+
+/// Узел из реестра и то, что о нём уже известно: `null` — ответ ещё не пришёл.
+export type NodeRow = NodeEntry & { status: Status | null; warnings: string[] | null }
 
 export type Detail = {
   properties: [string, string][]
@@ -29,7 +34,8 @@ export type JobRow = {
 }
 
 export const api = {
-  nodes: () => invoke<NodeRow[]>('nodes'),
+  nodes: () => invoke<NodeEntry[]>('nodes'),
+  status: (host: string) => invoke<Status>('status', { host }),
   detail: (host: string) => invoke<Detail>('detail', { host }),
   jobs: (host: string) => invoke<JobRow[]>('jobs', { host }),
   jobLog: (host: string, name: string) => invoke<string>('job_log', { host, name }),
@@ -51,13 +57,27 @@ export const api = {
 }
 
 /// Состояние узла одним словом — для точки-индикатора и подписи.
-export type Tone = 'ok' | 'quiet' | 'paused' | 'off' | 'warn'
+export type Tone = 'ok' | 'quiet' | 'paused' | 'off' | 'warn' | 'probing'
 
 export function tone(node: NodeRow): Tone {
+  const s = node.status
   if (node.paused) return 'paused'
-  if (!node.online) return 'off'
-  if (node.mode === 'отключён от хаба') return 'paused'
-  if (node.mode === 'не трогать рабочий стол') return 'quiet'
-  if (!node.desk || node.warnings.length) return 'warn'
+  if (!s) return 'probing'
+  if (!s.online) return 'off'
+  if (s.mode === 'отключён от хаба') return 'paused'
+  if (s.mode === 'не трогать рабочий стол') return 'quiet'
+  if (!s.desk || node.warnings?.length) return 'warn'
   return 'ok'
+}
+
+/// Почему с узлом сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий стол.
+export function blocked(node: NodeRow, desk = false): string {
+  const s = node.status
+  if (node.paused) return 'Узел на паузе на хабе.'
+  if (!s) return 'Опрашиваю узел…'
+  if (!s.online) return 'Узел не на связи. Если он сменил адрес — «Найти» в «Обзоре».'
+  if (desk && s.mode && s.mode !== 'работает') {
+    return `На узле режим «${s.mode}» — рабочий стол трогать нельзя.`
+  }
+  return ''
 }

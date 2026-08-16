@@ -4,14 +4,15 @@ import { api } from '../api'
 
 const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 
-const hosts = ref<string[]>([])
+// null — ещё не прочитаны: не говорить «хостов нет» раньше времени.
+const hosts = ref<string[] | null>(null)
 const host = ref('')
 const version = ref('')
+const adding = ref(false)
 
 async function load() {
   try {
-    hosts.value = await api.trusted()
-    version.value = await api.version()
+    ;[hosts.value, version.value] = await Promise.all([api.trusted(), api.version()])
   } catch (e) {
     emit('say', String(e), true)
   }
@@ -20,6 +21,7 @@ async function load() {
 async function add() {
   const h = host.value.trim()
   if (!h) return
+  adding.value = true
   try {
     await api.trust(h)
     emit('say', `git с ${h} на узлах пойдёт через ключи этого хаба (только чтение)`)
@@ -27,6 +29,8 @@ async function add() {
     await load()
   } catch (e) {
     emit('say', String(e), true)
+  } finally {
+    adding.value = false
   }
 }
 
@@ -43,13 +47,14 @@ onMounted(load)
         Хосты, к которым git на узлах ходит через ключи этого хаба: ключ не покидает хаб, релей
         пропускает только чтение.
       </p>
-      <ul v-if="hosts.length">
+      <p v-if="!hosts"><span class="skeleton"></span></p>
+      <ul v-else-if="hosts.length">
         <li v-for="h in hosts" :key="h"><code>{{ h }}</code></li>
       </ul>
       <p v-else class="muted">Доверенных хостов нет.</p>
       <div class="row">
-        <input v-model="host" placeholder="git.example.com" @keydown.enter="add" />
-        <button :disabled="!host.trim()" @click="add">Доверить</button>
+        <input v-model="host" class="grow" placeholder="git.example.com" @keydown.enter="add" />
+        <button :disabled="adding || !host.trim()" :aria-busy="adding" @click="add">Доверить</button>
       </div>
     </div>
 
@@ -85,5 +90,9 @@ onMounted(load)
 ul {
   margin: 0;
   padding-left: 18px;
+}
+
+.grow {
+  flex: 1;
 }
 </style>

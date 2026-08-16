@@ -18,64 +18,44 @@ struct NodeRow {
     addr: String,
     user: String,
     paused: bool,
+}
+
+/// Узлы из реестра — мгновенно, без ssh: статус каждого пульт спрашивает отдельно (`status`)
+/// и показывает по мере ответов.
+#[tauri::command(async)]
+fn nodes() -> Reply<Vec<NodeRow>> {
+    Ok(nodes::list()
+        .map_err(err)?
+        .into_iter()
+        .map(|node| NodeRow {
+            name: node.name,
+            addr: node.addr,
+            user: node.user,
+            paused: node.paused,
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+struct StatusRow {
     online: bool,
     summary: String,
     mode: Option<String>,
     desk: bool,
     latency_ms: Option<u32>,
-    warnings: Vec<String>,
 }
 
-/// Узлы со статусом — для главного экрана. Опрашиваются параллельно внутри ядра.
+/// Статус одного узла: ssh с таймаутом, до ~5 с, если узел пропал.
 #[tauri::command(async)]
-fn nodes() -> Reply<Vec<NodeRow>> {
-    let list = nodes::list().map_err(err)?;
-    let rows = std::thread::scope(|s| {
-        let probes: Vec<_> = list
-            .iter()
-            .map(|node| {
-                s.spawn(move || {
-                    if node.paused {
-                        (hub::Status::default(), Vec::new())
-                    } else {
-                        let status = hub::status(&node.name);
-                        // Предупреждения стоят ещё одного ssh — только для узлов на связи.
-                        let warnings = if status.online {
-                            hub::info(&node.name)
-                                .map(|p| info::warnings(&p))
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        (status, warnings)
-                    }
-                })
-            })
-            .collect();
-        list.iter()
-            .zip(probes)
-            .map(|(node, probe)| {
-                let (status, warnings) = probe.join().unwrap_or_default();
-                NodeRow {
-                    name: node.name.clone(),
-                    addr: node.addr.clone(),
-                    user: node.user.clone(),
-                    paused: node.paused,
-                    online: status.online,
-                    summary: if node.paused {
-                        "пауза на хабе".into()
-                    } else {
-                        status.summary()
-                    },
-                    mode: status.mode.map(|m| m.label().into()),
-                    desk: status.desk,
-                    latency_ms: status.latency_ms,
-                    warnings,
-                }
-            })
-            .collect()
-    });
-    Ok(rows)
+fn status(host: String) -> StatusRow {
+    let status = hub::status(&host);
+    StatusRow {
+        online: status.online,
+        summary: status.summary(),
+        mode: status.mode.map(|m| m.label().into()),
+        desk: status.desk,
+        latency_ms: status.latency_ms,
+    }
 }
 
 /// Свойства узла: пары «подпись — значение» и предупреждения.
@@ -209,8 +189,8 @@ fn version() -> String {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            nodes, detail, jobs, job_log, start_job, kill_job, screenshot, input, add_node, pause,
-            rename, remove, find, restart, power, trusted, trust, version
+            nodes, status, detail, jobs, job_log, start_job, kill_job, screenshot, input, add_node,
+            pause, rename, remove, find, restart, power, trusted, trust, version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -227,11 +207,11 @@ mod live {
         let Ok(host) = std::env::var("FERRY_LIVE_NODE") else {
             return;
         };
-        let row = nodes()
-            .unwrap()
-            .into_iter()
-            .find(|n| n.name == host)
-            .expect("узел в реестре");
+        assert!(
+            nodes().unwrap().iter().any(|n| n.name == host),
+            "узла нет в реестре"
+        );
+        let row = status(host.clone());
         assert!(row.online, "{host} не на связи: {}", row.summary);
 
         let detail = detail(host.clone()).unwrap();
