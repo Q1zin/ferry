@@ -5,6 +5,7 @@
 use base64::Engine;
 use ferry_core::{find, hub, info, nodes, relay};
 use serde::Serialize;
+use tauri::Manager;
 
 type Reply<T> = Result<T, String>;
 
@@ -186,8 +187,33 @@ fn version() -> String {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Окно из конфига (1100×720) на маленьком экране уходит под панель задач: ужимаем до рабочей
+/// области монитора и ставим по центру.
+fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    let Some(monitor) = window.current_monitor()? else {
+        return Ok(());
+    };
+    let area = monitor.work_area().size;
+    let (outer, inner) = (window.outer_size()?, window.inner_size()?);
+    // Рамка и заголовок окна — разница внешнего и внутреннего размера.
+    let (frame_w, frame_h) = (outer.width - inner.width, outer.height - inner.height);
+    let w = inner.width.min(area.width * 95 / 100 - frame_w);
+    let h = inner.height.min(area.height * 95 / 100 - frame_h);
+    if (w, h) != (inner.width, inner.height) {
+        window.set_size(tauri::PhysicalSize::new(w, h))?;
+        window.center()?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                fit_to_screen(&window)?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             nodes, status, detail, jobs, job_log, start_job, kill_job, screenshot, input, add_node,
             pause, rename, remove, find, restart, power, trusted, trust, version
