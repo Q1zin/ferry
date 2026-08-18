@@ -45,7 +45,7 @@ mod win {
     const WS_OVERLAPPED: u32 = 0;
     const SM_CXSMICON: i32 = 49;
 
-    /// Иконки режимов (`apps/hub/scripts/icons.mjs`): 16–32 px под масштаб экрана.
+    /// Иконки режимов (`apps/ferry/scripts/icons.mjs`): 16–32 px под масштаб экрана.
     const SIZES: [i32; 4] = [16, 20, 24, 32];
     const PNGS: [[&[u8]; 4]; 3] = [
         [

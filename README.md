@@ -27,7 +27,7 @@ ferry stop win-10                            # снять всё, что зап�
 |---|---|
 | `crates/ferry-core` | вся логика: узлы и проект на них (хаб), демон рабочего стола, задачи, релей git, экран, иконка в трее узла |
 | `crates/ferry` | бинарник `ferry` — CLI для хаба и узла, тонкая оболочка над ядром |
-| `apps/hub` | приложение-пульт хаба на Tauri (Vue + TS), тоже поверх ядра |
+| `apps/ferry` | приложение ferry на Tauri (Vue + TS), тоже поверх ядра |
 | `node/install.ps1` | установщик узла на Windows |
 
 ## Как устроено
@@ -87,7 +87,7 @@ ferry rec win-10 6 [4]                   # 6 с по 4 кадра → ~/.ferry/r
 
 ## Пульт хаба
 
-Приложение на Tauri с той же логикой, что у CLI (`apps/hub`, бэкенд ходит в `ferry-core` напрямую):
+Приложение на Tauri с той же логикой, что у CLI (`apps/ferry`, бэкенд ходит в `ferry-core` напрямую):
 
 - **узлы** — карточки со статусом, задержкой и предупреждениями (заблокирован экран, на батарее, мало места, ferry на узле старше хаба);
 - **обзор узла** — система, железо, питание, экран, ferry; переименовать, пауза на хабе, найти, убрать; перезапуск демона, перезагрузка, сон, выключение;
@@ -96,10 +96,10 @@ ferry rec win-10 6 [4]                   # 6 с по 4 кадра → ~/.ferry/r
 - **настройки** — доверенные git-хосты релея.
 
 ```sh
-cd apps/hub && bun install
+cd apps/ferry && bun install
 bunx tauri build --debug --bundles app      # → target/debug/bundle/macos/ferry.app
 bun run build && bun run test:ui            # смоук-тест интерфейса в Chromium (playwright-core)
-FERRY_LIVE_NODE=win-10 cargo test -p hub    # команды пульта против настоящего узла
+FERRY_LIVE_NODE=win-10 cargo test -p ferry-app    # команды пульта против настоящего узла
 bun run icons                               # иконки приложения и трея из исходников
 ```
 

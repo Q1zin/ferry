@@ -11,5 +11,5 @@ fn main() {
         });
         std::process::exit(code);
     }
-    hub_lib::run()
+    ferry_app_lib::run()
 }

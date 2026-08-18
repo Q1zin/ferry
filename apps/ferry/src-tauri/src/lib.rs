@@ -196,7 +196,7 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Команды пульта против настоящего узла: `FERRY_LIVE_NODE=<узел> cargo test -p hub`.
+/// Команды пульта против настоящего узла: `FERRY_LIVE_NODE=<узел> cargo test -p ferry-app`.
 /// Без переменной пропускается — CI узла не имеет.
 #[cfg(test)]
 mod live {
