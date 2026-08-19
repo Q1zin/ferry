@@ -11,6 +11,7 @@
 
 use std::fs;
 use std::io;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -58,19 +59,24 @@ pub const GUARD: &str = "[ \"$(cat ~/.ferry/mode 2>/dev/null)\" = paused ] && \
     exit 75; }; ";
 
 pub fn current() -> Mode {
-    let Ok(path) = path() else {
-        return Mode::Active;
-    };
-    fs::read_to_string(path)
+    crate::ferry_home().map_or(Mode::Active, |dir| current_in(&dir))
+}
+
+pub fn set(mode: Mode) -> io::Result<()> {
+    set_in(&crate::ferry_home()?, mode)
+}
+
+/// Режим из `<dir>/mode`; нет файла — работаем.
+pub fn current_in(dir: &Path) -> Mode {
+    fs::read_to_string(dir.join("mode"))
         .ok()
         .and_then(|text| Mode::parse(text.trim()))
         .unwrap_or(Mode::Active)
 }
 
-pub fn set(mode: Mode) -> io::Result<()> {
-    let path = path()?;
-    fs::create_dir_all(path.parent().unwrap())?;
-    fs::write(path, format!("{}\n", mode.name()))
+pub fn set_in(dir: &Path, mode: Mode) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join("mode"), format!("{}\n", mode.name()))
 }
 
 /// `ferry mode [<режим>]` на узле.
@@ -86,10 +92,6 @@ pub fn command(new: Option<&str>) -> io::Result<i32> {
     let mode = current();
     println!("{} ({})", mode.name(), mode.label());
     Ok(0)
-}
-
-fn path() -> io::Result<std::path::PathBuf> {
-    Ok(crate::ferry_home()?.join("mode"))
 }
 
 #[cfg(test)]
