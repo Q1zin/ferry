@@ -13,7 +13,7 @@ use ferry_core::device::{PairingInfo, PeerView, Snapshot};
 use ferry_core::mode::{self, Mode};
 use iroh::address_lookup::MemoryLookup;
 use iroh::dns::{DnsResolver, NameserverConfig};
-use iroh::endpoint::{Connection, presets};
+use iroh::endpoint::{Connection, QuicTransportConfig, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use irpc::WithChannels;
@@ -76,11 +76,14 @@ struct Live {
     task: Option<AbortHandle>,
 }
 
-/// DNS: системный и DNS-over-HTTPS вместе. VPN на любой из сторон бывает, ломает обычный DNS
-/// (UDP и TCP на 53 порт), а HTTPS проходит; в сетях, где режут DoH, ответит системный.
+/// DNS — через HTTPS (Cloudflare, Google). VPN на любой из сторон бывает, и с ним обычный DNS
+/// (UDP и TCP на 53 порт) отвечает ошибкой, которую резолвер считает окончательной: обычные
+/// серверы в основном списке всё ломают. Закрыт HTTPS к ним — резолвер сам перейдёт к запасным
+/// публичным серверам.
+// ponytail: сеть, где наружу закрыт любой DNS, кроме своего, так не заработает — понадобится,
+// добавим системный резолвер запасным ярусом.
 fn resolver() -> DnsResolver {
     DnsResolver::builder()
-        .with_system_defaults()
         .add_nameserver_configs(
             ["1.1.1.1", "8.8.8.8"].map(|ip| NameserverConfig::https(ip.parse().unwrap())),
         )
@@ -97,7 +100,13 @@ impl Agent {
         } else {
             Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
         };
+        // Пропавшее устройство (выключили, ушло из сети) видно через 12 с, а не через 30 по
+        // умолчанию: iroh шлёт heartbeat раз в 5 с, один пропуск переживём.
+        let transport = QuicTransportConfig::builder()
+            .max_idle_timeout(Some(Duration::from_secs(12).try_into()?))
+            .build();
         let endpoint = builder
+            .transport_config(transport)
             .secret_key(key)
             .alpns(vec![proto::ALPN.to_vec(), pair::ALPN.to_vec()])
             .address_lookup(lookup.clone())
