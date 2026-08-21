@@ -3,13 +3,13 @@
 //! адресуется своим ключом, а не IP: сменился адрес, VPN, другая сеть — связь та же.
 
 pub mod agent;
+pub mod control;
 pub mod lan;
 pub mod pair;
 pub mod proto;
 pub mod store;
 
-pub use agent::{Agent, Options, PairingInfo, PeerView, Snapshot};
+pub use agent::{Agent, Options};
+pub use ferry_core::device::{LanDevice, PairingInfo, PeerView, Role, Snapshot, Status};
 pub use ferry_core::mode::Mode;
 pub use iroh::EndpointId;
-pub use lan::LanDevice;
-pub use proto::{Role, Status};

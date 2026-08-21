@@ -7,20 +7,11 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use ferry_core::device::LanDevice;
 use iroh::{EndpointAddr, EndpointId, TransportAddr, address_lookup::MemoryLookup};
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
-use serde::Serialize;
 
 const SERVICE: &str = "_ferry._udp.local.";
-
-/// Устройство ferry, замеченное в локальной сети.
-#[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct LanDevice {
-    pub id: EndpointId,
-    pub name: String,
-    /// Ждёт связывания: показывает код.
-    pub pairing: bool,
-}
 
 pub struct Lan {
     daemon: ServiceDaemon,
@@ -66,7 +57,7 @@ impl Lan {
                             .map(|ip| TransportAddr::Ip(SocketAddr::new(ip.into(), port)));
                         lookup.add_endpoint_info(EndpointAddr::from_parts(id, addrs));
                         let device = LanDevice {
-                            id,
+                            id: id.to_string(),
                             name: prop("name").into(),
                             pairing: prop("pair") == "1",
                         };
@@ -128,7 +119,7 @@ impl Lan {
     pub fn devices(&self) -> Vec<LanDevice> {
         let mut list: Vec<_> = self.seen.lock().unwrap().values().cloned().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name));
-        list.dedup_by_key(|d| d.id);
+        list.dedup_by_key(|d| d.id.clone());
         list
     }
 }

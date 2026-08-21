@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use ferry_core::device::{PairingInfo, PeerView, Snapshot};
 use ferry_core::mode::{self, Mode};
 use iroh::address_lookup::MemoryLookup;
 use iroh::dns::{DnsResolver, NameserverConfig};
@@ -16,11 +17,10 @@ use iroh::endpoint::{Connection, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use irpc::WithChannels;
-use serde::Serialize;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
-use crate::lan::{Lan, LanDevice};
+use crate::lan::Lan;
 use crate::pair;
 use crate::proto::{
     self, DeviceClient, DeviceMessage, DeviceProtocol, Rename, Role, SetRole, Status,
@@ -45,36 +45,6 @@ impl Options {
             lan: true,
         }
     }
-}
-
-/// Что видно с этого устройства: оно само, связанные устройства, устройства рядом.
-#[derive(Clone, Debug, Serialize)]
-pub struct Snapshot {
-    pub id: EndpointId,
-    pub me: Status,
-    pub peers: Vec<PeerView>,
-    /// Устройства ferry в локальной сети, ещё не связанные с этим.
-    pub lan: Vec<LanDevice>,
-    pub pairing: Option<PairingInfo>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PeerView {
-    pub id: EndpointId,
-    pub name: String,
-    pub online: bool,
-    pub status: Option<Status>,
-    /// Путь до устройства: напрямую или через relay; задержка по нему.
-    pub direct: Option<bool>,
-    pub rtt_ms: Option<u32>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PairingInfo {
-    pub code: String,
-    /// Для связывания из другой сети.
-    pub ticket: String,
-    pub seconds_left: u64,
 }
 
 #[derive(Clone)]
@@ -213,7 +183,7 @@ impl Agent {
             .map(|peer| {
                 let l = live.get(&peer.id);
                 PeerView {
-                    id: peer.id,
+                    id: peer.id.to_string(),
                     name: l
                         .and_then(|l| l.status.as_ref())
                         .map_or(peer.name.clone(), |s| s.name.clone()),
@@ -227,11 +197,11 @@ impl Agent {
         let lan = inner.lan.as_ref().map_or_else(Vec::new, |lan| {
             lan.devices()
                 .into_iter()
-                .filter(|d| store.peer(d.id).is_none())
+                .filter(|d| store.peers.iter().all(|p| p.id.to_string() != d.id))
                 .collect()
         });
         Snapshot {
-            id: self.id(),
+            id: self.id().to_string(),
             me: inner.me.borrow().clone(),
             peers,
             lan,
@@ -265,7 +235,7 @@ impl Agent {
                 .lan
                 .into_iter()
                 .filter(|d| d.pairing)
-                .map(|d| d.id)
+                .filter_map(|d| d.id.parse().ok())
                 .collect(),
         };
         if candidates.is_empty() {
@@ -300,7 +270,7 @@ impl Agent {
                         .snapshot()
                         .peers
                         .into_iter()
-                        .find(|p| p.id == id)
+                        .find(|p| p.id == id.to_string())
                         .unwrap());
                 }
                 Err(e) => last = Some(e),
@@ -416,7 +386,7 @@ impl Inner {
         let me = self.me.borrow().clone();
         if me.mode == Mode::Paused {
             return Err(format!(
-                "{} отключён от хаба — это выбрали на самом устройстве (иконка ferry в трее)",
+                "{} отключён от других устройств — это выбрали на самом устройстве (иконка ferry в трее)",
                 me.name
             ));
         }
