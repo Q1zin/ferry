@@ -1,64 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api, tone, type NodeRow } from './api'
+import { api, modeLabel, onOpenPairing, onState, osLabel, path, roleLabel, tone, type Snapshot } from './api'
 import logo from '../src-tauri/icons/128x128.png'
-import AddNode from './components/AddNode.vue'
-import NodeView from './components/NodeView.vue'
+import Device from './components/Device.vue'
+import Pairing from './components/Pairing.vue'
 import Settings from './components/Settings.vue'
 
-type View = { kind: 'home' } | { kind: 'node'; name: string } | { kind: 'settings' } | { kind: 'add' }
+type View = { kind: 'home' } | { kind: 'device'; id: string | null } | { kind: 'pairing' } | { kind: 'settings' }
 
-const nodes = ref<NodeRow[]>([])
-const loadedOnce = ref(false)
-const probing = ref(new Set<string>())
+const snap = ref<Snapshot | null>(null)
 const view = ref<View>({ kind: 'home' })
 const notice = ref<{ text: string; error: boolean } | null>(null)
 
-const selected = computed(() => {
+const version = computed(() => snap.value?.me.version ?? '')
+
+/// Страница устройства: `id` пуст — это устройство.
+const device = computed(() => {
   const v = view.value
-  return v.kind === 'node' ? nodes.value.find((n) => n.name === v.name) : undefined
+  if (v.kind !== 'device' || !snap.value) return undefined
+  if (v.id === null) return { id: null, name: snap.value.me.name, online: true, status: snap.value.me, path: '' }
+  const p = snap.value.peers.find((p) => p.id === v.id)
+  return p && { id: p.id, name: p.name, online: p.online, status: p.status, path: path(p) }
 })
-
-// Реестр — мгновенно, без ssh; статус каждого узла приходит сам по себе. Пока узел
-// переопрашивается, виден прежний ответ — карточки не мигают.
-async function refresh() {
-  try {
-    const known = new Map(nodes.value.map((n) => [n.name, n]))
-    nodes.value = (await api.nodes()).map((n) => {
-      const old = n.paused ? undefined : known.get(n.name)
-      return { ...n, status: old?.status ?? null, warnings: old?.warnings ?? null }
-    })
-  } catch (e) {
-    say(String(e), true)
-  } finally {
-    loadedOnce.value = true
-  }
-  for (const n of nodes.value) if (!n.paused) probe(n.name)
-}
-
-// Статус — один ssh, предупреждения — ещё один, следом. Узел, который ещё отвечает на прошлый
-// опрос, не дёргаем: пропавший отвечает секунды.
-async function probe(name: string) {
-  if (probing.value.has(name)) return
-  probing.value.add(name)
-  try {
-    const status = await api.status(name)
-    patch(name, { status })
-    if (!status.online) return patch(name, { warnings: [] })
-    const detail = await api.detail(name).catch(() => null)
-    if (detail) patch(name, { warnings: detail.warnings })
-  } catch (e) {
-    say(String(e), true)
-  } finally {
-    probing.value.delete(name)
-  }
-}
-
-// По имени, а не по ссылке: пока шёл ssh, список могли перечитать.
-function patch(name: string, fields: Partial<NodeRow>) {
-  const row = nodes.value.find((n) => n.name === name)
-  if (row) Object.assign(row, fields)
-}
 
 let noticeTimer = 0
 function say(text: string, error = false) {
@@ -68,17 +31,17 @@ function say(text: string, error = false) {
   noticeTimer = window.setTimeout(() => (notice.value = null), error ? 10000 : 5000)
 }
 
-function open(name: string) {
-  view.value = { kind: 'node', name }
-}
-
-// Статусы — раз в 15 с: каждый опрос стоит ssh к каждому узлу.
-let timer = 0
-onMounted(() => {
-  refresh()
-  timer = window.setInterval(refresh, 15000)
+const unlisten: (() => void)[] = []
+onMounted(async () => {
+  unlisten.push(await onState((s) => (snap.value = s)))
+  unlisten.push(await onOpenPairing(() => (view.value = { kind: 'pairing' })))
+  try {
+    snap.value = await api.state()
+  } catch (e) {
+    say(String(e), true)
+  }
 })
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => unlisten.forEach((f) => f()))
 </script>
 
 <template>
@@ -88,80 +51,89 @@ onUnmounted(() => clearInterval(timer))
         <img :src="logo" alt="" />
         <span>
           <strong>ferry</strong>
-          <span class="muted">пульт узлов</span>
+          <span class="muted">устройства</span>
         </span>
       </button>
 
-      <nav>
+      <nav v-if="snap">
+        <p class="section muted">Это устройство</p>
         <button
-          v-for="node in nodes"
-          :key="node.name"
           class="node-link"
-          :class="{ active: view.kind === 'node' && view.name === node.name }"
-          @click="open(node.name)"
+          :class="{ active: view.kind === 'device' && view.id === null }"
+          @click="view = { kind: 'device', id: null }"
         >
-          <span class="dot" :class="tone(node)"></span>
-          <span class="name">{{ node.name }}</span>
-          <span v-if="node.warnings?.length" class="warning">⚠ {{ node.warnings.length }}</span>
+          <span class="dot" :class="tone(snap.me, true, version)"></span>
+          <span class="name">{{ snap.me.name }}</span>
         </button>
-        <p v-if="loadedOnce && !nodes.length" class="muted hint">Узлов пока нет</p>
+
+        <p class="section muted">Связанные</p>
+        <button
+          v-for="p in snap.peers"
+          :key="p.id"
+          class="node-link"
+          :class="{ active: view.kind === 'device' && view.id === p.id }"
+          @click="view = { kind: 'device', id: p.id }"
+        >
+          <span class="dot" :class="tone(p.status, p.online, version)"></span>
+          <span class="name">{{ p.name }}</span>
+        </button>
+        <p v-if="!snap.peers.length" class="muted hint">Пока ни одного</p>
       </nav>
 
       <footer>
-        <button @click="view = { kind: 'add' }">+ Добавить узел</button>
-        <div class="row">
-          <button class="grow" @click="view = { kind: 'settings' }">Настройки</button>
-          <button
-            title="Обновить статусы"
-            aria-label="Обновить статусы"
-            :aria-busy="probing.size > 0"
-            @click="refresh"
-          >
-            ↻
-          </button>
-        </div>
+        <button @click="view = { kind: 'pairing' }">+ Связать устройство</button>
+        <button @click="view = { kind: 'settings' }">Настройки</button>
       </footer>
     </aside>
 
     <main>
-      <NodeView
-        v-if="view.kind === 'node' && selected"
-        :key="selected.name"
-        :node="selected"
+      <Device
+        v-if="view.kind === 'device' && device"
+        :key="device.id ?? 'me'"
+        :device="device"
+        :version="version"
         @say="say"
-        @changed="refresh"
-        @renamed="(name: string) => { refresh().then(() => open(name)) }"
-        @gone="view = { kind: 'home' }; refresh()"
+        @gone="view = { kind: 'home' }"
       />
-      <Settings v-else-if="view.kind === 'settings'" @say="say" />
-      <AddNode
-        v-else-if="view.kind === 'add'"
+      <Pairing
+        v-else-if="view.kind === 'pairing' && snap"
+        :snap="snap"
         @say="say"
-        @added="(name: string) => { refresh().then(() => open(name)) }"
+        @paired="(id: string) => (view = { kind: 'device', id })"
       />
+      <Settings v-else-if="view.kind === 'settings' && snap" :snap="snap" @say="say" />
       <section v-else class="home">
-        <h1>Узлы</h1>
-        <p v-if="loadedOnce && !nodes.length" class="muted">
-          Добавь первый узел: поставь на нём ferry (node/install.ps1) и нажми «Добавить узел».
-        </p>
-        <div class="cards">
-          <button v-for="node in nodes" :key="node.name" class="card tile" @click="open(node.name)">
+        <h1>Устройства</h1>
+        <div v-if="snap" class="cards">
+          <button class="card tile" @click="view = { kind: 'device', id: null }">
             <div class="row">
-              <span class="dot" :class="tone(node)"></span>
-              <strong>{{ node.name }}</strong>
-              <span class="muted">{{ node.addr }}</span>
-              <span v-if="node.status?.latency_ms != null" class="muted latency">
-                {{ node.status.latency_ms }} мс
-              </span>
+              <span class="dot" :class="tone(snap.me, true, version)"></span>
+              <strong>{{ snap.me.name }}</strong>
+              <span class="muted">это устройство</span>
             </div>
             <p class="summary">
-              <template v-if="node.paused">пауза на хабе</template>
-              <template v-else-if="node.status">{{ node.status.summary }}</template>
-              <span v-else class="skeleton"></span>
+              {{ osLabel(snap.me.os) }} · {{ roleLabel(snap.me.role) }} · {{ modeLabel(snap.me.mode) }}
             </p>
-            <ul class="warnings">
-              <li v-for="w in node.warnings ?? []" :key="w" class="warning">⚠ {{ w }}</li>
-            </ul>
+          </button>
+          <button v-for="p in snap.peers" :key="p.id" class="card tile" @click="view = { kind: 'device', id: p.id }">
+            <div class="row">
+              <span class="dot" :class="tone(p.status, p.online, version)"></span>
+              <strong>{{ p.name }}</strong>
+              <span class="muted path">{{ path(p) }}</span>
+            </div>
+            <p class="summary">
+              <template v-if="p.status">
+                {{ osLabel(p.status.os) }} · {{ roleLabel(p.status.role) }} · {{ modeLabel(p.status.mode) }}
+              </template>
+              <template v-else>ещё не отвечало с запуска</template>
+            </p>
+            <p v-if="p.status && p.status.version !== version" class="warning">
+              ⚠ ferry {{ p.status.version }}, здесь {{ version }}
+            </p>
+          </button>
+          <button class="card tile add" @click="view = { kind: 'pairing' }">
+            <strong>+ Связать устройство</strong>
+            <p class="summary">Поставь ferry на другой компьютер и введи код с него здесь — или наоборот.</p>
           </button>
         </div>
       </section>
@@ -218,6 +190,11 @@ nav {
   gap: 2px;
 }
 
+.section {
+  margin: 10px 10px 4px;
+  font-size: 12px;
+}
+
 .node-link {
   display: flex;
   gap: 8px;
@@ -240,7 +217,7 @@ nav {
 }
 
 .hint {
-  padding: 8px 10px;
+  padding: 4px 10px;
 }
 
 footer {
@@ -249,11 +226,6 @@ footer {
   gap: 8px;
 }
 
-.grow {
-  flex: 1;
-}
-
-/* Колонкой — чтобы страница узла могла занять всю высоту (снимок экрана тянется под окно). */
 main {
   display: flex;
   flex-direction: column;
@@ -278,23 +250,21 @@ main {
   gap: 6px;
 }
 
-.latency {
+.tile.add {
+  border-style: dashed;
+}
+
+.path {
   margin-left: auto;
 }
 
-/* Место под ответ узла занято заранее: две строки статуса и строка предупреждений —
-   карточки не растут, когда узел ответит. */
-.summary {
+.summary,
+.tile .warning {
   margin: 0;
-  min-height: 2lh;
-  color: var(--muted);
 }
 
-.warnings {
-  margin: 0;
-  padding: 0;
-  min-height: 1lh;
-  list-style: none;
+.summary {
+  color: var(--muted);
 }
 
 .notice {

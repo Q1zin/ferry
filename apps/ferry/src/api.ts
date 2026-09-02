@@ -1,83 +1,91 @@
-// Команды бэкенда (src-tauri/src/lib.rs) — типизированно. Каждая ходит в узел по ssh,
-// поэтому всё асинхронно, а ошибки — строки от ferry.
+// Команды бэкенда (src-tauri/src/lib.rs) — типизированно. Состояние не опрашиваем: агент
+// присылает его событием `state` при каждом изменении.
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
-export type NodeEntry = {
-  name: string
-  addr: string
-  user: string
-  paused: boolean
-}
+export type Mode = 'active' | 'no-desktop' | 'paused'
+export type Role = 'both' | 'node' | 'console'
 
 export type Status = {
-  online: boolean
-  summary: string
-  mode: string | null
-  desk: boolean
-  latency_ms: number | null
-}
-
-/// Узел из реестра и то, что о нём уже известно: `null` — ответ ещё не пришёл.
-export type NodeRow = NodeEntry & { status: Status | null; warnings: string[] | null }
-
-export type Detail = {
-  properties: [string, string][]
-  warnings: string[]
-}
-
-export type JobRow = {
   name: string
-  label: string
-  ago: string
-  running: boolean
-  cmd: string
+  role: Role
+  mode: Mode
+  os: string
+  version: string
+}
+
+export type PeerView = {
+  id: string
+  name: string
+  online: boolean
+  status: Status | null
+  direct: boolean | null
+  rtt_ms: number | null
+}
+
+export type LanDevice = { id: string; name: string; pairing: boolean }
+
+export type PairingInfo = { code: string; ticket: string; seconds_left: number }
+
+export type Snapshot = {
+  id: string
+  me: Status
+  peers: PeerView[]
+  lan: LanDevice[]
+  pairing: PairingInfo | null
 }
 
 export const api = {
-  nodes: () => invoke<NodeEntry[]>('nodes'),
-  status: (host: string) => invoke<Status>('status', { host }),
-  detail: (host: string) => invoke<Detail>('detail', { host }),
-  jobs: (host: string) => invoke<JobRow[]>('jobs', { host }),
-  jobLog: (host: string, name: string) => invoke<string>('job_log', { host, name }),
-  startJob: (host: string, name: string, cmd: string) =>
-    invoke<string>('start_job', { host, name, cmd }),
-  killJob: (host: string, name: string) => invoke<string>('kill_job', { host, name }),
-  screenshot: (host: string) => invoke<string>('screenshot', { host }),
-  input: (host: string, args: string[]) => invoke<string>('input', { host, args }),
-  addNode: (name: string, target: string) => invoke<void>('add_node', { name, target }),
-  pause: (host: string, paused: boolean) => invoke<void>('pause', { host, paused }),
-  rename: (host: string, newName: string) => invoke<void>('rename', { host, newName }),
-  remove: (host: string) => invoke<void>('remove', { host }),
-  find: (host: string) => invoke<string | null>('find', { host }),
-  restart: (host: string) => invoke<string>('restart', { host }),
-  power: (host: string, action: string) => invoke<string>('power', { host, action }),
-  trusted: () => invoke<string[]>('trusted'),
-  trust: (host: string) => invoke<void>('trust', { host }),
+  state: () => invoke<Snapshot>('state'),
+  openPairing: () => invoke<PairingInfo>('open_pairing'),
+  closePairing: () => invoke<void>('close_pairing'),
+  pair: (code: string) => invoke<PeerView>('pair', { code }),
+  setRole: (id: string | null, role: Role) => invoke<void>('set_role', { id, role }),
+  rename: (id: string | null, name: string) => invoke<void>('rename', { id, name }),
+  setMode: (mode: Mode) => invoke<void>('set_mode', { mode }),
+  forget: (id: string) => invoke<void>('forget', { id }),
+  autostart: () => invoke<boolean>('autostart'),
+  setAutostart: (on: boolean) => invoke<void>('set_autostart', { on }),
   version: () => invoke<string>('version'),
 }
 
-/// Состояние узла одним словом — для точки-индикатора и подписи.
-export type Tone = 'ok' | 'quiet' | 'paused' | 'off' | 'warn' | 'probing'
+export const onState = (cb: (s: Snapshot) => void): Promise<UnlistenFn> =>
+  listen<Snapshot>('state', (e) => cb(e.payload))
 
-export function tone(node: NodeRow): Tone {
-  const s = node.status
-  if (node.paused) return 'paused'
-  if (!s) return 'probing'
-  if (!s.online) return 'off'
-  if (s.mode === 'отключён от хаба') return 'paused'
-  if (s.mode === 'не трогать рабочий стол') return 'quiet'
-  if (!s.desk || node.warnings?.length) return 'warn'
+export const onOpenPairing = (cb: () => void): Promise<UnlistenFn> => listen('open-pairing', cb)
+
+export const modes: [Mode, string][] = [
+  ['active', 'работает'],
+  ['no-desktop', 'не трогать рабочий стол'],
+  ['paused', 'отключён'],
+]
+
+export const roles: [Role, string][] = [
+  ['both', 'узел и пульт'],
+  ['node', 'узел'],
+  ['console', 'пульт'],
+]
+
+export const modeLabel = (m: Mode) => modes.find(([k]) => k === m)?.[1] ?? m
+export const roleLabel = (r: Role) => roles.find(([k]) => k === r)?.[1] ?? r
+
+const osNames: Record<string, string> = { macos: 'macOS', windows: 'Windows', linux: 'Linux' }
+export const osLabel = (os: string) => osNames[os] ?? os
+
+/// Состояние устройства одним словом — для точки-индикатора.
+export type Tone = 'ok' | 'quiet' | 'paused' | 'off' | 'warn'
+
+export function tone(status: Status | null, online: boolean, version: string): Tone {
+  if (!online || !status) return 'off'
+  if (status.mode === 'paused') return 'paused'
+  if (status.mode === 'no-desktop') return 'quiet'
+  if (status.version !== version) return 'warn'
   return 'ok'
 }
 
-/// Почему с узлом сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий стол.
-export function blocked(node: NodeRow, desk = false): string {
-  const s = node.status
-  if (node.paused) return 'Узел на паузе на хабе.'
-  if (!s) return 'Опрашиваю узел…'
-  if (!s.online) return 'Узел не на связи. Если он сменил адрес — «Найти» в «Обзоре».'
-  if (desk && s.mode && s.mode !== 'работает') {
-    return `На узле режим «${s.mode}» — рабочий стол трогать нельзя.`
-  }
-  return ''
+/// Путь до устройства: напрямую или через relay и задержка.
+export function path(p: PeerView): string {
+  if (!p.online) return 'не на связи'
+  const how = p.direct === false ? 'через relay' : 'напрямую'
+  return p.rtt_ms != null ? `${how}, ${p.rtt_ms} мс` : how
 }
