@@ -272,7 +272,7 @@ pub(crate) fn new_token() -> String {
         .collect()
 }
 
-pub(crate) fn shell(cmd: &str) -> Command {
+pub fn shell(cmd: &str) -> Command {
     let mut command = Command::new(shell_path());
     #[cfg(windows)]
     {
@@ -305,7 +305,7 @@ fn shell_path() -> OsString {
 
 // ponytail: taskkill /t идёт по ссылкам на родителя, поэтому процессы, чей родитель уже
 // вышел, переживут обрыв; если начнут мешать — Job Object с KILL_ON_JOB_CLOSE.
-pub(crate) fn kill_tree(pid: u32) -> io::Result<()> {
+pub fn kill_tree(pid: u32) -> io::Result<()> {
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;
