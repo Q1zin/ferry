@@ -10,9 +10,10 @@ async fn cli_talks_to_the_app_with_its_token() {
     let dir = std::env::temp_dir().join(format!("ferry-control-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let agent = Agent::start(Options {
-        dir: dir.clone(),
         internet: false,
         lan: false,
+        home: dir.join("home"),
+        ..Options::new(dir.clone())
     })
     .await
     .unwrap();
