@@ -4,11 +4,13 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use ferry_core::control::{Envelope, Request, Response};
-use iroh::EndpointId;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use irpc::channel::mpsc;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
+use tokio::net::tcp::OwnedWriteHalf;
 
 use crate::Agent;
+use crate::proto::{Fail, Output};
 
 /// Слушать 127.0.0.1 и записать порт и токен в `<dir>/app` (только для владельца).
 pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
@@ -23,43 +25,199 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
         let (stream, _) = listener.accept().await?;
         let (agent, token) = (agent.clone(), token.clone());
         tokio::spawn(async move {
-            let (read, mut write) = stream.into_split();
+            let (read, write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            let mut out = Lines(write);
             let mut line = String::new();
-            if BufReader::new(read).read_line(&mut line).await.is_err() {
+            if read.read_line(&mut line).await.is_err() {
                 return;
             }
-            let response = match serde_json::from_str::<Envelope>(&line) {
-                Ok(envelope) if envelope.token == token => handle(&agent, envelope.request).await,
-                Ok(_) => Response::Error("неверный токен".into()),
-                Err(e) => Response::Error(format!("запрос: {e}")),
+            let request = match serde_json::from_str::<Envelope>(&line) {
+                Ok(envelope) if envelope.token == token => envelope.request,
+                Ok(_) => return out.error(Fail::new("неверный токен")).await,
+                Err(e) => return out.error(Fail::new(format!("запрос: {e}"))).await,
             };
-            let mut out = serde_json::to_string(&response).unwrap_or_default();
-            out.push('\n');
-            let _ = write.write_all(out.as_bytes()).await;
+            // CLI больше ничего не пишет: конец входа — его закрыли (Ctrl-C, таймаут вызвавшего).
+            let gone = async move {
+                let mut byte = [0u8; 1];
+                let _ = read.read(&mut byte).await;
+            };
+            handle(&agent, request, &mut out, gone).await;
         });
     }
 }
 
-async fn handle(agent: &Agent, request: Request) -> Response {
-    let result: Result<Response> = async {
-        Ok(match request {
-            Request::State => Response::State(agent.snapshot()),
-            Request::OpenPairing => Response::Pairing(agent.open_pairing()),
-            Request::Pair { code } => Response::Peer(agent.pair(&code).await?),
-            Request::SetRole { device, role } => {
-                let target = device.map(|who| id_of(agent, &who)).transpose()?;
-                agent.set_role(target, role).await?;
-                Response::Done
-            }
-        })
+/// Ответ построчно.
+struct Lines(OwnedWriteHalf);
+
+impl Lines {
+    /// Записать строку; `false` — CLI ушёл.
+    async fn send(&mut self, response: &Response) -> bool {
+        let mut line = serde_json::to_string(response).unwrap_or_default();
+        line.push('\n');
+        self.0.write_all(line.as_bytes()).await.is_ok()
     }
-    .await;
-    result.unwrap_or_else(|e| Response::Error(format!("{e:#}")))
+
+    async fn error(&mut self, fail: Fail) {
+        self.send(&Response::Error(fail)).await;
+    }
 }
 
-/// Связанное устройство по имени или началу ключа.
-fn id_of(agent: &Agent, who: &str) -> Result<EndpointId> {
-    let snapshot = agent.snapshot();
-    let peer = snapshot.find(who).map_err(anyhow::Error::msg)?;
-    Ok(peer.id.parse()?)
+/// Ответ на запрос: разовый или поток вывода (`Run`, `Log`).
+enum Answer {
+    Once(Response),
+    Stream(mpsc::Receiver<Output>),
+}
+
+async fn handle(agent: &Agent, request: Request, out: &mut Lines, gone: impl Future<Output = ()>) {
+    match answer(agent, request).await {
+        Ok(Answer::Once(response)) => {
+            out.send(&response).await;
+        }
+        Ok(Answer::Stream(rx)) => stream(rx, out, gone).await,
+        Err(fail) => out.error(fail).await,
+    }
+}
+
+async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
+    let response = match request {
+        Request::State => Response::State(agent.snapshot()),
+        Request::OpenPairing => Response::Pairing(agent.open_pairing()),
+        Request::Pair { code } => {
+            let peer = agent
+                .pair(&code)
+                .await
+                .map_err(|e| Fail::new(format!("{e:#}")))?;
+            Response::Peer(peer)
+        }
+        Request::SetRole { device, role } => {
+            let target = device
+                .map(|who| agent.device(&who).map(|d| d.id))
+                .transpose()?;
+            agent
+                .set_role(target, role)
+                .await
+                .map_err(|e| Fail::new(format!("{e:#}")))?;
+            Response::Done
+        }
+        Request::Sync {
+            device,
+            root,
+            project,
+            commit,
+            tree,
+        } => {
+            let extra: Vec<PathBuf> = ferry_core::project::load(&project)?
+                .files
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+            let device = agent.device(&device)?;
+            Response::Message(device.sync(&root, &project, &commit, &tree, &extra).await?)
+        }
+        Request::Run {
+            device,
+            cmd,
+            dir,
+            desk,
+        } => {
+            return Ok(Answer::Stream(
+                agent.device(&device)?.run(&cmd, dir, desk).await?,
+            ));
+        }
+        Request::Log {
+            device,
+            name,
+            follow,
+        } => {
+            return Ok(Answer::Stream(
+                agent.device(&device)?.log(&name, follow).await?,
+            ));
+        }
+        Request::Start {
+            device,
+            name,
+            cmd,
+            dir,
+        } => Response::Message(agent.device(&device)?.start(&name, &cmd, dir).await?),
+        Request::Jobs { device } => Response::Jobs(agent.device(&device)?.jobs().await?),
+        Request::Kill { device, name } => {
+            Response::Message(agent.device(&device)?.kill(&name).await?)
+        }
+        Request::Shot { device, file } => {
+            agent.device(&device)?.shot(&file).await?;
+            Response::Done
+        }
+        Request::Input { device, args } => {
+            Response::Message(agent.device(&device)?.input(args).await?)
+        }
+        Request::Rec {
+            device,
+            seconds,
+            fps,
+            dest,
+        } => Response::Files(agent.device(&device)?.rec(&seconds, &fps, &dest).await?),
+        Request::Info { device } => Response::Info(agent.device(&device)?.info().await?),
+        Request::Power { device, action } => {
+            Response::Message(agent.device(&device)?.power(&action).await?)
+        }
+        Request::Stop { device } => Response::Message(agent.device(&device)?.stop().await?),
+        Request::Put {
+            device,
+            base,
+            rels,
+            dir,
+        } => {
+            agent.device(&device)?.put(&base, &rels, dir).await?;
+            Response::Done
+        }
+        Request::Get {
+            device,
+            path,
+            dir,
+            dest,
+        } => Response::Files(agent.device(&device)?.get(&path, dir, &dest).await?),
+        Request::Pull {
+            device,
+            root,
+            project,
+        } => Response::Message(agent.device(&device)?.pull(&root, &project).await?),
+        Request::Tunnel {
+            device,
+            port,
+            close: false,
+        } => Response::Message(agent.open_tunnel(&device, port).await?),
+        Request::Tunnel {
+            device,
+            port,
+            close: true,
+        } => Response::Message(agent.close_tunnel(&device, port)?),
+        Request::Tunnels => Response::Tunnels(agent.tunnels()),
+    };
+    Ok(Answer::Once(response))
+}
+
+/// Вывод команды — строками, пока не придёт код выхода или CLI не уйдёт. Ушёл — приёмник
+/// бросается, и устройство останавливает команду.
+async fn stream(mut rx: mpsc::Receiver<Output>, out: &mut Lines, gone: impl Future<Output = ()>) {
+    tokio::pin!(gone);
+    loop {
+        let next = tokio::select! {
+            next = rx.recv() => next,
+            _ = &mut gone => return,
+        };
+        let (response, last) = match next {
+            Ok(Some(Output::Out(data))) => (Response::Out(data), false),
+            Ok(Some(Output::Err(data))) => (Response::Err(data), false),
+            Ok(Some(Output::Exit(code))) => (Response::Exit(code), true),
+            Ok(Some(Output::Fail(fail))) => (Response::Error(fail), true),
+            Ok(None) | Err(_) => (
+                Response::Error(Fail::new("связь с устройством оборвалась посреди команды")),
+                true,
+            ),
+        };
+        if !out.send(&response).await || last {
+            return;
+        }
+    }
 }
