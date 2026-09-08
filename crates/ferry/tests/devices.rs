@@ -1,0 +1,217 @@
+//! CLI → приложение → устройства целиком: настоящий бинарник `ferry`, сервер управления и агенты
+//! в этом процессе (без интернета и mDNS). У «приложения» свой HOME — там его `~/.ferry/app`.
+#![cfg(unix)]
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+use ferry_net::{Agent, Mode, Options};
+
+const FERRY: &str = env!("CARGO_BIN_EXE_ferry");
+
+fn root(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("ferry-cli-{}-{name}", std::process::id()))
+}
+
+async fn agent(name: &str) -> Agent {
+    let home = root(name);
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let options = Options {
+        internet: false,
+        lan: false,
+        home: home.clone(),
+        ..Options::new(home.join(".ferry"))
+    };
+    let agent = Agent::start(options).await.unwrap();
+    agent.rename(None, name).await.unwrap();
+    agent
+}
+
+async fn pair(controller: &Agent, node: &Agent) {
+    controller.learn(node.addr());
+    node.learn(controller.addr());
+    controller.pair(&node.open_pairing().ticket).await.unwrap();
+    let id = node.id().to_string();
+    let start = Instant::now();
+    while !controller
+        .snapshot()
+        .peers
+        .iter()
+        .any(|p| p.id == id && p.status.is_some())
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "устройство не вышло на связь"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// `ferry …` от имени «приложения» `controller`, из каталога `cwd`.
+async fn ferry(cwd: &Path, args: &[&str]) -> Output {
+    let (cwd, args) = (
+        cwd.to_path_buf(),
+        args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+    );
+    tokio::task::spawn_blocking(move || {
+        Command::new(FERRY)
+            .args(&args)
+            .env("HOME", root("ctl"))
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_drives_devices_through_the_app() {
+    let ctl = agent("ctl").await;
+    let (win, mac) = (agent("win").await, agent("mac").await);
+    pair(&ctl, &win).await;
+    pair(&ctl, &mac).await;
+    tokio::spawn(ferry_net::control::serve(
+        ctl.clone(),
+        root("ctl").join(".ferry"),
+    ));
+    while !root("ctl").join(".ferry/app").exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let outside = root("ctl");
+
+    let out = ferry(&outside, &["devices"]).await;
+    let list = text(&out.stdout);
+    assert!(
+        list.contains("win") && list.contains("mac") && list.contains("напрямую"),
+        "{list}"
+    );
+
+    // Одна цель: вывод как есть, код — устройства. Вне репозитория — в доме устройства.
+    let out = ferry(&outside, &["run", "win", "--", "echo hi; pwd; exit 4"]).await;
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(said.starts_with("hi\n"), "{said}");
+    assert!(
+        said.contains(&root("win").display().to_string()),
+        "в доме устройства: {said}"
+    );
+
+    // Все сразу: параллельно, строки подписаны, код — первый ненулевой, в конце сводка.
+    let out = ferry(
+        &outside,
+        &["run", "all", "--", "echo from $(basename \"$PWD\")"],
+    )
+    .await;
+    let said = text(&out.stdout);
+    assert!(
+        said.contains("[win] from") && said.contains("[mac] from"),
+        "{said}"
+    );
+    assert!(
+        text(&out.stderr).contains("win — 0") && text(&out.stderr).contains("mac — 0"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0));
+
+    // Отказ одного устройства — его код (75), остальные работают.
+    mac.set_mode(Mode::NoDesktop).unwrap();
+    let out = ferry(&outside, &["run", "win,mac", "--desk", "--", "echo ok"]).await;
+    assert_eq!(out.status.code(), Some(75), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("[win] ok"));
+    assert!(
+        text(&out.stderr).contains("[mac] ferry: на mac режим «не трогать рабочий стол»"),
+        "{}",
+        text(&out.stderr)
+    );
+    mac.set_mode(Mode::Active).unwrap();
+
+    // В репозитории — сначала снимок, потом команда в том же подкаталоге проекта.
+    let repo = root("ctl").join("app");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        )
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("src/main.txt"), "from controller\n").unwrap();
+    let out = ferry(&repo.join("src"), &["run", "win", "--", "cat main.txt"]).await;
+    assert_eq!(
+        text(&out.stdout),
+        "from controller\n",
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stderr).contains("рабочее дерево здесь"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(root("win").join("ferry/app/src/main.txt").exists());
+
+    // Убили CLI посреди команды — команда на устройстве останавливается.
+    let pidfile = root("win").join("pid");
+    let cmd = format!("echo $$ > '{}'; sleep 30", pidfile.display());
+    let mut cli = Command::new(FERRY)
+        .args(["run", "win", "--no-sync", "--", &cmd])
+        .env("HOME", root("ctl"))
+        .current_dir(&outside)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !pidfile.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "команда не запустилась"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let pid = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .to_string();
+    cli.kill().unwrap();
+    cli.wait().unwrap();
+    let alive = || {
+        Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+    };
+    let start = Instant::now();
+    while alive() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "команда {pid} пережила убитый CLI"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Нет такого устройства — понятная ошибка.
+    let out = ferry(&outside, &["run", "nope", "--", "true"]).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("нет устройства"),
+        "{}",
+        text(&out.stderr)
+    );
+}
