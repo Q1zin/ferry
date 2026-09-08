@@ -6,80 +6,68 @@ use ferry_core::mode::{self, Mode};
 use ferry_core::{desk, hub, info, jobs, relay, screen};
 
 const USAGE: &str = "\
-ferry — разработка на нескольких машинах: этот компьютер — хаб, остальные — узлы
+ferry — разработка и тесты на нескольких устройствах: на каждом — приложение ferry, команды
+идут отсюда через приложение на этой машине
 
-Устройства (через приложение ferry на этой машине):
+Устройства:
   ferry devices                     это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят
   ferry pair <код|ссылка>           связать с устройством, которое показало код
   ferry role [<устройство>] <роль>  роль этого или связанного устройства:
                                     both (узел и пульт), node (узел), console (пульт)
 
-На хабе:
-  ferry add <узел> <user@адрес>     записать узел и проверить связь
-  ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол;
-                                    сменивший адрес узел ищет сам
-  ferry info <узел>                 свойства узла: система, железо, питание, экран, ferry
-  ferry find <узел>                 найти узел по ключу хоста: tailnet, затем подсети хаба
-  ferry pause | resume <узел>       пауза на хабе: ferry не трогает узел (унесли домой)
-  ferry rename <узел> <новое имя>   переименовать узел
-  ferry remove <узел>               убрать узел с хаба (ferry на нём останется)
-  ferry doctor <узел>               готов ли узел собирать этот проект: инструменты,
-                                    доступ к git-зависимостям, файлы проекта
-  ferry sync <узел>                 рабочее дерево проекта → ~/ferry/<проект> на узле
-  ferry run <узел> [--desk] [--no-sync] [--] <команда>
-                                    sync, затем команда в том же подкаталоге проекта на узле;
-                                    --desk — на рабочем столе узла (окна, фокус, GUI-тесты)
-  ferry pull <узел>                 правки, сделанные на узле, — сюда
-  ferry put <узел> <файл>...        файлы отсюда — на то же место в проекте на узле
-  ferry get <узел> <путь> [куда]    файл или каталог с узла — сюда (~/… — от дома узла)
-  ferry shot <узел> [файл.png]      снимок экрана узла (по умолчанию ~/.ferry/shots/<узел>.png)
-  ferry start <узел> <имя> [--no-sync] [--] <команда>
-                                    фоновая задача на рабочем столе узла (приложение,
-                                    dev-сервер, сборка): живёт после вызова, пишет лог;
-                                    то же имя ещё раз — перезапуск
-  ferry jobs <узел>                 задачи узла: работает, код выхода, когда запущена
-  ferry log <узел> <имя> [-f]       лог задачи; -f — следить до конца и выйти с её кодом
-  ferry kill <узел> <имя>           остановить задачу
-  ferry tunnel [<узел> <порт>] [--close]
-                                    127.0.0.1:<порт> здесь → <порт> узла (CDP, dev-сервер);
-                                    без аргументов — открытые туннели
-  ferry stop <узел>                 снять всё: команды --desk и фоновые задачи
-  ferry mode <узел>                 режим узла: работает / не трогать рабочий стол /
-                                    отключён от хаба (выбирают на самом узле)
+<цели> — имя устройства, несколько через запятую, all — все на связи, os:windows — по системе.
+На нескольких целях команда идёт параллельно, строки вывода — с [устройство], код выхода —
+первый ненулевой. Отказ устройства по режиму или роли — код 75.
 
-Экран узла (координаты — пиксели снимка ferry shot):
-  ferry windows <узел>              окна сверху вниз: процесс, место, размер; * — фокус
-  ferry click <узел> <x> <y> [right|double]
-  ferry move <узел> <x> <y>         навести курсор
-  ferry scroll <узел> <n>           колесо: больше нуля — вверх
-  ferry type <узел> <текст>         ввести текст (юникод, раскладка не важна)
-  ferry key <узел> <комбинация>...  клавиши: enter, ctrl+s, alt+tab, win+d, f5…
-  ferry rec <узел> <секунды> [кадр/с]
+Команды на устройствах:
+  ferry run <цели> [--desk] [--no-sync] [--] <команда>
+                                    снимок проекта, затем команда в том же подкаталоге
+                                    проекта на устройстве; --desk — с окнами (GUI, тесты)
+  ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
+  ferry start <цели> <имя> [--no-sync] [--] <команда>
+                                    фоновая задача (приложение, dev-сервер, сборка): живёт
+                                    после вызова, пишет лог; то же имя ещё раз — перезапуск
+  ferry jobs <цели>                 задачи: работает, код выхода, когда запущена
+  ferry log <устройство> <имя> [-f] лог задачи; -f — следить до конца и выйти с её кодом
+  ferry kill <цели> <имя>           остановить задачу
+  ferry stop <цели>                 снять всё: команды и задачи
+  ferry put <цели> <файл>...        файлы отсюда — на то же место в проекте на устройстве
+  ferry get <устройство> <путь> [куда]
+                                    файл или каталог с устройства — сюда (~/… — от его дома)
+  ferry pull <устройство>           правки, сделанные на устройстве, — сюда
+  ferry tunnel [<устройство> <порт>] [--close]
+                                    127.0.0.1:<порт> здесь → <порт> устройства (CDP,
+                                    dev-сервер); без аргументов — открытые туннели
+  ferry info <цели>                 свойства: система, железо, питание, экран, ferry
+  ferry power <цели> reboot|sleep|shutdown|cancel
+                                    питание (Windows); reboot и shutdown — через 10 с
+
+Экран устройства (координаты — пиксели снимка ferry shot):
+  ferry shot <цели> [файл.png]      снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png)
+  ferry windows <устройство>        окна сверху вниз: процесс, место, размер; * — фокус
+  ferry click <устройство> <x> <y> [right|double]
+  ferry move <устройство> <x> <y>   навести курсор
+  ferry scroll <устройство> <n>     колесо: больше нуля — вверх
+  ferry type <устройство> <текст>   ввести текст (юникод, раскладка не важна)
+  ferry key <устройство> <комбинация>...
+                                    клавиши: enter, ctrl+s, alt+tab, win+d, f5…
+  ferry rec <устройство> <секунды> [кадр/с]
                                     запись кадрами (5 в секунду) → ~/.ferry/recs/…;
-                                    печатает лист-обзор, с ffmpeg на хабе — ещё и mp4
-  ferry update <узел> <ferry.exe>   заменить ferry на узле и перезапустить демон
-  ferry restart <узел>              перезапустить демон (подхватит новый PATH)
-  ferry power <узел> reboot|sleep|shutdown|cancel
-                                    питание узла; reboot и shutdown — через 10 с, cancel отменяет
-  ferry trust [<хост>]              git с хоста на узлах — через ключи этого хаба (только
-                                    чтение); без аргумента — список доверенных хостов
+                                    печатает лист-обзор, с ffmpeg здесь — ещё и mp4
 
-На узле:
-  ferry daemon                      принимать команды рабочего стола (запускает планировщик)
-  ferry desk <команда>              выполнить команду на рабочем столе этой машины
-  ferry screenshot <файл.png>       снимок экрана этой машины (запускать через desk)
-  ferry record <секунды> <кадр/с> <каталог>
-                                    запись кадрами (через desk)
+Старый путь — узлы по ssh (уйдёт, когда все переедут на приложение):
+  ferry add <узел> <user@адрес> | ls | find <узел> | pause | resume <узел>
+  ferry rename <узел> <имя> | remove <узел> | doctor <узел> | update <узел> <ferry.exe>
+  ferry restart <узел> | mode <узел> | trust [<хост>]
+
+На самой машине:
+  ferry daemon | desk <команда>     демон рабочего стола и команда через него (старый путь)
+  ferry screenshot <файл.png> | record <секунды> <кадр/с> <каталог>
   ferry input windows | move | click | scroll | type | key …
-                                    окна и ввод на этой машине (через desk)
-  ferry jobs | log <имя> [-f] | kill <имя>
-                                    задачи этой машины
-  ferry stop                        снять все команды рабочего стола и задачи
-  ferry info                        свойства этой машины (ключ=значение)
+  ferry jobs | log <имя> [-f] | kill <имя> | stop | info
   ferry mode [active|no-desktop|paused]
-                                    режим этой машины: работать, не трогать рабочий стол,
-                                    отключиться от хаба
+                                    режим: работать, не трогать рабочий стол, отключиться
 
 Служебные: ferry relay — релей git на хабе; на узле — ferry ssh (ssh для git),
 ferry job <имя> <команда> (запуск задачи), ferry job-supervise <имя> (надсмотрщик задачи).
@@ -96,52 +84,49 @@ fn main() {
         ["role", device, role] => devices::role(Some(device), role),
         ["add", name, target] => hub::add(name, target),
         ["ls"] => hub::ls(),
-        ["info", host] => hub::info_command(host),
         ["find", host] => hub::find(host),
         ["pause", host] => hub::pause(host, true),
         ["resume", host] => hub::pause(host, false),
         ["rename", old, new] => hub::rename(old, new),
         ["remove", host] => hub::remove(host),
-        ["sync", host] => hub::sync(host),
-        ["run", host, rest @ ..] => run(host, rest),
-        ["pull", host] => hub::pull(host),
-        ["put", host, paths @ ..] if !paths.is_empty() => hub::put(host, paths),
-        ["get", host, path] => hub::get(host, path, None),
-        ["get", host, path, dest] => hub::get(host, path, Some(dest)),
-        ["shot", host] => hub::shot(host, None),
-        ["shot", host, file] => hub::shot(host, Some(file)),
-        ["stop", host] => hub::stop(host),
         ["doctor", host] => hub::doctor(host),
-        ["start", host, name, rest @ ..] => start(host, name, rest),
-        // Раньше `jobs <узел>`: иначе `--tsv` приняли бы за имя узла.
+        ["info", spec] => devices::info(spec),
+        ["sync", spec] => devices::sync(spec),
+        ["run", spec, rest @ ..] => run(spec, rest),
+        ["pull", device] => devices::pull(device),
+        ["put", spec, paths @ ..] if !paths.is_empty() => devices::put(spec, paths),
+        ["get", device, path] => devices::get(device, path, None),
+        ["get", device, path, dest] => devices::get(device, path, Some(dest)),
+        ["shot", spec] => devices::shot(spec, None),
+        ["shot", spec, file] => devices::shot(spec, Some(file)),
+        ["stop", spec] => devices::stop(spec),
+        ["start", spec, name, rest @ ..] => start(spec, name, rest),
+        // Раньше `jobs <цели>`: иначе `--tsv` приняли бы за имя устройства.
         ["jobs", "--tsv"] => jobs::list(true),
-        ["jobs", host] => hub::jobs(host),
-        ["log", host, name] if *name != "-f" => hub::log(host, name, false),
-        ["log", host, name, "-f"] => hub::log(host, name, true),
-        ["kill", host, name] => said(hub::kill(host, name)),
-        ["tunnel"] => hub::tunnel(None, false),
-        ["tunnel", host, port] => hub::tunnel(Some((host, port)), false),
-        ["tunnel", host, port, "--close"] => hub::tunnel(Some((host, port)), true),
-        ["windows", host] => hub::input(host, &["windows"]).map(|list| {
-            println!("{}", list.trim_end());
-            0
-        }),
-        ["move", host, x, y] => said(hub::input(host, &["move", x, y])),
-        ["click", host, x, y, how @ ..] => {
-            said(hub::input(host, &[&["click", *x, *y][..], how].concat()))
+        ["jobs", spec] => devices::jobs(spec),
+        ["log", device, name] if *name != "-f" => devices::log(device, name, false),
+        ["log", device, name, "-f"] => devices::log(device, name, true),
+        ["kill", spec, name] => devices::kill(spec, name),
+        ["tunnel"] => devices::tunnel(None, false),
+        ["tunnel", device, port] => devices::tunnel(Some((device, port)), false),
+        ["tunnel", device, port, "--close"] => devices::tunnel(Some((device, port)), true),
+        ["windows", device] => devices::input(device, owned(&["windows"])),
+        ["move", device, x, y] => devices::input(device, owned(&["move", x, y])),
+        ["click", device, x, y, how @ ..] => {
+            devices::input(device, owned(&[&["click", *x, *y][..], how].concat()))
         }
-        ["scroll", host, clicks] => said(hub::input(host, &["scroll", clicks])),
-        ["type", host, text @ ..] if !text.is_empty() => {
-            said(hub::input(host, &["type", text.join(" ").as_str()]))
+        ["scroll", device, clicks] => devices::input(device, owned(&["scroll", clicks])),
+        ["type", device, text @ ..] if !text.is_empty() => {
+            devices::input(device, owned(&["type", text.join(" ").as_str()]))
         }
-        ["key", host, combos @ ..] if !combos.is_empty() => {
-            said(hub::input(host, &[&["key"][..], combos].concat()))
+        ["key", device, combos @ ..] if !combos.is_empty() => {
+            devices::input(device, owned(&[&["key"][..], combos].concat()))
         }
-        ["rec", host, seconds] => hub::rec(host, seconds, "5"),
-        ["rec", host, seconds, fps] => hub::rec(host, seconds, fps),
+        ["rec", device, seconds] => devices::rec(device, seconds, "5"),
+        ["rec", device, seconds, fps] => devices::rec(device, seconds, fps),
+        ["power", spec, action] => devices::power(spec, action),
         ["update", host, file] => hub::update(host, file),
         ["restart", host] => said(hub::restart(host)),
-        ["power", host, action] => said(hub::power(host, action)),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["relay"] => relay::serve(),
@@ -199,7 +184,7 @@ fn run(host: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    hub::run(host, desk, sync, &rest.join(" "))
+    devices::run(host, desk, sync, &rest.join(" "))
 }
 
 /// `start <узел> <имя> [--no-sync] [--] <команда>`.
@@ -219,7 +204,7 @@ fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    said(hub::start(host, name, sync, &rest.join(" ")))
+    devices::start(host, name, sync, &rest.join(" "))
 }
 
 /// Ответ действия — в stderr, как остальные сообщения ferry; stdout остаётся для данных.
@@ -229,6 +214,10 @@ fn said(result: io::Result<String>) -> io::Result<i32> {
         eprintln!("{}", text.trim_end());
     }
     Ok(0)
+}
+
+fn owned(args: &[&str]) -> Vec<String> {
+    args.iter().map(|a| a.to_string()).collect()
 }
 
 fn usage() -> io::Result<i32> {
