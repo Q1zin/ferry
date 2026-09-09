@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { api, modeLabel, modes, osLabel, roles, tone, type Mode, type Role, type Status } from '../api'
+import { computed, ref, watch } from 'vue'
+import { api, blocked, modeLabel, modes, osLabel, roles, tone, type Detail, type Mode, type Role, type Status } from '../api'
+import Jobs from './Jobs.vue'
+import Screen from './Screen.vue'
 
 const props = defineProps<{
   device: { id: string | null; name: string; online: boolean; status: Status | null; path: string }
@@ -15,11 +17,45 @@ const s = computed(() => props.device.status)
 // Чужое устройство слушается, пока на связи и человек за ним его не отключил.
 const reachable = computed(() => me.value || (props.device.online && s.value?.mode !== 'paused'))
 
+const tabs = [
+  ['overview', 'Обзор'],
+  ['screen', 'Экран'],
+  ['jobs', 'Задачи'],
+] as const
+const tab = ref<(typeof tabs)[number][0]>('overview')
+
+// Свойства чужого устройства — как только оно на связи и принимает команды.
+const detail = ref<Detail | null>(null)
+const detailLoading = ref(false)
+async function loadDetail() {
+  if (me.value || detailLoading.value || blocked(props.device)) return
+  detailLoading.value = true
+  try {
+    detail.value = await api.detail(props.device.id!)
+  } catch (e) {
+    emit('say', String(e), true)
+  } finally {
+    detailLoading.value = false
+  }
+}
+watch(
+  () => !blocked(props.device),
+  (ok) => {
+    if (ok && !detail.value) loadDetail()
+  },
+  { immediate: true },
+)
+
+function power(action: string, question?: string) {
+  if (question && !confirm(question)) return
+  act(`power:${action}`, () => api.power(props.device.id!, action), 'Готово')
+}
+
 async function act(what: string, run: () => Promise<unknown>, done: string) {
   busy.value = what
   try {
-    await run()
-    emit('say', done)
+    const said = await run()
+    emit('say', typeof said === 'string' && said.trim() ? said : done)
   } catch (e) {
     emit('say', String(e), true)
   } finally {
@@ -59,7 +95,7 @@ async function forget() {
 </script>
 
 <template>
-  <section class="device">
+  <section class="device" :class="{ wide: tab === 'screen' }">
     <header>
       <div class="row">
         <span class="dot" :class="tone(s, device.online, version)"></span>
@@ -75,6 +111,15 @@ async function forget() {
       </p>
     </header>
 
+    <div v-if="!me" class="tabs">
+      <button v-for="[id, title] in tabs" :key="id" :class="{ active: tab === id }" @click="tab = id">
+        {{ title }}
+      </button>
+    </div>
+
+    <Screen v-if="!me && tab === 'screen'" :device="device" @say="(t, e) => emit('say', t, e)" />
+    <Jobs v-else-if="!me && tab === 'jobs'" :device="device" @say="(t, e) => emit('say', t, e)" />
+    <template v-else>
     <div class="card">
       <h3>Роль</h3>
       <p class="muted small">
@@ -142,18 +187,136 @@ async function forget() {
       Человек за устройством отключил его от других — пока режим не вернут, команды не пройдут.
     </p>
 
+    <div v-if="!me && !blocked(device)" class="card">
+      <div class="row head">
+        <h3>Свойства</h3>
+        <button :disabled="detailLoading" :aria-busy="detailLoading" @click="loadDetail">Обновить</button>
+      </div>
+      <table v-if="detail">
+        <tr v-for="[label, value] in detail.properties" :key="label">
+          <th>{{ label }}</th>
+          <td>{{ value }}</td>
+        </tr>
+      </table>
+      <!-- Столько же строк, сколько отдаёт устройство: таблица встаёт на место заглушки. -->
+      <table v-else>
+        <tr v-for="i in 12" :key="i">
+          <th><span class="skeleton short"></span></th>
+          <td><span class="skeleton"></span></td>
+        </tr>
+      </table>
+      <ul v-if="detail?.warnings.length" class="warnings">
+        <li v-for="w in detail.warnings" :key="w" class="warning">⚠ {{ w }}</li>
+      </ul>
+    </div>
+
+    <div v-if="!me && s?.os === 'windows' && !blocked(device)" class="card">
+      <h3>Питание</h3>
+      <div class="row">
+        <button
+          :disabled="!!busy"
+          :aria-busy="busy === 'power:reboot'"
+          @click="power('reboot', `Перезагрузить ${device.name}? Через 10 с, можно отменить.`)"
+        >
+          Перезагрузить
+        </button>
+        <button
+          :disabled="!!busy"
+          :aria-busy="busy === 'power:sleep'"
+          @click="power('sleep', `Усыпить ${device.name}? Разбудить по сети получится только по кабелю.`)"
+        >
+          Усыпить
+        </button>
+        <button
+          class="danger"
+          :disabled="!!busy"
+          :aria-busy="busy === 'power:shutdown'"
+          @click="power('shutdown', `Выключить ${device.name}? Через 10 с, можно отменить.`)"
+        >
+          Выключить
+        </button>
+        <button :disabled="!!busy" :aria-busy="busy === 'power:cancel'" @click="power('cancel')">Отменить</button>
+      </div>
+    </div>
+
     <div v-if="!me" class="row">
       <button class="danger" @click="forget">Забыть устройство</button>
     </div>
+    </template>
   </section>
 </template>
 
 <style scoped>
+/* Во всю высоту main: «Экран» тянет снимок под окно. */
 .device {
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
   max-width: 760px;
+}
+
+.device.wide {
+  max-width: none;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs button {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: 8px 14px;
+  color: var(--muted);
+}
+
+.tabs button.active {
+  color: var(--ink);
+  border-bottom-color: var(--coral);
+}
+
+.head {
+  justify-content: space-between;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+th {
+  width: 40%;
+  font-weight: normal;
+  color: var(--muted);
+  padding-right: 12px;
+}
+
+tr:last-child th,
+tr:last-child td {
+  border-bottom: none;
+}
+
+.warnings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skeleton.short {
+  width: 6em;
 }
 
 header h1 {
