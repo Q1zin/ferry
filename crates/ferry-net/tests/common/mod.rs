@@ -22,6 +22,7 @@ pub fn options(name: &str) -> Options {
         internet: false,
         lan: false,
         home: dir.join("home"),
+        port: None,
         ..Options::new(dir)
     }
 }
