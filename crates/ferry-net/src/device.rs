@@ -30,6 +30,7 @@ impl Device {
             cmd: cmd.into(),
             dir,
             desk,
+            trust: self.trust(),
         };
         self.client.0.server_streaming(run, 64).await.map_err(lost)
     }
@@ -56,6 +57,7 @@ impl Device {
                 name: name.into(),
                 cmd: cmd.into(),
                 dir,
+                trust: self.trust(),
             })
             .await
     }
@@ -269,6 +271,12 @@ impl Device {
                 saved.display()
             )))
         }
+    }
+
+    /// Доверенные хосты этого устройства (`ferry trust`): git на том устройстве ходит к ним через
+    /// наш ssh.
+    fn trust(&self) -> Vec<String> {
+        ferry_core::relay::trusted_in(&self.dir).unwrap_or_default()
     }
 
     fn save_patch(&self, project: &str, patch: &[u8]) -> Reply<PathBuf> {

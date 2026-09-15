@@ -31,6 +31,8 @@ pub(crate) struct Node {
     pub me: watch::Receiver<Status>,
     /// Работающие команды (pid) — для `Stop`.
     pub runs: Mutex<HashSet<u32>>,
+    /// Вход релея git: команды, которые прислало устройство, ходят в git его ключами.
+    pub relay: Arc<crate::relay::Local>,
 }
 
 impl Node {
@@ -102,9 +104,10 @@ impl Node {
         }
     }
 
-    pub async fn handle(self: Arc<Self>, msg: DeviceMessage) {
+    /// Запрос связанного устройства `from`.
+    pub async fn handle(self: Arc<Self>, msg: DeviceMessage, from: iroh::EndpointId) {
         match msg {
-            DeviceMessage::Run(WithChannels { inner, tx, .. }) => self.run(inner, tx).await,
+            DeviceMessage::Run(WithChannels { inner, tx, .. }) => self.run(inner, from, tx).await,
             DeviceMessage::Info(WithChannels { tx, .. }) => {
                 let mode = self.me.borrow().mode;
                 let result = match mode {
@@ -125,8 +128,9 @@ impl Node {
                     self.check(true)?;
                     let cwd = self.resolve(&inner.dir)?;
                     let supervisor = self.supervisor.clone();
+                    let env = self.relay.env(from, &inner.trust, &supervisor);
                     blocking(move || {
-                        jobs::start_in(&inner.name, &inner.cmd, &cwd, &[], &supervisor)
+                        jobs::start_in(&inner.name, &inner.cmd, &cwd, &env, &supervisor)
                     })
                     .await
                 };
@@ -298,15 +302,30 @@ impl Node {
                 }
             }
             // Статус, роль и имя — у агента.
+            DeviceMessage::GitSsh(WithChannels { inner, tx, rx, .. }) => {
+                let me = self.me.borrow().clone();
+                crate::relay::serve_git_ssh(&self.dir, &me, inner, tx, rx).await;
+            }
             DeviceMessage::Watch(_) | DeviceMessage::SetRole(_) | DeviceMessage::Rename(_) => {}
         }
     }
 
-    async fn run(&self, Run { cmd, dir, desk }: Run, tx: mpsc::Sender<Output>) {
+    async fn run(
+        &self,
+        Run {
+            cmd,
+            dir,
+            desk,
+            trust,
+        }: Run,
+        from: iroh::EndpointId,
+        tx: mpsc::Sender<Output>,
+    ) {
         let spawned = (|| {
             self.check(desk)?;
             let cwd = self.resolve(&dir)?;
             tokio::process::Command::from(desk::shell(&cmd))
+                .envs(self.relay.env(from, &trust, &self.supervisor))
                 .current_dir(&cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

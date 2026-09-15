@@ -51,6 +51,8 @@ pub struct Run {
     pub cmd: String,
     pub dir: Dir,
     pub desk: bool,
+    /// Доверенные хосты вызвавшего: git на устройстве ходит к ним через его ssh (релей).
+    pub trust: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -65,6 +67,7 @@ pub struct Start {
     pub name: String,
     pub cmd: String,
     pub dir: Dir,
+    pub trust: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -143,6 +146,25 @@ pub struct Tunnel {
     pub port: u16,
 }
 
+/// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
+/// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct GitSsh {
+    pub target: String,
+    pub port: String,
+    pub command: String,
+    pub protocol: String,
+}
+
+/// Ответ релея: принято (можно слать stdin), вывод ssh, код выхода.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum Relay {
+    Accepted,
+    Out(Vec<u8>),
+    Err(Vec<u8>),
+    Exit(i32),
+}
+
 #[rpc_requests(message = DeviceMessage)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DeviceProtocol {
@@ -185,6 +207,9 @@ pub enum DeviceProtocol {
     Get(Get),
     #[rpc(tx = mpsc::Sender<Vec<u8>>, rx = mpsc::Receiver<Vec<u8>>)]
     Tunnel(Tunnel),
+    /// stdin кусками; пустой кусок — конец stdin.
+    #[rpc(tx = mpsc::Sender<Relay>, rx = mpsc::Receiver<Vec<u8>>)]
+    GitSsh(GitSsh),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
