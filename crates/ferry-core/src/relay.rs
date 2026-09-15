@@ -15,13 +15,15 @@
 //! - хаб → узел: кадры «байт вида + поле»: 0 — принято, 1 — stdout, 2 — stderr,
 //!   3 — код выхода (`i32` LE). Отказ — 2 и 3 без 0.
 
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::Command;
 use std::thread;
 
 use crate::desk::{read_field, write_field};
-use crate::exit_code;
+use crate::{exit_code, ferry_home, write_private};
 
 /// Порт на узле, где sshd слушает обратный проброс к релею хаба.
 pub const NODE_PORT: u16 = 47801;
@@ -110,8 +112,115 @@ fn plain_ssh(args: &[&str]) -> io::Result<i32> {
     Ok(exit_code(Command::new("ssh").args(args).status()?))
 }
 
+pub fn trust(host: Option<&str>) -> io::Result<i32> {
+    let mut hosts = trusted()?;
+    let Some(host) = host else {
+        hosts.iter().for_each(|h| println!("{h}"));
+        return Ok(0);
+    };
+    if host.is_empty()
+        || host.starts_with('-')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
+    {
+        return Err(io::Error::other(format!("недопустимый хост: {host:?}")));
+    }
+    if !hosts.iter().any(|h| h == host) {
+        hosts.push(host.into());
+        fs::create_dir_all(ferry_home()?)?;
+        write_private(&ferry_home()?.join("trust"), &(hosts.join("\n") + "\n"))?;
+    }
+    eprintln!("ferry: git с {host} на узлах пойдёт через ключи этого хаба (только чтение)");
+    Ok(0)
+}
+
+pub fn trusted() -> io::Result<Vec<String>> {
+    trusted_in(&crate::ferry_home()?)
+}
+
+/// Доверенные хосты из `<dir>/trust`.
+pub fn trusted_in(dir: &Path) -> io::Result<Vec<String>> {
+    let text = std::fs::read_to_string(dir.join("trust")).unwrap_or_default();
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Можно ли выполнить ssh-команду узла ключами этой машины: хост доверен (`<dir>/trust`),
+/// команда — только чтение, аргументы без сюрпризов.
+/// Каждое поле уходит в аргументы ssh: здесь решается, не станет ли оно опцией.
+pub fn allowed(
+    dir: &Path,
+    target: &str,
+    port: &str,
+    command: &str,
+    protocol: &str,
+) -> Result<(), String> {
+    let (user, host) = target.rsplit_once('@').unwrap_or(("", target));
+    let trusted = trusted_in(dir).map_err(|e| e.to_string())?;
+    if !trusted.iter().any(|t| t == host) {
+        return Err(format!(
+            "{host} не в доверенных (на хабе: ferry trust {host})"
+        ));
+    }
+    let word = |s: &str| {
+        !s.starts_with('-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    if !user.is_empty() && !word(user) {
+        return Err(format!("недопустимый пользователь {user:?}"));
+    }
+    if !port.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("недопустимый порт {port:?}"));
+    }
+    if !protocol
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "=:._-".contains(c))
+    {
+        return Err(format!("недопустимый GIT_PROTOCOL {protocol:?}"));
+    }
+    // git присылает ровно `git-upload-pack '<путь>'`.
+    let read_only = ["git-upload-pack ", "git-upload-archive "]
+        .iter()
+        .any(|verb| {
+            command.strip_prefix(verb).is_some_and(|path| {
+                path.len() > 2
+                    && path.starts_with('\'')
+                    && path.ends_with('\'')
+                    && !path[1..path.len() - 1].contains('\'')
+            })
+        });
+    if !read_only {
+        return Err(format!(
+            "релей пропускает только чтение (git-upload-pack, git-upload-archive), не {command:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// ssh этой машины для команды узла (её уже проверил [`allowed`]). `FERRY_RELAY_SSH` — подменить
+/// ssh (тесты, нестандартный клиент).
+pub fn ssh_command(target: &str, port: &str, command: &str, protocol: &str) -> Command {
+    let program = std::env::var("FERRY_RELAY_SSH").unwrap_or_else(|_| "ssh".into());
+    let mut ssh = Command::new(program);
+    ssh.args(["-o", "BatchMode=yes"]);
+    if !port.is_empty() {
+        ssh.args(["-p", port]);
+    }
+    if !protocol.is_empty() {
+        ssh.arg("-o").arg(format!("SetEnv=GIT_PROTOCOL={protocol}"));
+    }
+    ssh.args(["--", target, command]);
+    ssh
+}
+
 #[cfg(unix)]
-pub use hub::{node_env, serve, trust, trusted};
+pub use hub::{node_env, serve};
 
 #[cfg(not(unix))]
 pub fn node_env() -> io::Result<String> {
@@ -123,16 +232,6 @@ pub fn serve() -> io::Result<i32> {
     Err(io::Error::other(
         "релей хаба пока есть только на macOS и Linux",
     ))
-}
-
-#[cfg(not(unix))]
-pub fn trust(_: Option<&str>) -> io::Result<i32> {
-    serve()
-}
-
-#[cfg(not(unix))]
-pub fn trusted() -> io::Result<Vec<String>> {
-    Ok(Vec::new())
 }
 
 #[cfg(unix)]
@@ -160,39 +259,6 @@ mod hub {
         Ok(ferry_home()?.join("relay.sock"))
     }
 
-    pub fn trust(host: Option<&str>) -> io::Result<i32> {
-        let mut hosts = trusted()?;
-        let Some(host) = host else {
-            hosts.iter().for_each(|h| println!("{h}"));
-            return Ok(0);
-        };
-        if host.is_empty()
-            || host.starts_with('-')
-            || !host
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || ".-".contains(c))
-        {
-            return Err(io::Error::other(format!("недопустимый хост: {host:?}")));
-        }
-        if !hosts.iter().any(|h| h == host) {
-            hosts.push(host.into());
-            fs::create_dir_all(ferry_home()?)?;
-            write_private(&ferry_home()?.join("trust"), &(hosts.join("\n") + "\n"))?;
-        }
-        eprintln!("ferry: git с {host} на узлах пойдёт через ключи этого хаба (только чтение)");
-        Ok(0)
-    }
-
-    pub fn trusted() -> io::Result<Vec<String>> {
-        let text = fs::read_to_string(ferry_home()?.join("trust")).unwrap_or_default();
-        Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect())
-    }
-
     fn token() -> io::Result<String> {
         let path = ferry_home()?.join("relay-token");
         let token = fs::read_to_string(&path).unwrap_or_default();
@@ -208,7 +274,7 @@ mod hub {
     /// Окружение для команды на узле: git ходит к доверенным хостам через релей хаба.
     /// Пусто, если доверенных хостов нет. Заодно поднимает релей.
     pub fn node_env() -> io::Result<String> {
-        let hosts = trusted()?;
+        let hosts = super::trusted()?;
         if hosts.is_empty() {
             return Ok(String::new());
         }
@@ -299,23 +365,13 @@ mod hub {
             out.write_all(&[kind])?;
             write_field(&mut *out, data)
         };
-        if let Err(why) = allowed(&target, &port, &command, &protocol) {
+        if let Err(why) = super::allowed(&ferry_home()?, &target, &port, &command, &protocol) {
             send(2, format!("ferry relay: {why}\n").as_bytes())?;
             return send(3, &1i32.to_le_bytes());
         }
 
-        // FERRY_RELAY_SSH — подменить ssh (тесты, нестандартный клиент).
-        let program = std::env::var("FERRY_RELAY_SSH").unwrap_or_else(|_| "ssh".into());
-        let mut ssh = Command::new(program);
-        ssh.args(["-o", "BatchMode=yes"]);
-        if !port.is_empty() {
-            ssh.args(["-p", &port]);
-        }
-        if !protocol.is_empty() {
-            ssh.arg("-o").arg(format!("SetEnv=GIT_PROTOCOL={protocol}"));
-        }
-        ssh.args(["--", &target, &command])
-            .stdin(Stdio::piped())
+        let mut ssh = super::ssh_command(&target, &port, &command, &protocol);
+        ssh.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = match ssh.spawn() {
@@ -355,50 +411,5 @@ mod hub {
                 return;
             }
         }
-    }
-
-    /// Каждое поле уходит в аргументы ssh хаба: здесь решается, не станет ли оно опцией.
-    fn allowed(target: &str, port: &str, command: &str, protocol: &str) -> Result<(), String> {
-        let (user, host) = target.rsplit_once('@').unwrap_or(("", target));
-        let trusted = trusted().map_err(|e| e.to_string())?;
-        if !trusted.iter().any(|t| t == host) {
-            return Err(format!(
-                "{host} не в доверенных (на хабе: ferry trust {host})"
-            ));
-        }
-        let word = |s: &str| {
-            !s.starts_with('-')
-                && s.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-        };
-        if !user.is_empty() && !word(user) {
-            return Err(format!("недопустимый пользователь {user:?}"));
-        }
-        if !port.chars().all(|c| c.is_ascii_digit()) {
-            return Err(format!("недопустимый порт {port:?}"));
-        }
-        if !protocol
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "=:._-".contains(c))
-        {
-            return Err(format!("недопустимый GIT_PROTOCOL {protocol:?}"));
-        }
-        // git присылает ровно `git-upload-pack '<путь>'`.
-        let read_only = ["git-upload-pack ", "git-upload-archive "]
-            .iter()
-            .any(|verb| {
-                command.strip_prefix(verb).is_some_and(|path| {
-                    path.len() > 2
-                        && path.starts_with('\'')
-                        && path.ends_with('\'')
-                        && !path[1..path.len() - 1].contains('\'')
-                })
-            });
-        if !read_only {
-            return Err(format!(
-                "релей пропускает только чтение (git-upload-pack, git-upload-archive), не {command:?}"
-            ));
-        }
-        Ok(())
     }
 }
