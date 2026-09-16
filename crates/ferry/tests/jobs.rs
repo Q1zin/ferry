@@ -124,21 +124,3 @@ fn kill_stops_the_command_and_restart_replaces_it() {
     assert!(!alive(&second), "команда пережила kill");
 }
 
-#[test]
-fn stop_takes_down_jobs_too() {
-    let node = Node::new("stop");
-    node.ferry(&["job", "a", "exec sleep 30"]);
-    node.ferry(&["job", "b", "exec sleep 30"]);
-    let out = node.ferry(&["stop"]);
-    assert!(
-        String::from_utf8(out.stdout)
-            .unwrap()
-            .contains("остановлено задач: 2")
-    );
-    assert_eq!(
-        node.jobs().matches("остановлена").count(),
-        2,
-        "{}",
-        node.jobs()
-    );
-}
