@@ -1,13 +1,13 @@
-//! Режим узла. Его выбирает человек за узлом — иконкой ferry в трее или `ferry mode`; хаб
-//! режим только видит.
+//! Режим устройства. Его выбирает человек за устройством — иконкой ferry в трее, в окне или
+//! `ferry mode`; другие устройства режим только видят.
 //!
 //! - `active` — обычная работа;
 //! - `no-desktop` — «не трогать рабочий стол»: команды `--desk`, ввод, снимки и задачи
 //!   отклоняются, обычные команды (сборка, sync) идут;
-//! - `paused` — «отключиться от хаба»: хаб ничего не делает на узле.
+//! - `paused` — «отключиться от других устройств»: устройство ничего не выполняет для других.
 //!
-//! Рабочий стол бережёт сам демон — это жёсткий запрет. Остальное на паузе отклоняет
-//! проверка, с которой хаб начинает каждую команду на узле ([`GUARD`]).
+//! Запреты проверяет само устройство, получив команду (`ferry-net`), и отказывает с кодом
+//! [`REFUSED`].
 
 use std::fs;
 use std::io;
@@ -36,7 +36,7 @@ impl Mode {
         Mode::ALL.into_iter().find(|m| m.name() == name)
     }
 
-    /// Для людей: в трее, в `ferry ls`, в приложении хаба.
+    /// Для людей: в трее, в `ferry devices`, в приложении.
     pub fn label(self) -> &'static str {
         match self {
             Mode::Active => "работает",
@@ -53,11 +53,6 @@ impl Mode {
 
 /// Код выхода команды, которую узел отклонил из-за режима (EX_TEMPFAIL).
 pub const REFUSED: i32 = 75;
-
-/// Начало каждой команды хаба на узле: на паузе — выйти с [`REFUSED`] и объяснением.
-pub const GUARD: &str = "[ \"$(cat ~/.ferry/mode 2>/dev/null)\" = paused ] && \
-    { echo 'ferry: узел отключён от хаба — это решили на самом узле (иконка ferry в трее)' >&2; \
-    exit 75; }; ";
 
 pub fn current() -> Mode {
     crate::ferry_home().map_or(Mode::Active, |dir| current_in(&dir))
@@ -98,7 +93,6 @@ pub fn command(new: Option<&str>) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     #[test]
     fn names_round_trip() {
@@ -106,32 +100,5 @@ mod tests {
             assert_eq!(Mode::parse(mode.name()), Some(mode));
         }
         assert_eq!(Mode::parse("paused\n"), None);
-    }
-
-    /// GUARD в настоящем sh: на паузе — код 75 и команда не выполняется, иначе — выполняется.
-    #[test]
-    fn guard_stops_commands_only_when_paused() {
-        let home = std::env::temp_dir().join(format!("ferry-guard-{}", std::process::id()));
-        fs::create_dir_all(home.join(".ferry")).unwrap();
-        let run = || {
-            Command::new("sh")
-                .args(["-c", &format!("{GUARD}echo ran")])
-                .env("HOME", &home)
-                .output()
-                .unwrap()
-        };
-        for (mode, code, out) in [
-            ("paused", 75, ""),
-            ("no-desktop", 0, "ran\n"),
-            ("active", 0, "ran\n"),
-        ] {
-            fs::write(home.join(".ferry/mode"), format!("{mode}\n")).unwrap();
-            let result = run();
-            assert_eq!(result.status.code(), Some(code), "{mode}");
-            assert_eq!(String::from_utf8_lossy(&result.stdout), out, "{mode}");
-        }
-        fs::remove_file(home.join(".ferry/mode")).unwrap();
-        assert_eq!(run().status.code(), Some(0), "без файла режима — работаем");
-        let _ = fs::remove_dir_all(&home);
     }
 }

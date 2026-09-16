@@ -165,6 +165,15 @@ async fn cli_drives_devices_through_the_app() {
     );
     assert!(root("win").join("ferry/app/src/main.txt").exists());
 
+    // doctor из репозитория: проверки идут шеллом устройства.
+    let out = ferry(&repo, &["doctor", "win"]).await;
+    let said = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{said}{}", text(&out.stderr));
+    assert!(
+        said.contains("✓ git") && said.contains("свободно на диске"),
+        "{said}"
+    );
+
     // Убили CLI посреди команды — команда на устройстве останавливается.
     let pidfile = root("win").join("pid");
     let cmd = format!("echo $$ > '{}'; sleep 30", pidfile.display());

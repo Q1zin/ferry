@@ -1,23 +1,19 @@
-//! Логика ferry: узлы и проект на них (хаб), демон рабочего стола и задачи (узел), релей
-//! git, экран; общие типы устройств и локальное управление приложением. Бинарник `ferry` (CLI)
-//! и приложение — тонкие оболочки над ней, связь устройств — в `ferry-net`.
+//! Логика ferry на устройстве: шелл и задачи, экран и ввод, свойства, снимок проекта, режим,
+//! релей git; общие типы устройств и локальное управление приложением. CLI и приложение —
+//! тонкие оболочки над ней, связь устройств — в `ferry-net`.
 
 pub mod control;
 pub mod desk;
 pub mod device;
 pub mod doctor;
-pub mod find;
-pub mod hub;
 pub mod info;
 pub mod jobs;
 pub mod mode;
-pub mod nodes;
 pub mod power;
 pub mod project;
 pub mod relay;
 pub mod screen;
 pub mod sync;
-pub mod tray;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

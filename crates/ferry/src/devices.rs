@@ -503,6 +503,46 @@ pub fn log(device: &str, name: &str, follow: bool) -> io::Result<i32> {
     finish(stream(request, &Printer::new(None)))
 }
 
+/// `ferry doctor <цели>`: готово ли устройство собирать этот проект.
+pub fn doctor(spec: &str) -> io::Result<i32> {
+    let repo = match sync::repo() {
+        Ok(repo) => repo,
+        Err(e) => return finish(Err(e.into())),
+    };
+    each(spec, |device, printer| {
+        let repo = repo.as_ref().map(|r| (r.root.as_path(), r.name.as_str()));
+        let checks = ferry_core::doctor::checks(device, repo)?;
+        let script = ferry_core::doctor::script(&checks);
+        let request = Request::Run {
+            device: device.into(),
+            cmd: script,
+            dir: Dir::Home,
+            desk: false,
+        };
+        let (output, _) = capture(request)?;
+        let (lines, healthy) = ferry_core::doctor::report(&checks, &output);
+        for line in lines {
+            printer.line(&line, false);
+        }
+        Ok(if healthy { 0 } else { 1 })
+    })
+}
+
+/// stdout команды целиком и её код — для разбора здесь.
+fn capture(request: Request) -> Result<(String, i32), Fail> {
+    let mut out = Vec::new();
+    for response in control::open(request)? {
+        match response? {
+            Response::Out(data) => out.extend(data),
+            Response::Err(_) => {}
+            Response::Exit(code) => return Ok((String::from_utf8_lossy(&out).into_owned(), code)),
+            Response::Error(fail) => return Err(fail),
+            _ => return Err(unexpected()),
+        }
+    }
+    Err(Fail::new("приложение оборвало ответ"))
+}
+
 /// `ferry kill <цели> <имя>`.
 pub fn kill(spec: &str, name: &str) -> io::Result<i32> {
     each(spec, |device, printer| {

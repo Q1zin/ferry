@@ -1,18 +1,18 @@
-//! Релей git через хаб: у узла нет ключей от приватных репозиториев, а git на нём всё равно
-//! ходит в них по SSH — ключами хаба.
+//! Релей git, сторона устройства-узла и проверки стороны заказчика. У узла нет ключей от
+//! приватных репозиториев, а git на нём ходит в них по SSH — ключами устройства, которое
+//! запустило команду.
 //!
-//! Команды, которые ferry запускает на узле, получают `GIT_SSH_COMMAND='ferry ssh'`. Для
-//! доверенного хоста (`ferry trust <хост>`) `ferry ssh` в сеть сам не идёт: через обратный
-//! проброс (RemoteForward из Host-блока узла → unix-сокет хаба) он просит релей хаба
-//! выполнить ту же команду своим ssh и гоняет stdin/stdout/stderr. Ключ хаб не покидает.
-//! Релей пропускает только чтение (`git-upload-pack`, `git-upload-archive`) и только к
-//! доверенным хостам: скомпрометированный узел не сможет пушить от твоего имени. Другие
-//! хосты, как и недоступный релей, — обычный ssh узла.
+//! Команды, которые прислало устройство, получают `GIT_SSH_COMMAND='<exe приложения> ssh'`,
+//! `FERRY_RELAY='<порт> <токен>'` и `FERRY_TRUST` — доверенные хосты заказчика. Для доверенного
+//! хоста [`ssh`] в сеть сам не идёт: он стучится на `127.0.0.1:<порт>` в приложение, а оно
+//! гонит сессию к заказчику (`ferry-net`). Заказчик пропускает только чтение
+//! (`git-upload-pack`, `git-upload-archive`) к своим доверенным хостам ([`allowed`]) и выполняет
+//! команду своим ssh ([`ssh_command`]): ключ не покидает его. Недоверенные хосты — обычный ssh.
 //!
-//! Протокол (поля «`u32` LE длина + байты», как у демона):
-//! - узел → хаб: токен, `user@host`, порт или пусто, команда, `GIT_PROTOCOL` или пусто;
+//! Протокол клиента (поля «`u32` LE длина + байты»):
+//! - клиент → приложение: токен, `user@host`, порт или пусто, команда, `GIT_PROTOCOL` или пусто;
 //!   после «принято» — куски stdin, пустое поле — конец stdin;
-//! - хаб → узел: кадры «байт вида + поле»: 0 — принято, 1 — stdout, 2 — stderr,
+//! - приложение → клиент: кадры «байт вида + поле»: 0 — принято, 1 — stdout, 2 — stderr,
 //!   3 — код выхода (`i32` LE). Отказ — 2 и 3 без 0.
 
 use std::fs;
@@ -24,9 +24,6 @@ use std::thread;
 
 use crate::desk::{read_field, write_field};
 use crate::{exit_code, ferry_home, write_private};
-
-/// Порт на узле, где sshd слушает обратный проброс к релею хаба.
-pub const NODE_PORT: u16 = 47801;
 
 /// `ferry ssh <аргументы ssh>` на узле. git зовёт его так:
 /// `[-o SendEnv=GIT_PROTOCOL] [-p порт] [-4|-6] <user@host> <команда>`.
@@ -56,7 +53,7 @@ pub fn ssh(args: &[&str]) -> io::Result<i32> {
         return plain_ssh(args);
     };
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", relay_port.parse().unwrap_or(0))) else {
-        eprintln!("ferry: релей хаба недоступен — {host} обычным ssh");
+        eprintln!("ferry: релей недоступен — {host} обычным ssh");
         return plain_ssh(args);
     };
 
@@ -72,10 +69,10 @@ pub fn ssh(args: &[&str]) -> io::Result<i32> {
         let mut kind = [0];
         if stream.read_exact(&mut kind).is_err() {
             if started {
-                return Err(io::Error::other("релей хаба оборвал соединение"));
+                return Err(io::Error::other("релей оборвал соединение"));
             }
-            // Хаб на связи, но релей на нём не отвечает. stdin ещё не тронут — можно и так.
-            eprintln!("ferry: релей хаба не ответил — {host} обычным ssh");
+            // Релей не ответил. stdin ещё не тронут — можно и обычным ssh.
+            eprintln!("ferry: релей не ответил — {host} обычным ssh");
             return plain_ssh(args);
         }
         let data = read_field(&mut stream)?;
@@ -131,7 +128,7 @@ pub fn trust(host: Option<&str>) -> io::Result<i32> {
         fs::create_dir_all(ferry_home()?)?;
         write_private(&ferry_home()?.join("trust"), &(hosts.join("\n") + "\n"))?;
     }
-    eprintln!("ferry: git с {host} на узлах пойдёт через ключи этого хаба (только чтение)");
+    eprintln!("ferry: git с {host} на устройствах пойдёт через ключи этой машины (только чтение)");
     Ok(0)
 }
 
@@ -164,7 +161,7 @@ pub fn allowed(
     let trusted = trusted_in(dir).map_err(|e| e.to_string())?;
     if !trusted.iter().any(|t| t == host) {
         return Err(format!(
-            "{host} не в доверенных (на хабе: ferry trust {host})"
+            "{host} не в доверенных (на запустившем устройстве: ferry trust {host})"
         ));
     }
     let word = |s: &str| {
@@ -217,199 +214,4 @@ pub fn ssh_command(target: &str, port: &str, command: &str, protocol: &str) -> C
     }
     ssh.args(["--", target, command]);
     ssh
-}
-
-#[cfg(unix)]
-pub use hub::{node_env, serve};
-
-#[cfg(not(unix))]
-pub fn node_env() -> io::Result<String> {
-    Ok(String::new())
-}
-
-#[cfg(not(unix))]
-pub fn serve() -> io::Result<i32> {
-    Err(io::Error::other(
-        "релей хаба пока есть только на macOS и Linux",
-    ))
-}
-
-#[cfg(unix)]
-mod hub {
-    use std::fs;
-    use std::io::{self, Read, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    use super::NODE_PORT;
-    use crate::desk::{new_token, read_field, write_field};
-    use crate::{exit_code, ferry_home, sh_quote, write_private};
-
-    /// Сколько релей ждёт без единого соединения, прежде чем выйти; следующая команда
-    /// ferry поднимет его снова.
-    const IDLE: Duration = Duration::from_secs(30 * 60);
-
-    pub fn socket() -> io::Result<PathBuf> {
-        Ok(ferry_home()?.join("relay.sock"))
-    }
-
-    fn token() -> io::Result<String> {
-        let path = ferry_home()?.join("relay-token");
-        let token = fs::read_to_string(&path).unwrap_or_default();
-        if !token.trim().is_empty() {
-            return Ok(token.trim().into());
-        }
-        let token = new_token();
-        fs::create_dir_all(ferry_home()?)?;
-        write_private(&path, &token)?;
-        Ok(token)
-    }
-
-    /// Окружение для команды на узле: git ходит к доверенным хостам через релей хаба.
-    /// Пусто, если доверенных хостов нет. Заодно поднимает релей.
-    pub fn node_env() -> io::Result<String> {
-        let hosts = super::trusted()?;
-        if hosts.is_empty() {
-            return Ok(String::new());
-        }
-        ensure_running()?;
-        // cargo по умолчанию ходит в git через libgit2, мимо GIT_SSH_COMMAND.
-        Ok(format!(
-            "export GIT_SSH_COMMAND='ferry ssh' GIT_SSH_VARIANT=ssh \
-             CARGO_NET_GIT_FETCH_WITH_CLI=true FERRY_RELAY={} FERRY_TRUST={}; ",
-            sh_quote(&format!("{NODE_PORT} {}", token()?)),
-            sh_quote(&hosts.join(" "))
-        ))
-    }
-
-    fn ensure_running() -> io::Result<()> {
-        let socket = socket()?;
-        if UnixStream::connect(&socket).is_ok() {
-            return Ok(());
-        }
-        let mut relay = Command::new(std::env::current_exe()?);
-        relay
-            .arg("relay")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        // Своя группа: Ctrl-C в терминале, откуда его подняли, релей не трогает.
-        std::os::unix::process::CommandExt::process_group(&mut relay, 0);
-        relay.spawn()?;
-        for _ in 0..50 {
-            if UnixStream::connect(&socket).is_ok() {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(40));
-        }
-        eprintln!("ferry: релей не поднялся — git к доверенным хостам на узле пойдёт обычным ssh");
-        Ok(())
-    }
-
-    /// `ferry relay`: слушать `~/.ferry/relay.sock`, пока есть работа.
-    pub fn serve() -> io::Result<i32> {
-        let socket = socket()?;
-        fs::create_dir_all(ferry_home()?)?;
-        if UnixStream::connect(&socket).is_ok() {
-            return Ok(0);
-        }
-        let _ = fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket)?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
-        let token: Arc<str> = token()?.into();
-
-        let active = Arc::new(AtomicUsize::new(0));
-        let last = Arc::new(Mutex::new(Instant::now()));
-        let (watch_active, watch_last) = (active.clone(), last.clone());
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(60));
-                let idle = watch_last.lock().unwrap().elapsed() > IDLE;
-                if watch_active.load(Ordering::SeqCst) == 0 && idle {
-                    let _ = fs::remove_file(&socket);
-                    std::process::exit(0);
-                }
-            }
-        });
-
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            active.fetch_add(1, Ordering::SeqCst);
-            let (token, active, last) = (token.clone(), active.clone(), last.clone());
-            thread::spawn(move || {
-                let _ = relay(stream, &token);
-                *last.lock().unwrap() = Instant::now();
-                active.fetch_sub(1, Ordering::SeqCst);
-            });
-        }
-        Ok(0)
-    }
-
-    fn relay(stream: UnixStream, token: &str) -> io::Result<()> {
-        let mut input = &stream;
-        if read_field(&mut input)? != token.as_bytes() {
-            return Ok(());
-        }
-        let mut field = || read_field(&mut input).map(|f| String::from_utf8_lossy(&f).into_owned());
-        let (target, port, command, protocol) = (field()?, field()?, field()?, field()?);
-
-        let out = Mutex::new(stream.try_clone()?);
-        let send = |kind: u8, data: &[u8]| -> io::Result<()> {
-            let mut out = out.lock().unwrap();
-            out.write_all(&[kind])?;
-            write_field(&mut *out, data)
-        };
-        if let Err(why) = super::allowed(&ferry_home()?, &target, &port, &command, &protocol) {
-            send(2, format!("ferry relay: {why}\n").as_bytes())?;
-            return send(3, &1i32.to_le_bytes());
-        }
-
-        let mut ssh = super::ssh_command(&target, &port, &command, &protocol);
-        ssh.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = match ssh.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                send(2, format!("ferry relay: ssh на хабе: {e}\n").as_bytes())?;
-                return send(3, &127i32.to_le_bytes());
-            }
-        };
-        send(0, &[])?;
-
-        // stdin — отдельно и без ожидания: клиент может держать его открытым до кода выхода.
-        let mut stdin = child.stdin.take().unwrap();
-        let mut from_node = stream.try_clone()?;
-        thread::spawn(move || {
-            while let Ok(chunk) = read_field(&mut from_node) {
-                if chunk.is_empty() || stdin.write_all(&chunk).is_err() {
-                    break;
-                }
-            }
-        });
-        let (mut stdout, mut stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-        thread::scope(|s| {
-            s.spawn(|| pump(&mut stdout, 1, &send));
-            s.spawn(|| pump(&mut stderr, 2, &send));
-        });
-        let code = exit_code(child.wait()?);
-        send(3, &code.to_le_bytes())?;
-        // Отпускает поток stdin, если клиент так и не закрыл свой.
-        stream.shutdown(std::net::Shutdown::Both)
-    }
-
-    fn pump(from: &mut impl Read, kind: u8, send: &impl Fn(u8, &[u8]) -> io::Result<()>) {
-        let mut buf = [0; 16384];
-        while let Ok(n @ 1..) = from.read(&mut buf) {
-            if send(kind, &buf[..n]).is_err() {
-                return;
-            }
-        }
-    }
 }

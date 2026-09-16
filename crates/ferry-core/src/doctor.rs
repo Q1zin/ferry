@@ -1,9 +1,7 @@
-//! `ferry doctor <узел>`: готов ли узел собирать этот проект.
+//! `ferry doctor <цели>`: готово ли устройство собирать этот проект.
 //!
 //! Требования берутся из самого репозитория — `rust-toolchain.toml` и `Cargo.toml`, lock-файлы
-//! JS, `git@`-адреса зависимостей — и из `tools`/`files` в настройках проекта на хабе. Каждая
-//! проверка идёт дважды: в ssh-сессии и на рабочем столе (`ferry desk`) — у демона окружение
-//! со времени его запуска, и поставленный позже инструмент он не увидит до `ferry restart`.
+//! JS, `git@`-адреса зависимостей — и из `tools`/`files` в настройках проекта.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -13,7 +11,7 @@ use std::process::Command;
 
 use crate::sh_quote;
 
-struct Check {
+pub struct Check {
     key: String,
     label: String,
     script: String,
@@ -31,39 +29,32 @@ impl Check {
     }
 }
 
-pub fn run(host: &str, repo: Option<(&Path, &str)>) -> io::Result<i32> {
-    let checks = checks(host, repo)?;
-    let env = crate::relay::node_env()?;
-    let script = |desk: bool| {
-        let mut script = format!(
-            "{env}chk() {{ out=$(eval \"$2\" 2>&1); rc=$?; \
-             printf '%s\\t%s\\t%s\\n' \"$1\" \"$rc\" \"$(printf '%s' \"$out\" | tr '\\t\\r' '  ' | head -1)\"; }}\n"
-        );
-        for check in &checks {
-            if desk && check.key == "desk" {
-                continue;
-            }
-            script += &format!("chk {} {}\n", sh_quote(&check.key), sh_quote(&check.script));
-        }
-        script
-    };
-    let guarded = |script: String| format!("{}{script}", crate::mode::GUARD);
-    let ssh = results(Command::new("ssh").args([host, &guarded(script(false))]))?;
-    let desk = if ssh.get("desk").is_some_and(|(ok, _)| *ok) {
-        let desk = format!("ferry desk {}", sh_quote(&script(true)));
-        Some(results(Command::new("ssh").args([host, &guarded(desk)]))?)
-    } else {
-        None
-    };
+/// Скрипт для шелла устройства, из его домашнего каталога: на каждую проверку строка
+/// `ключ<TAB>код<TAB>первая строка вывода`. Идёт через `ferry run`, поэтому проверки доступа к
+/// git — через релей, как у настоящей сборки.
+pub fn script(checks: &[Check]) -> String {
+    let mut script = String::from(
+        "chk() { out=$(eval \"$2\" 2>&1); rc=$?; \
+         printf '%s\\t%s\\t%s\\n' \"$1\" \"$rc\" \"$(printf '%s' \"$out\" | tr '\\t\\r' '  ' | head -1)\"; }\n",
+    );
+    for check in checks {
+        script += &format!("chk {} {}\n", sh_quote(&check.key), sh_quote(&check.script));
+    }
+    script
+}
 
+/// Отчёт по выводу [`script`]: строки для человека и всё ли в порядке.
+pub fn report(checks: &[Check], output: &str) -> (Vec<String>, bool) {
+    let results = results(output);
     let width = checks
         .iter()
         .map(|c| c.label.chars().count())
         .max()
         .unwrap_or(0);
+    let mut lines = Vec::new();
     let mut healthy = true;
-    for check in &checks {
-        let (ok, text) = ssh
+    for check in checks {
+        let (ok, text) = results
             .get(&check.key)
             .cloned()
             .unwrap_or((false, "нет ответа".into()));
@@ -72,28 +63,26 @@ pub fn run(host: &str, repo: Option<(&Path, &str)>) -> io::Result<i32> {
             (true, false) => "нет".into(),
             _ => text,
         };
-        let on_desk = desk
-            .as_ref()
-            .and_then(|d| d.get(&check.key))
-            .map(|(ok, _)| *ok);
-        let (mark, note) = match (ok, on_desk) {
-            (true, None | Some(true)) => ("✓", text),
-            (true, Some(false)) => (
-                "!",
-                format!(
-                    "{text} — но не на рабочем столе: у демона старое окружение, ferry restart {host}"
-                ),
-            ),
-            (false, Some(true)) => ("!", format!("только на рабочем столе — {}", check.hint)),
-            (false, _) => ("✗", format!("{text} — {}", check.hint)),
+        let (mark, note) = if ok {
+            ("✓", text)
+        } else {
+            ("✗", format!("{text} — {}", check.hint))
         };
-        healthy &= mark == "✓";
-        println!("  {mark} {:<width$}  {note}", check.label);
+        healthy &= ok;
+        lines.push(format!("  {mark} {:<width$}  {note}", check.label));
     }
-    Ok(if healthy { 0 } else { 1 })
+    if !healthy {
+        lines.push(
+            "  Только что поставил инструмент, а его нет? У ferry на устройстве окружение со времени \
+             запуска — перезапусти ferry там."
+                .into(),
+        );
+    }
+    (lines, healthy)
 }
 
-fn checks(host: &str, repo: Option<(&Path, &str)>) -> io::Result<Vec<Check>> {
+/// Проверки для устройства `device`: из репозитория (`root`, `name`) и настроек проекта.
+pub fn checks(device: &str, repo: Option<(&Path, &str)>) -> io::Result<Vec<Check>> {
     let mut checks = vec![
         Check::new("os", "система", "uname -s", ""),
         Check::new(
@@ -103,12 +92,6 @@ fn checks(host: &str, repo: Option<(&Path, &str)>) -> io::Result<Vec<Check>> {
             "",
         ),
         Check::new("git", "git", "git --version", "https://git-scm.com"),
-        Check::new(
-            "desk",
-            "рабочий стол",
-            "ferry desk true",
-            &format!("демон не отвечает: ferry restart {host}"),
-        ),
     ];
     let Some((root, name)) = repo else {
         return Ok(checks);
@@ -162,7 +145,7 @@ fn checks(host: &str, repo: Option<(&Path, &str)>) -> io::Result<Vec<Check>> {
         let hint = if trusted.contains(&git_host) {
             "через релей не прошло — ошибка слева".to_string()
         } else {
-            format!("у узла нет доступа: ferry trust {git_host}")
+            format!("у устройства нет доступа: ferry trust {git_host} здесь")
         };
         let script = format!("git ls-remote {} HEAD", sh_quote(&url));
         checks.push(Check::new(
@@ -177,7 +160,7 @@ fn checks(host: &str, repo: Option<(&Path, &str)>) -> io::Result<Vec<Check>> {
             "test -e {} && echo есть",
             sh_quote(&format!("ferry/{name}/{file}"))
         );
-        let hint = format!("он в files проекта — привезёт ferry sync {host}");
+        let hint = format!("он в files проекта — привезёт ferry sync {device}");
         checks.push(Check::new(&format!("file:{file}"), &file, &script, &hint));
     }
     Ok(checks)
@@ -318,22 +301,16 @@ fn tracked(root: &Path) -> io::Result<Vec<String>> {
         .collect())
 }
 
-/// Строки `ключ<TAB>код<TAB>текст` от скрипта на узле.
-fn results(command: &mut Command) -> io::Result<BTreeMap<String, (bool, String)>> {
-    let out = command.output()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+/// Строки `ключ<TAB>код<TAB>текст` от скрипта на устройстве.
+fn results(output: &str) -> BTreeMap<String, (bool, String)> {
     let mut results = BTreeMap::new();
-    for line in text.lines() {
+    for line in output.lines() {
         let mut fields = line.splitn(3, '\t');
         if let (Some(key), Some(code), Some(text)) = (fields.next(), fields.next(), fields.next()) {
             results.insert(key.to_string(), (code == "0", text.trim().to_string()));
         }
     }
-    if results.is_empty() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        return Err(io::Error::other(format!("узел не ответил: {}", why.trim())));
-    }
-    Ok(results)
+    results
 }
 
 #[cfg(test)]
