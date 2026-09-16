@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "icons": "bun scripts/icons.mjs",
-    "test:ui": "node tests/ui.mjs"
+    "test:ui": "node tests/ui.mjs",
+    "release:mac": "tauri build --config src-tauri/tauri.release.conf.json --bundles dmg",
+    "release:windows": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-pc-windows-gnu --bundles nsis"
   },
   "dependencies": {
     "vue": "^3.5.13",
