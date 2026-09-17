@@ -85,6 +85,131 @@ fn set_autostart(app: AppHandle, on: bool) -> Reply<()> {
     }
 }
 
+/// CLI `ferry` — рядом с приложением (в установщике он едет вместе с ним).
+fn cli_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let cli = exe
+        .parent()?
+        .join(if cfg!(windows) { "ferry.exe" } else { "ferry" });
+    cli.exists().then_some(cli)
+}
+
+/// Куда на unix класть ссылку `ferry`: первый каталог из PATH терминала, куда можно писать.
+#[cfg(unix)]
+fn link_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> =
+        vec!["/opt/homebrew/bin".into(), "/usr/local/bin".into()];
+    if let Ok(home) = ferry_core::home() {
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs
+}
+
+/// Команда `ferry` в терминале: где CLI и стоит ли он уже.
+#[derive(serde::Serialize)]
+struct Cli {
+    path: Option<String>,
+    /// Где команда доступна (ссылка или каталог в PATH); пусто — не поставлена.
+    installed: Option<String>,
+}
+
+#[tauri::command]
+fn cli() -> Cli {
+    let Some(path) = cli_path() else {
+        return Cli {
+            path: None,
+            installed: None,
+        };
+    };
+    #[cfg(unix)]
+    let installed = link_dirs()
+        .into_iter()
+        .map(|dir| dir.join("ferry"))
+        .find(|link| std::fs::read_link(link).is_ok_and(|target| target == path));
+    #[cfg(windows)]
+    let installed = user_path()
+        .ok()
+        .filter(|p| {
+            p.split(';')
+                .any(|d| std::path::Path::new(d) == path.parent().unwrap())
+        })
+        .map(|_| path.parent().unwrap().to_path_buf());
+    Cli {
+        path: Some(path.display().to_string()),
+        installed: installed.map(|p| p.display().to_string()),
+    }
+}
+
+/// Поставить команду `ferry`: на unix — ссылка в каталог из PATH, на Windows — каталог
+/// приложения в PATH пользователя (без прав администратора). Новые терминалы её увидят.
+#[tauri::command]
+fn install_cli() -> Reply<String> {
+    let path =
+        cli_path().ok_or("CLI ferry рядом с приложением нет — это сборка без установщика")?;
+    #[cfg(unix)]
+    {
+        let home_bin = ferry_core::home().map_err(err)?.join(".local/bin");
+        for dir in link_dirs() {
+            if dir == home_bin {
+                std::fs::create_dir_all(&dir).map_err(err)?;
+            }
+            let link = dir.join("ferry");
+            let _ = std::fs::remove_file(&link);
+            if std::os::unix::fs::symlink(&path, &link).is_ok() {
+                let note = if dir == home_bin {
+                    " — добавь ~/.local/bin в PATH, если его там нет"
+                } else {
+                    ""
+                };
+                return Ok(format!("Команда ferry: {}{note}", link.display()));
+            }
+        }
+        Err("не вышло положить ссылку ни в один каталог".into())
+    }
+    #[cfg(windows)]
+    {
+        let dir = path.parent().unwrap().display().to_string();
+        let current = user_path().map_err(err)?;
+        if !current.split(';').any(|d| d == dir) {
+            let joined = if current.is_empty() {
+                dir.clone()
+            } else {
+                format!("{current};{dir}")
+            };
+            powershell(&format!(
+                "[Environment]::SetEnvironmentVariable('Path', '{}', 'User')",
+                joined.replace('\'', "''")
+            ))
+            .map_err(err)?;
+        }
+        Ok(format!(
+            "Команда ferry: {dir} в PATH — открой новый терминал"
+        ))
+    }
+}
+
+/// PATH пользователя из реестра — без того, что добавила система.
+#[cfg(windows)]
+fn user_path() -> std::io::Result<String> {
+    powershell("[Environment]::GetEnvironmentVariable('Path', 'User')")
+        .map(|s| s.trim().to_string())
+}
+
+#[cfg(windows)]
+fn powershell(script: &str) -> std::io::Result<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .creation_flags(0x0800_0000)
+        .output()?;
+    if !out.status.success() {
+        return Err(std::io::Error::other(
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Связанное устройство на связи — по ключу.
 fn on_line(agent: &Agent, id: &str) -> Reply<ferry_net::Device> {
     agent.device(id).map_err(err)
@@ -394,6 +519,8 @@ pub fn run() {
             forget,
             autostart,
             set_autostart,
+            cli,
+            install_cli,
             detail,
             screenshot,
             input,

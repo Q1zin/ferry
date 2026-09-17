@@ -58,6 +58,8 @@ const fixtures = {
   open_pairing: { code: '4821-0937', ticket: `ferry:${snapshot.id}:4821-0937`, seconds_left: 600 },
   pair: { id: NEW, name: 'office-pc', online: true, status: { ...win, name: 'office-pc' }, direct: true, rtt_ms: 3 },
   autostart: true,
+  cli: { path: '/Applications/ferry.app/Contents/MacOS/ferry', installed: null },
+  install_cli: 'Команда ferry: /opt/homebrew/bin/ferry',
   version: '0.1.0',
 }
 
@@ -219,6 +221,8 @@ try {
     await autostart.click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'set_autostart'))
     assert.deepEqual((await calls()).find(([c]) => c === 'set_autostart'), ['set_autostart', { on: false }])
+    await page.getByRole('button', { name: 'Поставить команду ferry' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'install_cli'))
     await fits('настройки')
     await shot('settings')
     await page.close()
