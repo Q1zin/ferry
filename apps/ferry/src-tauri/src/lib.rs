@@ -7,6 +7,7 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_updater::UpdaterExt;
 
 type Reply<T> = Result<T, String>;
 
@@ -208,6 +209,42 @@ fn powershell(script: &str) -> std::io::Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Версия новее этой, если есть.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Reply<Option<String>> {
+    let update = app.updater().map_err(err)?.check().await.map_err(err)?;
+    Ok(update.map(|u| u.version))
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Reply<String> {
+    update(&app).await
+}
+
+/// Новая версия — из релизов на GitHub (`plugins.updater` в tauri.conf.json): скачать (подпись
+/// сверяется публичным ключом), ответить и через секунду поставить и перезапуститься. На Windows
+/// установщик закрывает приложение сам — ответ должен успеть уйти.
+async fn update(app: &AppHandle) -> Reply<String> {
+    let Some(update) = app.updater().map_err(err)?.check().await.map_err(err)? else {
+        return Ok(format!("ferry {} — последняя версия", ferry_core::VERSION));
+    };
+    let bytes = update.download(|_, _| {}, || {}).await.map_err(err)?;
+    let said = format!(
+        "ferry {} → {}: ставлю и перезапускаюсь",
+        ferry_core::VERSION,
+        update.version
+    );
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        match update.install(&bytes) {
+            Ok(()) => app.restart(),
+            Err(e) => tracing::warn!("обновление не встало: {e}"),
+        }
+    });
+    Ok(said)
 }
 
 /// Связанное устройство на связи — по ключу.
@@ -464,9 +501,20 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = ferry_core::ferry_home()?;
-            let agent = tauri::async_runtime::block_on(Agent::start(Options::new(dir.clone())))?;
+            // Обновить это устройство по команде с другого (`ferry update <цели>`).
+            let handle = app.handle().clone();
+            let hook: ferry_net::agent::UpdateHook = std::sync::Arc::new(move || {
+                let app = handle.clone();
+                Box::pin(async move { update(&app).await })
+            });
+            let options = Options {
+                update: Some(hook),
+                ..Options::new(dir.clone())
+            };
+            let agent = tauri::async_runtime::block_on(Agent::start(options))?;
             app.manage(agent.clone());
             // CLI на этой машине (`ferry devices`, `ferry pair` …) ходит сюда.
             tauri::async_runtime::spawn(ferry_net::control::serve(agent.clone(), dir.clone()));
@@ -519,6 +567,8 @@ pub fn run() {
             forget,
             autostart,
             set_autostart,
+            check_update,
+            install_update,
             cli,
             install_cli,
             detail,
