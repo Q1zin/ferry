@@ -123,4 +123,3 @@ fn kill_stops_the_command_and_restart_replaces_it() {
     assert!(node.jobs().contains("остановлена"), "{}", node.jobs());
     assert!(!alive(&second), "команда пережила kill");
 }
-
