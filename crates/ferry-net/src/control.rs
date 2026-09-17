@@ -193,6 +193,10 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             close: true,
         } => Response::Message(agent.close_tunnel(&device, port)?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
+        Request::Update { device: None } => Response::Message(agent.update_self().await?),
+        Request::Update {
+            device: Some(device),
+        } => Response::Message(agent.device(&device)?.update().await?),
     };
     Ok(Answer::Once(response))
 }

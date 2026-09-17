@@ -28,12 +28,16 @@ pub fn options(name: &str) -> Options {
 }
 
 pub async fn agent(name: &str) -> Agent {
+    agent_with(name, options(name)).await
+}
+
+pub async fn agent_with(name: &str, options: Options) -> Agent {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
     let _ = std::fs::remove_dir_all(path(name));
     std::fs::create_dir_all(path(name).join("home")).unwrap();
-    let agent = Agent::start(options(name)).await.unwrap();
+    let agent = Agent::start(options).await.unwrap();
     agent.rename(None, name).await.unwrap();
     agent
 }
@@ -54,19 +58,23 @@ pub async fn until(agent: &Agent, what: &str, ok: impl Fn(&Snapshot) -> bool) ->
 
 pub async fn paired(a: &str, b: &str) -> (Agent, Agent) {
     let (a, b) = (agent(a).await, agent(b).await);
+    pair(&a, &b).await;
+    (a, b)
+}
+
+pub async fn pair(a: &Agent, b: &Agent) {
     a.learn(b.addr());
     b.learn(a.addr());
     let ticket = b.open_pairing().ticket;
     let peer = a.pair(&ticket).await.unwrap();
     assert_eq!(peer.name, b.snapshot().me.name);
     assert!(b.snapshot().pairing.is_none(), "окно связывания закрылось");
-    until(&a, "a видит b", |s| {
+    until(a, "a видит b", |s| {
         s.peers.iter().any(|p| p.online && p.status.is_some())
     })
     .await;
-    until(&b, "b видит a", |s| {
+    until(b, "b видит a", |s| {
         s.peers.iter().any(|p| p.online && p.status.is_some())
     })
     .await;
-    (a, b)
 }

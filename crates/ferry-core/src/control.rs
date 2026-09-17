@@ -112,6 +112,10 @@ pub enum Request {
         close: bool,
     },
     Tunnels,
+    /// Обновить ferry из релиза: на устройстве или (`device` пуст) на этой машине.
+    Update {
+        device: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

@@ -4,11 +4,13 @@ mod common;
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
+use ferry_net::agent::UpdateHook;
 use ferry_net::proto::Output;
-use ferry_net::{Device, Dir, Mode, Role};
+use ferry_net::{Device, Dir, Mode, Options, Role};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Весь вывод команды: stdout, stderr и код (или ошибка с кодом).
@@ -86,6 +88,31 @@ async fn commands_stream_output_and_respect_role_and_mode() {
     // Свойства устройства.
     let info = node.info().await.unwrap();
     assert!(info.iter().any(|(k, _)| k == "os"), "{info:?}");
+}
+
+#[tokio::test]
+async fn update_goes_to_the_devices_own_updater() {
+    let a = agent("upd-ctl").await;
+    let hook: UpdateHook = Arc::new(|| Box::pin(async { Ok("ferry 0.1.0 → 0.1.1".to_string()) }));
+    let options = Options {
+        update: Some(hook),
+        ..options("upd-node")
+    };
+    let b = agent_with("upd-node", options).await;
+    pair(&a, &b).await;
+
+    let node = a.device("upd-node").unwrap();
+    assert_eq!(node.update().await.unwrap(), "ferry 0.1.0 → 0.1.1");
+    // Сборке без updater (из исходников) обновляться нечем.
+    let fail = b.device("upd-ctl").unwrap().update().await.unwrap_err();
+    assert!(
+        fail.message.contains("не обновляется сама"),
+        "{}",
+        fail.message
+    );
+    // Отключённое устройство издалека не обновляют.
+    b.set_mode(Mode::Paused).unwrap();
+    assert_eq!(node.update().await.unwrap_err().code, 75);
 }
 
 #[tokio::test]

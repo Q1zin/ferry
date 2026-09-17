@@ -44,6 +44,8 @@ ferry — разработка и тесты на нескольких устр�
   ferry info <цели>                 свойства: система, железо, питание, экран, ferry
   ferry power <цели> reboot|sleep|shutdown|cancel
                                     питание (Windows); reboot и shutdown — через 10 с
+  ferry update [<цели>]             обновить ferry из релиза: на устройствах или (без целей)
+                                    на этой машине; они перезапустятся и снова выйдут на связь
   ferry trust [<хост>]              git с хоста на устройствах — через ключи этой машины
                                     (только чтение); без аргумента — доверенные хосты
 
@@ -116,6 +118,8 @@ fn main() {
         ["rec", device, seconds] => devices::rec(device, seconds, "5"),
         ["rec", device, seconds, fps] => devices::rec(device, seconds, fps),
         ["power", spec, action] => devices::power(spec, action),
+        ["update"] => devices::update(None),
+        ["update", spec] => devices::update(Some(spec)),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["ssh", args @ ..] => relay::ssh(args),

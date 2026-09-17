@@ -33,6 +33,7 @@ pub(crate) struct Node {
     pub runs: Mutex<HashSet<u32>>,
     /// Вход релея git: команды, которые прислало устройство, ходят в git его ключами.
     pub relay: Arc<crate::relay::Local>,
+    pub update: Option<crate::agent::UpdateHook>,
 }
 
 impl Node {
@@ -306,8 +307,29 @@ impl Node {
                 let me = self.me.borrow().clone();
                 crate::relay::serve_git_ssh(&self.dir, &me, inner, tx, rx).await;
             }
+            DeviceMessage::Update(WithChannels { tx, .. }) => {
+                tx.send(self.update().await).await.ok();
+            }
             DeviceMessage::Watch(_) | DeviceMessage::SetRole(_) | DeviceMessage::Rename(_) => {}
         }
+    }
+
+    /// Обновить ferry из релиза. Отключённое человеком устройство издалека не трогаем.
+    pub async fn update(&self) -> Reply<String> {
+        let me = self.me.borrow().clone();
+        if me.mode == Mode::Paused {
+            return Err(Fail::refused(format!(
+                "{} отключён от других устройств",
+                me.name
+            )));
+        }
+        let Some(update) = &self.update else {
+            return Err(Fail::new(format!(
+                "{}: эта сборка ferry не обновляется сама",
+                me.name
+            )));
+        };
+        update().await.map_err(Fail::new)
     }
 
     async fn run(
