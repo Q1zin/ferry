@@ -81,8 +81,9 @@ fn background_process_does_not_hold_the_call() {
     );
 }
 
+// Клиент умер (как от sshd при обрыве ssh): сокет демона закрывается → дерево команды гаснет.
 #[test]
-fn disconnect_kills_the_command() {
+fn killing_client_stops_the_command() {
     let d = daemon("kill");
     let mut client = desk(&d, "echo $$; exec sleep 30")
         .stdout(Stdio::piped())
@@ -111,4 +112,16 @@ fn disconnect_kills_the_command() {
         );
         sleep(Duration::from_millis(50));
     }
+}
+
+// stdin, дочитанный до конца, команду не прерывает (иначе ssh с heredoc рвал бы её на лету).
+#[test]
+fn finished_stdin_does_not_stop_the_command() {
+    let d = daemon("stdin");
+    let out = desk(&d, "sleep 1; echo done")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap(), "done\n");
+    assert_eq!(out.status.code(), Some(0));
 }

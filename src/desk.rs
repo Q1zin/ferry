@@ -69,6 +69,12 @@ pub fn run(cmd: &str) -> io::Result<i32> {
         write_field(&mut stream, field)?;
     }
 
+    // Обрыв ssh гасит команду не отсюда: когда хабовый ssh умирает, sshd на узле замечает
+    // мёртвого клиента (ClientAliveInterval, ставит установщик) и сносит сессию — этот
+    // процесс умирает, сокет демона закрывается, и демон убивает дерево команды.
+    // Следить за EOF на stdin нельзя: при `ssh host 'ferry desk ...' <<heredoc` или с любым
+    // конечным stdin он закроется, пока команда ещё работает, — как и обычный ssh, концом
+    // stdin команду не прерываем.
     let mut stdout = io::stdout().lock();
     loop {
         let chunk = read_field(&mut stream)
@@ -201,21 +207,20 @@ fn new_token() -> String {
 
 fn shell(cmd: &str) -> Command {
     let mut command = Command::new(shell_path());
-    command.args(["-lc", cmd]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // Без CHERE_INVOKING login-профиль Git Bash уходит в $HOME. Окно консоли команде не
-        // нужно; GUI-программы, которые она запустит, это не затрагивает.
-        command
-            .env("CHERE_INVOKING", "1")
-            .creation_flags(CREATE_NO_WINDOW);
+        // Без login, как и sshd: login-шелл Git Bash на `exit` печатает clear из
+        // /etc/bash.bash_logout. Окно консоли команде не нужно; GUI-программы, которые она
+        // запустит, это не затрагивает.
+        command.args(["-c", cmd]).creation_flags(CREATE_NO_WINDOW);
     }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // Своя группа процессов — чтобы при обрыве убить всё дерево разом.
-        command.process_group(0);
+        // Login-шелл: из него PATH с brew и прочим из профиля. Своя группа процессов — чтобы
+        // при обрыве убить всё дерево разом.
+        command.args(["-lc", cmd]).process_group(0);
     }
     command
 }
