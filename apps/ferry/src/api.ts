@@ -64,6 +64,9 @@ export const api = {
   power: (id: string, action: string) => invoke<string>('power', { id, action }),
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),
+  /// Версия новее этой, если есть в релизах.
+  checkUpdate: () => invoke<string | null>('check_update'),
+  installUpdate: () => invoke<string>('install_update'),
 }
 
 /// Почему с устройством сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий

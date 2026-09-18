@@ -11,6 +11,8 @@ type View = { kind: 'home' } | { kind: 'device'; id: string | null } | { kind: '
 const snap = ref<Snapshot | null>(null)
 const view = ref<View>({ kind: 'home' })
 const notice = ref<{ text: string; error: boolean } | null>(null)
+/// Версия новее этой: проверяется тихо при запуске и в настройках.
+const update = ref<string | null>(null)
 
 const version = computed(() => snap.value?.me.version ?? '')
 
@@ -40,6 +42,11 @@ onMounted(async () => {
   } catch (e) {
     say(String(e), true)
   }
+  // Нет сети или релиза — просто не показываем.
+  api.checkUpdate().then(
+    (v) => (update.value = v),
+    () => {},
+  )
 })
 onUnmounted(() => unlisten.forEach((f) => f()))
 </script>
@@ -82,7 +89,9 @@ onUnmounted(() => unlisten.forEach((f) => f()))
 
       <footer>
         <button @click="view = { kind: 'pairing' }">+ Связать устройство</button>
-        <button @click="view = { kind: 'settings' }">Настройки</button>
+        <button @click="view = { kind: 'settings' }">
+          Настройки<template v-if="update"> · есть {{ update }}</template>
+        </button>
       </footer>
     </aside>
 
@@ -101,7 +110,13 @@ onUnmounted(() => unlisten.forEach((f) => f()))
         @say="say"
         @paired="(id: string) => (view = { kind: 'device', id })"
       />
-      <Settings v-else-if="view.kind === 'settings' && snap" :snap="snap" @say="say" />
+      <Settings
+        v-else-if="view.kind === 'settings' && snap"
+        :snap="snap"
+        :update="update"
+        @say="say"
+        @checked="(v: string | null) => (update = v)"
+      />
       <section v-else class="home">
         <h1>Устройства</h1>
         <div v-if="snap" class="cards">
