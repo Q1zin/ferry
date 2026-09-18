@@ -3,6 +3,7 @@
     "beforeBuildCommand": "bun run build && bun scripts/cli.mjs"
   },
   "bundle": {
-    "externalBin": ["binaries/ferry"]
+    "externalBin": ["binaries/ferry"],
+    "createUpdaterArtifacts": true
   }
 }
