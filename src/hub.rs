@@ -10,12 +10,12 @@
 
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{exit_code, ferry_home, home, write_private};
+use crate::{exit_code, ferry_home, home, sh_quote, write_private};
 
 const INCLUDE: &str = "Include ~/.ferry/ssh_config";
 
@@ -37,14 +37,23 @@ pub fn add(name: &str, target: &str) -> io::Result<i32> {
     let mut text = without_host(&fs::read_to_string(&path).unwrap_or_default(), name);
     // BatchMode: ssh не ждёт пароль, а сразу падает — для Claude и скриптов это важнее.
     // ControlMaster: одно соединение на узел, остальные команды идут без handshake.
+    // RemoteForward: порт на узле → релей git этого хаба (см. relay.rs).
+    let relay = dir.join("relay.sock");
     text.push_str(&format!(
         "Host {name}\n  HostName {addr}\n  User {user}\n  IdentityFile ~/.ssh/ferry\n  \
          IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking accept-new\n  \
          ServerAliveInterval 15\n  ControlMaster auto\n  ControlPath ~/.ferry/cm-%C\n  \
-         ControlPersist 10m\n\n"
+         ControlPersist 10m\n  RemoteForward 127.0.0.1:{} \"{}\"\n\n",
+        crate::relay::NODE_PORT,
+        relay.display()
     ));
     write_private(&path, &text)?;
     include_in_ssh_config()?;
+    // Старое общее соединение живёт со старыми настройками — закрываем.
+    let _ = Command::new("ssh")
+        .args(["-O", "exit", name])
+        .stderr(Stdio::null())
+        .status();
 
     if !home()?.join(".ssh/ferry").exists() {
         eprintln!("ferry: нет ключа ~/.ssh/ferry — ssh-keygen -t ed25519 -f ~/.ssh/ferry -N ''");
@@ -103,10 +112,12 @@ pub fn run(host: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
         None => ".".into(),
     };
     // Команда разбирается шеллом узла ровно один раз — и в обычном режиме, и через desk.
+    // Окружение для релея git — внутри неё: у демона рабочего стола своё окружение.
+    let cmd = format!("{}{cmd}", crate::relay::node_env()?);
     let cmd = if desk {
-        format!("ferry desk {}", sh_quote(cmd))
+        format!("ferry desk {}", sh_quote(&cmd))
     } else {
-        cmd.into()
+        cmd
     };
     let mut ssh = Command::new("ssh");
     if io::stdin().is_terminal() {
@@ -153,6 +164,72 @@ pub fn pull(host: &str) -> io::Result<i32> {
     }
 }
 
+/// Файлы и каталоги отсюда — на то же место в проекте на узле.
+pub fn put(host: &str, paths: &[&str]) -> io::Result<i32> {
+    node(host)?;
+    let here = here()?;
+    let mut rels = Vec::new();
+    for path in paths {
+        let full = fs::canonicalize(path).map_err(|e| io::Error::other(format!("{path}: {e}")))?;
+        let rel = full
+            .strip_prefix(&here.local)
+            .map_err(|_| io::Error::other(format!("{path}: вне {}", here.local.display())))?;
+        if rel.as_os_str().is_empty() {
+            return Err(io::Error::other(
+                "весь проект целиком — это sync; назови файлы",
+            ));
+        }
+        rels.push(rel.to_path_buf());
+    }
+    send(host, &here.local, &rels, &here.remote)?;
+    let rels: Vec<_> = rels.iter().map(|r| r.display().to_string()).collect();
+    eprintln!("ferry: {} → {host}:~/{}", rels.join(", "), here.remote);
+    Ok(0)
+}
+
+/// Файл или каталог с узла — сюда (в `dest`, по умолчанию в текущий каталог). Путь на узле —
+/// относительно того же места в проекте, `~/…` — от домашнего каталога, или абсолютный.
+pub fn get(host: &str, path: &str, dest: Option<&str>) -> io::Result<i32> {
+    node(host)?;
+    let remote = match path.strip_prefix("~/") {
+        // ssh начинает в домашнем каталоге — `~/x` это просто `x`.
+        Some(rest) => rest.to_string(),
+        None if path.starts_with('/') || path.as_bytes().get(1) == Some(&b':') => {
+            path.replace('\\', "/")
+        }
+        None => {
+            let here = here()?;
+            format!("{}/{}{path}", here.remote, here.prefix)
+        }
+    };
+    let remote = remote.trim_end_matches('/');
+    let (dir, name) = remote.rsplit_once('/').unwrap_or((".", remote));
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(io::Error::other(format!("{path}: назови файл или каталог")));
+    }
+    let dir = if dir.is_empty() { "/" } else { dir };
+    let dest = PathBuf::from(dest.unwrap_or("."));
+    fs::create_dir_all(&dest)?;
+
+    let pack = format!("tar -C {} -cf - {}", sh_quote(dir), sh_quote(name));
+    let mut ssh = Command::new("ssh")
+        .args([host, &pack])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let unpacked = Command::new("tar")
+        .arg("-C")
+        .arg(&dest)
+        .args(["-xf", "-"])
+        .stdin(ssh.stdout.take().unwrap())
+        .status()?;
+    // Почему не вышло, оба tar уже написали в stderr.
+    if !ssh.wait()?.success() || !unpacked.success() {
+        return Ok(1);
+    }
+    eprintln!("ferry: {host}:{path} → {}", dest.join(name).display());
+    Ok(0)
+}
+
 pub fn shot(host: &str, file: Option<&str>) -> io::Result<i32> {
     node(host)?;
     let file = match file {
@@ -189,33 +266,51 @@ fn remote_status(host: &str, cmd: &str) -> io::Result<i32> {
     Ok(exit_code(status))
 }
 
-pub fn update(host: &str, file: &str) -> io::Result<i32> {
+pub fn doctor(host: &str) -> io::Result<i32> {
     node(host)?;
-    let os = text(Command::new("ssh").args([host, "uname -s"]))?;
-    if !os.starts_with("MINGW") && !os.starts_with("MSYS") {
-        return Err(io::Error::other(format!(
-            "update пока умеет только Windows-узлы ({host}: {os})"
-        )));
-    }
+    let repo = repo()?;
+    crate::doctor::run(
+        host,
+        repo.as_ref().map(|r| (r.root.as_path(), r.name.as_str())),
+    )
+}
+
+pub fn update(host: &str, file: &str) -> io::Result<i32> {
+    windows_node(host)?;
     output(
         Command::new("scp")
             .arg("-q")
             .arg(file)
             .arg(format!("{host}:.ferry/bin/ferry.new.exe")),
     )?;
-    // Запущенный exe не перезаписать, но переименовать можно. Демон перезапускает
-    // планировщик — так он снова окажется на рабочем столе, а не в Session 0.
-    const RESTART: &str = "set -e
-cd ~/.ferry/bin
-schtasks //end //tn ferry >/dev/null 2>&1 || true
-mv -f ferry.exe ferry.old.exe
-mv ferry.new.exe ferry.exe
-rm -f ~/.ferry/desk
-schtasks //run //tn ferry >/dev/null
-for i in $(seq 50); do [ -f ~/.ferry/desk ] && break; sleep 0.2; done
-rm -f ferry.old.exe 2>/dev/null || true
-ferry desk 'echo ferry: daemon restarted'";
+    // Запущенный exe не перезаписать, но переименовать можно.
+    let swap = "cd ~/.ferry/bin && schtasks //end //tn ferry >/dev/null 2>&1; \
+                mv -f ferry.exe ferry.old.exe && mv ferry.new.exe ferry.exe";
+    let cleanup = "rc=$?; rm -f ~/.ferry/bin/ferry.old.exe 2>/dev/null; exit $rc";
+    remote_status(host, &format!("{swap} && {RESTART}; {cleanup}"))
+}
+
+/// Перезапустить демон: он снова прочитает окружение (новый PATH и т. п.).
+pub fn restart(host: &str) -> io::Result<i32> {
+    windows_node(host)?;
     remote_status(host, RESTART)
+}
+
+/// Демон перезапускает планировщик — так он снова окажется на рабочем столе, а не в Session 0.
+const RESTART: &str = "schtasks //end //tn ferry >/dev/null 2>&1; rm -f ~/.ferry/desk \
+    && schtasks //run //tn ferry >/dev/null \
+    && for i in $(seq 50); do [ -f ~/.ferry/desk ] && break; sleep 0.2; done \
+    && ferry desk 'echo ferry: daemon restarted'";
+
+fn windows_node(host: &str) -> io::Result<()> {
+    node(host)?;
+    let os = text(Command::new("ssh").args([host, "uname -s"]))?;
+    if os.starts_with("MINGW") || os.starts_with("MSYS") {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "пока умею только Windows-узлы ({host}: {os})"
+    )))
 }
 
 struct Repo {
@@ -258,6 +353,29 @@ fn repo() -> io::Result<Option<Repo>> {
     }))
 }
 
+/// Откуда считаются пути: корень репозитория (или текущий каталог вне его), его место на
+/// узле и подкаталог, в котором мы сейчас.
+struct Here {
+    local: PathBuf,
+    remote: String,
+    prefix: String,
+}
+
+fn here() -> io::Result<Here> {
+    Ok(match repo()? {
+        Some(repo) => Here {
+            local: repo.root.canonicalize()?,
+            remote: format!("ferry/{}", repo.name),
+            prefix: repo.prefix,
+        },
+        None => Here {
+            local: std::env::current_dir()?.canonicalize()?,
+            remote: ".".into(),
+            prefix: String::new(),
+        },
+    })
+}
+
 fn not_in_repo() -> io::Error {
     io::Error::other("здесь нет git-репозитория — синхронизировать нечего")
 }
@@ -287,11 +405,52 @@ fn sync_repo(host: &str, repo: &Repo) -> io::Result<()> {
         sh_quote(&dir)
     );
     output(Command::new("ssh").args([host, &checkout]))?;
+
+    // Файлы мимо git (`.env`) — из настроек проекта на хабе.
+    let mut extra = Vec::new();
+    for file in crate::project::load(&repo.name)?.files {
+        if repo.root.join(&file).exists() {
+            extra.push(PathBuf::from(file));
+        } else {
+            eprintln!("ferry: {file} из files проекта здесь нет — не везу");
+        }
+    }
+    if !extra.is_empty() {
+        send(host, &repo.root, &extra, &dir)?;
+    }
+    let extra: Vec<_> = extra.iter().map(|f| f.display().to_string()).collect();
+    let extra = if extra.is_empty() {
+        String::new()
+    } else {
+        format!(" + {}", extra.join(", "))
+    };
     eprintln!(
-        "ferry: {host}:~/{dir} = рабочее дерево здесь ({})",
+        "ferry: {host}:~/{dir} = рабочее дерево здесь ({}){extra}",
         &commit[..7]
     );
     Ok(())
+}
+
+/// Файлы `rels` (пути относительно `base`) — в каталог `dir` на узле: один tar через ssh.
+fn send(host: &str, base: &Path, rels: &[PathBuf], dir: &str) -> io::Result<()> {
+    let mut tar = Command::new("tar")
+        // Без ._-файлов и xattrs macOS: tar на узле о них только ругается.
+        .env("COPYFILE_DISABLE", "1")
+        .args(["--no-xattrs", "-cf", "-", "-C"])
+        .arg(base)
+        .args(rels)
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let unpack = format!("mkdir -p {dir} && tar -C {dir} -xf -", dir = sh_quote(dir));
+    let unpacked = output(
+        Command::new("ssh")
+            .args([host, &unpack])
+            .stdin(tar.stdout.take().unwrap()),
+    );
+    if !tar.wait()?.success() {
+        return Err(io::Error::other("tar здесь не собрал архив"));
+    }
+    unpacked.map(drop)
 }
 
 /// Снимок рабочего дерева: коммит вне веток поверх HEAD и его дерево. Автор и даты
@@ -442,17 +601,10 @@ fn check(what: &str, value: &str, allowed: impl Fn(char) -> bool) -> io::Result<
     Ok(())
 }
 
-/// Строка в одинарных кавычках для POSIX-шелла узла (там Git Bash или zsh).
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Запустить, вернуть stdout; при ошибке — вывод команды в тексте ошибки.
+/// stdin — пустой, если вызывающий не задал свой (так устроен `Command::output`).
 fn output(command: &mut Command) -> io::Result<Vec<u8>> {
-    let out = command
-        .stdin(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()?;
+    let out = command.stderr(Stdio::piped()).output()?;
     if out.status.success() {
         return Ok(out.stdout);
     }
