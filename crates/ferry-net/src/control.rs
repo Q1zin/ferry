@@ -35,7 +35,14 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
             let request = match serde_json::from_str::<Envelope>(&line) {
                 Ok(envelope) if envelope.token == token => envelope.request,
                 Ok(_) => return out.error(Fail::new("неверный токен")).await,
-                Err(e) => return out.error(Fail::new(format!("запрос: {e}"))).await,
+                // Чаще всего CLI новее приложения и просит то, чего оно ещё не знает.
+                Err(e) => {
+                    let text = format!(
+                        "приложение ferry {} не понимает запрос ({e}) — CLI новее? Обнови приложение: ferry update",
+                        ferry_core::VERSION
+                    );
+                    return out.error(Fail::new(text)).await;
+                }
             };
             // CLI больше ничего не пишет: конец входа — его закрыли (Ctrl-C, таймаут вызвавшего).
             let gone = async move {
