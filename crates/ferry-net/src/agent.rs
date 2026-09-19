@@ -782,10 +782,22 @@ impl ProtocolHandler for DeviceHandler {
         }
         let from = conn.remote_id();
         self.0.clone().refresh(from);
-        while let Some(msg) = irpc_iroh::read_request::<DeviceProtocol>(&conn).await? {
-            tokio::spawn(self.0.clone().handle(msg, from));
+        loop {
+            match irpc_iroh::read_request::<DeviceProtocol>(&conn).await {
+                Ok(Some(msg)) => {
+                    tokio::spawn(self.0.clone().handle(msg, from));
+                }
+                Ok(None) => return Ok(()),
+                // Запрос из версии новее этой: отказать только ему, связь и статус не рвать.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    tracing::warn!(
+                        "{}: незнакомый запрос (ferry там новее?): {e}",
+                        from.fmt_short()
+                    );
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
-        Ok(())
     }
 }
 
@@ -815,5 +827,62 @@ impl fmt::Debug for DeviceHandler {
 impl fmt::Debug for PairHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("PairHandler")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn agent(name: &str) -> Agent {
+        let dir = std::env::temp_dir().join(format!("ferry-agent-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let options = Options {
+            internet: false,
+            lan: false,
+            home: dir.join("home"),
+            port: None,
+            ..Options::new(dir)
+        };
+        Agent::start(options).await.unwrap()
+    }
+
+    // Устройство новее прислало запрос, которого эта версия не знает: отказать надо только ему,
+    // а связь и подписку на статус не рвать.
+    #[tokio::test]
+    async fn unknown_request_keeps_the_link() {
+        let (a, b) = (agent("new").await, agent("old").await);
+        a.learn(b.addr());
+        b.learn(a.addr());
+        a.pair(&b.open_pairing().ticket).await.unwrap();
+        let id = b.addr().id;
+        let conn = loop {
+            let live = a
+                .inner
+                .peers
+                .lock()
+                .unwrap()
+                .get(&id)
+                .map(|l| (l.client.is_some(), l.conn.clone()));
+            if let Some((true, Some(conn))) = live {
+                break conn;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        // Кадр irpc: длина, затем postcard; вариант 127 — такого запроса нет.
+        let (mut send, mut recv) = conn.open_bi().await.unwrap();
+        send.write_all(&[1, 0x7f]).await.unwrap();
+        send.finish().unwrap();
+        let _ = recv.read_to_end(64).await;
+
+        let device = a.device(&id.to_string()).unwrap();
+        let info = tokio::time::timeout(Duration::from_secs(5), device.info()).await;
+        assert!(
+            matches!(info, Ok(Ok(_))),
+            "после незнакомого запроса связь жива: {info:?}"
+        );
+        assert!(conn.close_reason().is_none(), "соединение то же");
     }
 }
