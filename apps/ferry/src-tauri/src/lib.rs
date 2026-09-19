@@ -484,14 +484,37 @@ fn label(mode: Mode) -> &'static str {
     }
 }
 
+/// Лог дописывается в конец; больше 5 МБ — старый уезжает в `ferry.log.1`.
+// ponytail: ротация только при запуске; если за одну сессию лог разрастётся — tracing-appender.
+fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 5 << 20) {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
 pub fn run() {
-    // Лог в stderr: `RUST_LOG=ferry_net=debug` — подробности связи.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,ferry_net=info".into()),
-        )
-        .init();
+    // Лог — в ~/.ferry/logs/ferry.log (его хвост отдаёт `ferry logs`, в том числе издалека) и в
+    // stderr. `RUST_LOG=ferry_net=debug` — подробности связи.
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "warn,ferry_net=info".into())
+    };
+    match ferry_core::ferry_home().and_then(|dir| open_log(&ferry_core::app_log(&dir))) {
+        Ok(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter())
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file).and(std::io::stderr))
+            .init(),
+        Err(_) => tracing_subscriber::fmt().with_env_filter(filter()).init(),
+    }
     tauri::Builder::default()
         // Второй запуск (ярлык, автозапуск) не поднимает второго агента — показывает окно.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

@@ -33,6 +33,11 @@ pub fn ferry_home() -> io::Result<PathBuf> {
     Ok(home()?.join(".ferry"))
 }
 
+/// Лог приложения ferry в `~/.ferry`: `ferry logs` читает его хвост, в том числе издалека.
+pub fn app_log(dir: &Path) -> PathBuf {
+    dir.join("logs").join("ferry.log")
+}
+
 /// Записать файл, доступный только владельцу (на Windows профиль и так закрыт).
 pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
