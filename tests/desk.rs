@@ -125,3 +125,30 @@ fn finished_stdin_does_not_stop_the_command() {
     assert_eq!(String::from_utf8(out.stdout).unwrap(), "done\n");
     assert_eq!(out.status.code(), Some(0));
 }
+
+// `ferry stop` снимает команды, которые демон выполняет, — их клиенты получают код выхода.
+#[test]
+fn stop_kills_running_commands() {
+    let d = daemon("stop");
+    let mut client = desk(&d, "echo started; exec sleep 30")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(client.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+
+    let out = Command::new(FERRY)
+        .arg("stop")
+        .env("HOME", &d.home)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        "ferry: остановлено команд: 1\n"
+    );
+    let start = Instant::now();
+    assert_eq!(client.wait().unwrap().code(), Some(128 + 15));
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
