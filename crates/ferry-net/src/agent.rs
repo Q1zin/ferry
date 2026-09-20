@@ -399,6 +399,7 @@ impl Agent {
             name: peer.name.clone(),
             client,
             dir: self.inner.dir.clone(),
+            version: peer.status.as_ref().map(|s| s.version.clone()),
         })
     }
 
@@ -464,6 +465,10 @@ impl Agent {
     }
 
     /// Обновить ferry на этом устройстве (`ferry update` без целей).
+    pub fn logs_self(&self, lines: usize) -> Result<String, Fail> {
+        self.inner.node.logs(lines)
+    }
+
     pub async fn update_self(&self) -> Result<String, Fail> {
         self.inner.node.update().await
     }

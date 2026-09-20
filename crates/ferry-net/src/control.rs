@@ -204,6 +204,14 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
         Request::Update {
             device: Some(device),
         } => Response::Message(agent.device(&device)?.update().await?),
+        Request::Logs {
+            device: None,
+            lines,
+        } => Response::Message(agent.logs_self(lines)?),
+        Request::Logs {
+            device: Some(device),
+            lines,
+        } => Response::Message(agent.device(&device)?.logs(lines).await?),
     };
     Ok(Answer::Once(response))
 }

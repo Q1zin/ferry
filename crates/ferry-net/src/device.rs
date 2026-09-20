@@ -20,6 +20,8 @@ pub struct Device {
     pub(crate) client: DeviceClient,
     /// `~/.ferry` этого устройства: временные файлы, сохранённые патчи.
     pub(crate) dir: PathBuf,
+    /// Версия ferry на устройстве, если статус уже пришёл.
+    pub(crate) version: Option<String>,
 }
 
 impl Device {
@@ -81,6 +83,12 @@ impl Device {
     /// Обновить ferry на устройстве из релиза; оно перезапустится и снова выйдет на связь.
     pub async fn update(&self) -> Reply<String> {
         self.client.ask(Update).await
+    }
+
+    /// Хвост лога приложения ferry на устройстве.
+    pub async fn logs(&self, lines: usize) -> Reply<String> {
+        need(&self.name, self.version.as_deref(), "0.1.3", "ferry logs")?;
+        self.client.ask(Logs { lines }).await
     }
 
     pub async fn stop(&self) -> Reply<String> {
@@ -342,11 +350,42 @@ fn make_bundle(root: &Path, commit: &str, head: Option<&str>, out: &Path) -> std
     ok(git(&args)?)
 }
 
+/// Знает ли устройство запрос, появившийся в версии `since`. Устройство старше не разберёт его
+/// и оборвёт связь — лучше сразу сказать, что его надо обновить.
+fn need(name: &str, version: Option<&str>, since: &str, what: &str) -> Reply<()> {
+    let parts = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    match version {
+        Some(version) if parts(version) < parts(since) => Err(Fail::new(format!(
+            "на {name} ferry {version}, а {what} — с {since}: обнови его — ferry update {name}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> Reply<T> {
     match tokio::task::spawn_blocking(f).await {
         Ok(result) => result.map_err(Fail::from),
         Err(e) => Err(Fail::new(format!("упало: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::need;
+
+    #[test]
+    fn older_device_is_asked_to_update() {
+        let fail = need("win-10", Some("0.1.2"), "0.1.3", "ferry logs").unwrap_err();
+        assert!(
+            fail.message.contains("ferry update win-10"),
+            "{}",
+            fail.message
+        );
+        assert!(need("win-10", Some("0.1.3"), "0.1.3", "ferry logs").is_ok());
+        assert!(need("win-10", Some("0.1.10"), "0.1.3", "ferry logs").is_ok());
+        // Статус ещё не пришёл — пробуем: старое устройство просто оборвёт запрос.
+        assert!(need("win-10", None, "0.1.3", "ferry logs").is_ok());
     }
 }
