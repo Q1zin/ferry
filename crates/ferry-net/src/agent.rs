@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,11 +13,12 @@ use anyhow::{Context, Result, bail};
 use ferry_core::device::{Activity, PairingInfo, PeerView, Snapshot};
 use ferry_core::mode::{self, Mode};
 use iroh::address_lookup::MemoryLookup;
-use iroh::dns::{DnsResolver, NameserverConfig};
+use iroh::dns::{BoxIter, DnsError, DnsResolver, NameserverConfig, Resolver, TxtRecordData};
 use iroh::endpoint::{Connection, QuicTransportConfig, presets};
 use iroh::protocol::{AcceptError, ProtocolHandler, Router};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use irpc::WithChannels;
+use n0_future::boxed::BoxFuture;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
@@ -107,18 +109,113 @@ struct Live {
     conn: Option<Connection>,
 }
 
-/// DNS — через HTTPS (Cloudflare, Google). VPN на любой из сторон бывает, и с ним обычный DNS
-/// (UDP и TCP на 53 порт) отвечает ошибкой, которую резолвер считает окончательной: обычные
-/// серверы в основном списке всё ломают. Закрыт HTTPS к ним — резолвер сам перейдёт к запасным
-/// публичным серверам.
-// ponytail: сеть, где наружу закрыт любой DNS, кроме своего, так не заработает — понадобится,
-// добавим системный резолвер запасным ярусом.
-fn resolver() -> DnsResolver {
-    DnsResolver::builder()
-        .add_nameserver_configs(
-            ["1.1.1.1", "8.8.8.8"].map(|ip| NameserverConfig::https(ip.parse().unwrap())),
-        )
-        .build()
+/// DNS: публичные серверы через HTTPS (Cloudflare, Google) и системный резолвер — наперегонки,
+/// ответ — первый успешный. С VPN системный DNS отвечает ошибкой, которую резолвер считает
+/// окончательной, — её не ждём, ждём HTTPS. В корпоративной сети наружу закрыт любой DNS, кроме
+/// своего, — отвечает системный. Не ответил никто — ошибка публичных.
+#[derive(Debug)]
+struct Dns {
+    public: DnsResolver,
+    system: DnsResolver,
+}
+
+impl Dns {
+    fn new() -> Dns {
+        let https = ["1.1.1.1", "8.8.8.8"].map(|ip| NameserverConfig::https(ip.parse().unwrap()));
+        Dns {
+            // Закрыт HTTPS к ним — резолвер сам перейдёт к запасным публичным серверам.
+            public: DnsResolver::builder().add_nameserver_configs(https).build(),
+            system: DnsResolver::builder()
+                .with_system_defaults()
+                .disable_fallback()
+                .build(),
+        }
+    }
+
+    /// Один и тот же запрос к обоим резолверам.
+    fn race<T: Send + 'static, F>(
+        &self,
+        lookup: impl Fn(DnsResolver) -> F,
+    ) -> BoxFuture<Result<BoxIter<T>, DnsError>>
+    where
+        F: Future<Output = Result<Vec<T>, DnsError>> + Send + 'static,
+    {
+        let (public, system) = (lookup(self.public.clone()), lookup(self.system.clone()));
+        Box::pin(async move {
+            let found = first_ok(public, system).await?;
+            Ok(Box::new(found.into_iter()) as BoxIter<T>)
+        })
+    }
+}
+
+/// Сколько ждать каждый резолвер; общий срок задаёт сам iroh.
+const LOOKUP: Duration = Duration::from_secs(10);
+
+impl Resolver for Dns {
+    fn lookup_ipv4(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv4Addr>, DnsError>> {
+        self.race(move |r| {
+            let host = host.clone();
+            async move {
+                let ips = r.lookup_ipv4(host, LOOKUP).await?;
+                Ok(ips
+                    .filter_map(|ip| match ip {
+                        IpAddr::V4(ip) => Some(ip),
+                        IpAddr::V6(_) => None,
+                    })
+                    .collect())
+            }
+        })
+    }
+
+    fn lookup_ipv6(&self, host: String) -> BoxFuture<Result<BoxIter<Ipv6Addr>, DnsError>> {
+        self.race(move |r| {
+            let host = host.clone();
+            async move {
+                let ips = r.lookup_ipv6(host, LOOKUP).await?;
+                Ok(ips
+                    .filter_map(|ip| match ip {
+                        IpAddr::V6(ip) => Some(ip),
+                        IpAddr::V4(_) => None,
+                    })
+                    .collect())
+            }
+        })
+    }
+
+    fn lookup_txt(&self, host: String) -> BoxFuture<Result<BoxIter<TxtRecordData>, DnsError>> {
+        self.race(move |r| {
+            let host = host.clone();
+            async move { Ok(r.lookup_txt(host, LOOKUP).await?.collect()) }
+        })
+    }
+
+    fn clear_cache(&self) {
+        self.public.clear_cache();
+        self.system.clear_cache();
+    }
+
+    /// Сеть сменилась (уехал из офиса, включил VPN): системные серверы — заново.
+    fn reset(&self) -> Box<dyn Resolver> {
+        Box::new(Dns::new())
+    }
+}
+
+/// Первый успешный из двух ответов; оба с ошибкой — ошибка первого.
+async fn first_ok<T, E>(
+    public: impl Future<Output = Result<T, E>>,
+    system: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    tokio::pin!(public, system);
+    tokio::select! {
+        found = &mut public => match found {
+            Ok(found) => Ok(found),
+            Err(e) => system.await.map_err(|_| e),
+        },
+        found = &mut system => match found {
+            Ok(found) => Ok(found),
+            Err(_) => public.await,
+        },
+    }
 }
 
 impl Agent {
@@ -128,7 +225,7 @@ impl Agent {
         let lookup = MemoryLookup::new();
         let builder = |port: Option<u16>| -> Result<iroh::endpoint::Builder> {
             let mut builder = if opts.internet {
-                Endpoint::builder(presets::N0).dns_resolver(resolver())
+                Endpoint::builder(presets::N0).dns_resolver(DnsResolver::custom(Dns::new()))
             } else {
                 Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
             };
@@ -924,6 +1021,27 @@ mod tests {
             ..Options::new(dir)
         };
         Agent::start(options).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn first_successful_dns_answer_wins() {
+        let late = |found: Result<u8, &'static str>| async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            found
+        };
+        // VPN: системный быстро отвечает ошибкой — ждём HTTPS.
+        assert_eq!(first_ok(late(Ok(1)), async { Err("vpn") }).await, Ok(1));
+        // Офис: HTTPS наружу закрыт — отвечает системный.
+        assert_eq!(first_ok(late(Err("timeout")), async { Ok(2) }).await, Ok(2));
+        assert_eq!(
+            first_ok(late(Err("public")), async { Err("system") }).await,
+            Err("public")
+        );
+        // Ответ есть — второго не ждём.
+        assert_eq!(
+            first_ok(async { Ok(3) }, std::future::pending::<Result<u8, &str>>()).await,
+            Ok(3)
+        );
     }
 
     // Устройство новее прислало запрос, которого эта версия не знает: отказать надо только ему,
