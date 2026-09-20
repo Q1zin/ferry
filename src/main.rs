@@ -1,6 +1,7 @@
 mod desk;
 mod doctor;
 mod hub;
+mod jobs;
 mod project;
 mod relay;
 
@@ -24,7 +25,17 @@ ferry — разработка на нескольких машинах: это�
   ferry put <узел> <файл>...        файлы отсюда — на то же место в проекте на узле
   ferry get <узел> <путь> [куда]    файл или каталог с узла — сюда (~/… — от дома узла)
   ferry shot <узел> [файл.png]      снимок экрана узла (по умолчанию ~/.ferry/shots/<узел>.png)
-  ferry stop <узел>                 снять все команды, запущенные через --desk
+  ferry start <узел> <имя> [--no-sync] [--] <команда>
+                                    фоновая задача на рабочем столе узла (приложение,
+                                    dev-сервер, сборка): живёт после вызова, пишет лог;
+                                    то же имя ещё раз — перезапуск
+  ferry jobs <узел>                 задачи узла: работает, код выхода, когда запущена
+  ferry log <узел> <имя> [-f]       лог задачи; -f — следить до конца и выйти с её кодом
+  ferry kill <узел> <имя>           остановить задачу
+  ferry tunnel [<узел> <порт>] [--close]
+                                    127.0.0.1:<порт> здесь → <порт> узла (CDP, dev-сервер);
+                                    без аргументов — открытые туннели
+  ferry stop <узел>                 снять всё: команды --desk и фоновые задачи
   ferry update <узел> <ferry.exe>   заменить ferry на узле и перезапустить демон
   ferry restart <узел>              перезапустить демон (подхватит новый PATH)
   ferry trust [<хост>]              git с хоста на узлах — через ключи этого хаба (только
@@ -34,9 +45,12 @@ ferry — разработка на нескольких машинах: это�
   ferry daemon                      принимать команды рабочего стола (запускает планировщик)
   ferry desk <команда>              выполнить команду на рабочем столе этой машины
   ferry screenshot <файл.png>       снимок экрана этой машины (запускать через desk)
-  ferry stop                        снять все команды рабочего стола
+  ferry jobs | log <имя> [-f] | kill <имя>
+                                    задачи этой машины
+  ferry stop                        снять все команды рабочего стола и задачи
 
-Служебные: ferry relay — релей git на хабе, ferry ssh — ssh для git на узле.
+Служебные: ferry relay — релей git на хабе; на узле — ferry ssh (ssh для git),
+ferry job <имя> <команда> (запуск задачи), ferry job-supervise <имя> (надсмотрщик задачи).
 ";
 
 fn main() {
@@ -55,6 +69,14 @@ fn main() {
         ["shot", host, file] => hub::shot(host, Some(file)),
         ["stop", host] => hub::stop(host),
         ["doctor", host] => hub::doctor(host),
+        ["start", host, name, rest @ ..] => start(host, name, rest),
+        ["jobs", host] => hub::jobs(host),
+        ["log", host, name] if *name != "-f" => hub::log(host, name, false),
+        ["log", host, name, "-f"] => hub::log(host, name, true),
+        ["kill", host, name] => hub::kill(host, name),
+        ["tunnel"] => hub::tunnel(None, false),
+        ["tunnel", host, port] => hub::tunnel(Some((host, port)), false),
+        ["tunnel", host, port, "--close"] => hub::tunnel(Some((host, port)), true),
         ["update", host, file] => hub::update(host, file),
         ["restart", host] => hub::restart(host),
         ["trust"] => relay::trust(None),
@@ -66,6 +88,12 @@ fn main() {
         ["desk", cmd @ ..] if !cmd.is_empty() => desk::run(&cmd.join(" ")),
         ["screenshot", file] => desk::screenshot(file),
         ["stop"] => desk::stop(),
+        ["job", name, cmd @ ..] if !cmd.is_empty() => jobs::start(name, &cmd.join(" ")),
+        ["job-supervise", name] => jobs::supervise(name),
+        ["jobs"] => jobs::list(),
+        ["log", name] => jobs::log(name, false),
+        ["log", name, "-f"] => jobs::log(name, true),
+        ["kill", name] => jobs::kill(name),
         _ => usage(),
     };
     match result {
@@ -96,6 +124,26 @@ fn run(host: &str, mut rest: &[&str]) -> io::Result<i32> {
         return usage();
     }
     hub::run(host, desk, sync, &rest.join(" "))
+}
+
+/// `start <узел> <имя> [--no-sync] [--] <команда>`.
+fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
+    let mut sync = true;
+    loop {
+        match rest.first() {
+            Some(&"--no-sync") => sync = false,
+            Some(&"--") => {
+                rest = &rest[1..];
+                break;
+            }
+            _ => break,
+        }
+        rest = &rest[1..];
+    }
+    if rest.is_empty() {
+        return usage();
+    }
+    hub::start(host, name, sync, &rest.join(" "))
 }
 
 fn usage() -> io::Result<i32> {
