@@ -1,12 +1,27 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api, blocked, modeLabel, modes, osLabel, roles, tone, type Detail, type Mode, type Role, type Status } from '../api'
+import {
+  api,
+  blocked,
+  modeLabel,
+  modes,
+  osLabel,
+  roles,
+  tone,
+  type Activity,
+  type Detail,
+  type Mode,
+  type Role,
+  type Status,
+} from '../api'
 import Jobs from './Jobs.vue'
 import Screen from './Screen.vue'
 
 const props = defineProps<{
   device: { id: string | null; name: string; online: boolean; status: Status | null; path: string }
   version: string
+  /// Журнал этого устройства: что делали связанные.
+  activity?: Activity[]
 }>()
 const emit = defineEmits<{ say: [text: string, error?: boolean]; gone: [] }>()
 
@@ -23,6 +38,10 @@ const tabs = [
   ['jobs', 'Задачи'],
 ] as const
 const tab = ref<(typeof tabs)[number][0]>('overview')
+
+// Журнал: новые сверху.
+const journal = computed(() => [...(props.activity ?? [])].reverse())
+const clock = (at: number) => new Date(at * 1000).toLocaleTimeString('ru-RU')
 
 // Свойства чужого устройства — как только оно на связи и принимает команды.
 const detail = ref<Detail | null>(null)
@@ -179,6 +198,22 @@ async function forget() {
       </div>
     </div>
 
+    <div v-if="me" class="card">
+      <h3>Журнал</h3>
+      <p class="muted small">
+        Что связанные устройства делали здесь. Пока управляют — ввод, снимки, окна — иконка в трее белая; забрать
+        рабочий стол — «Остановить управление» в её меню.
+      </p>
+      <ul v-if="journal.length" class="journal">
+        <li v-for="(a, i) in journal" :key="i">
+          <span class="muted">{{ clock(a.at) }}</span>
+          <strong>{{ a.who }}</strong>
+          <span :class="{ desk: a.desk }">{{ a.what }}</span>
+        </li>
+      </ul>
+      <p v-else class="muted small">Пока ничего.</p>
+    </div>
+
     <p v-if="!me && !device.online" class="card muted">
       Не на связи: выключено, спит или без сети. ferry подключится сам, как только устройство появится —
       в этой сети или через интернет.
@@ -258,6 +293,32 @@ async function forget() {
 
 .device.wide {
   max-width: none;
+}
+
+.journal {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  font-size: 13px;
+  list-style: none;
+}
+
+.journal li {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.journal li span:last-child {
+  overflow-wrap: anywhere;
+}
+
+.journal .desk {
+  color: var(--coral);
 }
 
 .tabs {

@@ -30,6 +30,10 @@ const snapshot = {
   ],
   lan: [{ id: NEW, name: 'office-pc', pairing: true }],
   pairing: null,
+  activity: [
+    { at: 1792335600, who: 'win-11', what: 'команда: cargo test', desk: false },
+    { at: 1792335660, who: 'win-11', what: 'ввод: click 458 390', desk: true },
+  ],
 }
 // Экран устройства 1366×768 с меткой: по ней видно, что снимок показан.
 const screen = new Resvg(
@@ -191,6 +195,12 @@ try {
 
     // Это устройство: режим выбирают здесь.
     await page.locator('nav .node-link', { hasText: 'macbook' }).click()
+    // Журнал этого устройства: новые сверху, действия на рабочем столе выделены.
+    const journal = page.locator('.journal li')
+    await journal.first().getByText('ввод: click 458 390').waitFor()
+    assert.equal(await journal.count(), 2)
+    await fits('журнал')
+    await shot('journal')
     await page.getByRole('button', { name: 'не трогать рабочий стол' }).click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'set_mode'))
     assert.deepEqual((await calls()).find(([c]) => c === 'set_mode'), ['set_mode', { mode: 'no-desktop' }])

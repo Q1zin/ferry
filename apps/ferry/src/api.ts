@@ -34,12 +34,16 @@ export type Detail = { properties: [string, string][]; warnings: string[] }
 
 export type JobRow = { name: string; label: string; ago: string; running: boolean; cmd: string }
 
+/// Что связанное устройство делало на этом: `at` — секунды Unix, `desk` — трогало рабочий стол.
+export type Activity = { at: number; who: string; what: string; desk: boolean }
+
 export type Snapshot = {
   id: string
   me: Status
   peers: PeerView[]
   lan: LanDevice[]
   pairing: PairingInfo | null
+  activity: Activity[]
 }
 
 export const api = {

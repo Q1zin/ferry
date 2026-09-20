@@ -101,6 +101,7 @@ onUnmounted(() => unlisten.forEach((f) => f()))
         :key="device.id ?? 'me'"
         :device="device"
         :version="version"
+        :activity="snap?.activity"
         @say="say"
         @gone="view = { kind: 'home' }"
       />
