@@ -4,6 +4,7 @@ mod hub;
 mod jobs;
 mod project;
 mod relay;
+mod screen;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +37,17 @@ ferry — разработка на нескольких машинах: это�
                                     127.0.0.1:<порт> здесь → <порт> узла (CDP, dev-сервер);
                                     без аргументов — открытые туннели
   ferry stop <узел>                 снять всё: команды --desk и фоновые задачи
+
+Экран узла (координаты — пиксели снимка ferry shot):
+  ferry windows <узел>              окна сверху вниз: процесс, место, размер; * — фокус
+  ferry click <узел> <x> <y> [right|double]
+  ferry move <узел> <x> <y>         навести курсор
+  ferry scroll <узел> <n>           колесо: больше нуля — вверх
+  ferry type <узел> <текст>         ввести текст (юникод, раскладка не важна)
+  ferry key <узел> <комбинация>...  клавиши: enter, ctrl+s, alt+tab, win+d, f5…
+  ferry rec <узел> <секунды> [кадр/с]
+                                    запись кадрами (5 в секунду) → ~/.ferry/recs/…;
+                                    печатает лист-обзор, с ffmpeg на хабе — ещё и mp4
   ferry update <узел> <ferry.exe>   заменить ferry на узле и перезапустить демон
   ferry restart <узел>              перезапустить демон (подхватит новый PATH)
   ferry trust [<хост>]              git с хоста на узлах — через ключи этого хаба (только
@@ -45,6 +57,10 @@ ferry — разработка на нескольких машинах: это�
   ferry daemon                      принимать команды рабочего стола (запускает планировщик)
   ferry desk <команда>              выполнить команду на рабочем столе этой машины
   ferry screenshot <файл.png>       снимок экрана этой машины (запускать через desk)
+  ferry record <секунды> <кадр/с> <каталог>
+                                    запись кадрами (через desk)
+  ferry input windows | move | click | scroll | type | key …
+                                    окна и ввод на этой машине (через desk)
   ferry jobs | log <имя> [-f] | kill <имя>
                                     задачи этой машины
   ferry stop                        снять все команды рабочего стола и задачи
@@ -77,6 +93,20 @@ fn main() {
         ["tunnel"] => hub::tunnel(None, false),
         ["tunnel", host, port] => hub::tunnel(Some((host, port)), false),
         ["tunnel", host, port, "--close"] => hub::tunnel(Some((host, port)), true),
+        ["windows", host] => hub::input(host, &["windows"]),
+        ["move", host, x, y] => hub::input(host, &["move", x, y]),
+        ["click", host, x, y, how @ ..] => {
+            hub::input(host, &[&["click", *x, *y][..], how].concat())
+        }
+        ["scroll", host, clicks] => hub::input(host, &["scroll", clicks]),
+        ["type", host, text @ ..] if !text.is_empty() => {
+            hub::input(host, &["type", text.join(" ").as_str()])
+        }
+        ["key", host, combos @ ..] if !combos.is_empty() => {
+            hub::input(host, &[&["key"][..], combos].concat())
+        }
+        ["rec", host, seconds] => hub::rec(host, seconds, "5"),
+        ["rec", host, seconds, fps] => hub::rec(host, seconds, fps),
         ["update", host, file] => hub::update(host, file),
         ["restart", host] => hub::restart(host),
         ["trust"] => relay::trust(None),
@@ -86,7 +116,9 @@ fn main() {
         ["daemon"] => desk::daemon(),
         // Аргументы склеиваются через пробел и уходят в shell одной строкой, как у ssh.
         ["desk", cmd @ ..] if !cmd.is_empty() => desk::run(&cmd.join(" ")),
-        ["screenshot", file] => desk::screenshot(file),
+        ["screenshot", file] => screen::screenshot(file),
+        ["record", seconds, fps, dir] => screen::record(seconds, fps, dir),
+        ["input", rest @ ..] => screen::input(rest),
         ["stop"] => desk::stop(),
         ["job", name, cmd @ ..] if !cmd.is_empty() => jobs::start(name, &cmd.join(" ")),
         ["job-supervise", name] => jobs::supervise(name),

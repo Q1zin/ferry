@@ -67,54 +67,6 @@ pub fn stop() -> io::Result<i32> {
     run("")
 }
 
-/// Снимок всего экрана в PNG. Запускать на рабочем столе (`ferry desk`): в Session 0 экрана нет.
-pub fn screenshot(file: &str) -> io::Result<i32> {
-    let file = std::path::absolute(file)?;
-    Ok(exit_code(screenshot_command()?.arg(file).status()?))
-}
-
-#[cfg(windows)]
-fn screenshot_command() -> io::Result<Command> {
-    // Без SetProcessDPIAware на экране с масштабом снимется только часть.
-    const SCRIPT: &str = r#"
-Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name Dpi -Namespace Ferry
-[Ferry.Dpi]::SetProcessDPIAware() | Out-Null
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
-"#;
-    let script = std::env::temp_dir().join("ferry-screenshot.ps1");
-    std::fs::write(&script, SCRIPT)?;
-    let mut command = Command::new("powershell");
-    command
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
-        .arg(script);
-    Ok(command)
-}
-
-#[cfg(target_os = "macos")]
-fn screenshot_command() -> io::Result<Command> {
-    let mut command = Command::new("screencapture");
-    command.arg("-x");
-    Ok(command)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn screenshot_command() -> io::Result<Command> {
-    Err(io::Error::other(
-        "снимок экрана есть только на Windows и macOS",
-    ))
-}
-
 pub fn run(cmd: &str) -> io::Result<i32> {
     let not_running = |e: io::Error| {
         io::Error::other(format!(
