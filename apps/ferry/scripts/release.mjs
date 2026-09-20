@@ -2,7 +2,7 @@
 // установщики, пакеты обновления и latest.json для updater (подписи — из .sig, которые сборка
 // кладёт рядом с пакетами). Публикует релиз человек: gh release create v<версия> <каталог>/*.
 // FERRY_RELEASE_URL — откуда updater будет качать пакеты; по умолчанию — из этого релиза.
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -10,8 +10,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../../..')
 const version = readFileSync(join(ROOT, 'Cargo.toml'), 'utf8').match(/^version = "(.+)"/m)[1]
 const base = process.env.FERRY_RELEASE_URL ?? `https://github.com/Q1zin/ferry/releases/download/v${version}`
 const out = join(ROOT, 'target', `release-v${version}`)
-const arch = process.arch === 'arm64' ? 'aarch64' : 'x86_64'
 const mac = join(ROOT, 'target/release/bundle')
+// Архитектура мака — из имени dmg: в CI файлы собирает Linux-машина, у неё своя.
+const dmgDir = join(mac, 'dmg')
+const dmgName = existsSync(dmgDir) && readdirSync(dmgDir).find((f) => f.startsWith(`ferry_${version}_`) && f.endsWith('.dmg'))
+const dmgArch = dmgName ? dmgName.slice(`ferry_${version}_`.length, -'.dmg'.length) : process.arch
+const arch = { arm64: 'aarch64', aarch64: 'aarch64' }[dmgArch] ?? 'x86_64'
 const win = join(ROOT, 'target/x86_64-pc-windows-gnu/release/bundle')
 
 // Пакет обновления для мака — без версии в имени: сверяем её по Info.plist, чтобы не взять старый.
