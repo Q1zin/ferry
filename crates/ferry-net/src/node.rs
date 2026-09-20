@@ -387,6 +387,7 @@ impl Node {
             }
         };
         let pid = child.id().unwrap_or_default();
+        let _tree = desk::Tree::track(pid);
         self.runs.lock().unwrap().insert(pid);
         let (events_tx, mut events) = tokio::sync::mpsc::channel(16);
         pump(child.stdout.take().unwrap(), events_tx.clone(), Output::Out);
