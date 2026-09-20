@@ -45,7 +45,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis
+      # appindicator tauri CLI на Linux ищет даже для сборки под Windows: у приложения есть трей.
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis libayatana-appindicator3-dev
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
