@@ -14,10 +14,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::desk::{kill_tree, shell};
-use crate::exit_code;
+use crate::{exit_code, now};
 
 /// Запустить задачу; задача с тем же именем, если ещё работает, перезапускается.
 pub fn start(name: &str, cmd: &str) -> io::Result<i32> {
@@ -371,12 +371,6 @@ fn read(dir: &Path, file: &str) -> Option<String> {
     fs::read_to_string(dir.join(file))
         .ok()
         .map(|s| s.trim().to_string())
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 fn ago(secs: u64) -> String {
