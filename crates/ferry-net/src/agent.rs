@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use ferry_core::device::{PairingInfo, PeerView, Snapshot};
+use ferry_core::device::{Activity, PairingInfo, PeerView, Snapshot};
 use ferry_core::mode::{self, Mode};
 use iroh::address_lookup::MemoryLookup;
 use iroh::dns::{DnsResolver, NameserverConfig};
@@ -85,6 +85,8 @@ struct Inner {
     lan: Option<Lan>,
     pairing: Mutex<Option<pair::Window>>,
     changed: Arc<watch::Sender<u64>>,
+    /// Журнал: что связанные устройства запрашивали на этом, последние — в конце.
+    activity: Mutex<std::collections::VecDeque<Activity>>,
     /// Команды, которые это устройство выполняет для других.
     node: Arc<Node>,
     /// Открытые туннели: (устройство, порт).
@@ -203,6 +205,7 @@ impl Agent {
             lan,
             pairing: Mutex::default(),
             changed,
+            activity: Mutex::default(),
         });
         let router = Router::builder(endpoint)
             .accept(proto::ALPN, DeviceHandler(inner.clone()))
@@ -274,6 +277,7 @@ impl Agent {
             peers,
             lan,
             pairing: inner.pairing_info(),
+            activity: inner.activity.lock().unwrap().iter().cloned().collect(),
         }
     }
 
@@ -736,6 +740,9 @@ impl Inner {
     }
 
     async fn handle(self: Arc<Self>, msg: DeviceMessage, from: EndpointId) {
+        if let Some((what, desk)) = describe(&msg) {
+            self.note(from, what, desk);
+        }
         match msg {
             DeviceMessage::Watch(WithChannels { tx, .. }) => {
                 let mut rx = self.me.subscribe();
@@ -767,6 +774,72 @@ impl Inner {
             other => self.node.clone().handle(other, from).await,
         }
     }
+}
+
+/// Сколько записей журнала держать.
+const JOURNAL: usize = 100;
+
+impl Inner {
+    /// Записать запрос в журнал (и в лог) и показать его: окно, трей.
+    fn note(&self, from: EndpointId, what: String, desk: bool) {
+        let who = self
+            .store
+            .lock()
+            .unwrap()
+            .peer(from)
+            .map_or_else(|| from.fmt_short().to_string(), |p| p.name.clone());
+        tracing::info!("{who}: {what}");
+        let mut journal = self.activity.lock().unwrap();
+        if journal.len() == JOURNAL {
+            journal.pop_front();
+        }
+        journal.push_back(Activity {
+            at: ferry_core::now(),
+            who,
+            what,
+            desk,
+        });
+        drop(journal);
+        self.notify();
+    }
+}
+
+/// Запрос — строкой для журнала, и трогает ли он рабочий стол; `None` — не пишем (статус,
+/// чтение, туннели — их по соединению на каждый запрос CDP).
+fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
+    let line = |cmd: &str| {
+        cmd.lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(120)
+            .collect::<String>()
+    };
+    Some(match msg {
+        DeviceMessage::Run(m) => (format!("команда: {}", line(&m.inner.cmd)), m.inner.desk),
+        DeviceMessage::Start(m) => (
+            format!("задача {}: {}", m.inner.name, line(&m.inner.cmd)),
+            true,
+        ),
+        DeviceMessage::Kill(m) => (format!("остановить задачу {}", m.inner.name), false),
+        DeviceMessage::Stop(_) => ("снять все команды и задачи".into(), false),
+        // Набранный текст в журнал и лог не пишем: там бывают пароли тестовых входов.
+        DeviceMessage::Input(m) => match m.inner.args.first().map(String::as_str) {
+            Some("type") => ("ввод текста".into(), true),
+            Some("windows") => return None,
+            _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
+        },
+        DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
+        DeviceMessage::Rec(m) => (format!("запись экрана, {} с", m.inner.seconds), true),
+        DeviceMessage::Power(m) => (format!("питание: {}", m.inner.action), false),
+        DeviceMessage::SyncApply(m) => (format!("снимок проекта {}", m.inner.project), false),
+        DeviceMessage::Put(_) => ("файлы в проект".into(), false),
+        DeviceMessage::Get(m) => (format!("забрать {}", m.inner.path), false),
+        DeviceMessage::Update(_) => ("обновить ferry".into(), false),
+        DeviceMessage::SetRole(m) => (format!("роль: {}", m.inner.0.name()), false),
+        DeviceMessage::Rename(m) => (format!("имя: {}", m.inner.0), false),
+        _ => return None,
+    })
 }
 
 /// Протокол устройства — только для связанных устройств.

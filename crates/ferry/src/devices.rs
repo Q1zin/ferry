@@ -885,6 +885,7 @@ mod tests {
             ],
             lan: Vec::new(),
             pairing: None,
+            activity: Vec::new(),
         };
         assert_eq!(
             table(&snap),

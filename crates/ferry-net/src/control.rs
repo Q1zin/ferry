@@ -72,7 +72,7 @@ impl Lines {
 
 /// Ответ на запрос: разовый или поток вывода (`Run`, `Log`).
 enum Answer {
-    Once(Response),
+    Once(Box<Response>),
     Stream(mpsc::Receiver<Output>),
 }
 
@@ -213,7 +213,7 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             lines,
         } => Response::Message(agent.device(&device)?.logs(lines).await?),
     };
-    Ok(Answer::Once(response))
+    Ok(Answer::Once(Box::new(response)))
 }
 
 /// Вывод команды — строками, пока не придёт код выхода или CLI не уйдёт. Ушёл — приёмник
