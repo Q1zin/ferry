@@ -28,6 +28,7 @@ base64 = "0.22.1"
 ferry-core = { path = "../../../crates/ferry-core" }
 ferry-net = { path = "../../../crates/ferry-net" }
 tracing = "0.1.44"
+tokio = { version = "1", features = ["time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 

@@ -2,6 +2,7 @@
 //! устройствами. В трее — режим этого устройства. Окно открывается по клику; закрытое окно
 //! не останавливает агента, выход — из меню трея.
 
+use ferry_core::device::CONTROL_SECS;
 use ferry_net::{Agent, EndpointId, Mode, Options, PairingInfo, PeerView, Role, Snapshot};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -397,6 +398,12 @@ fn tray_icon(mode: Mode) -> tauri::image::Image<'static> {
     tauri::image::Image::from_bytes(bytes).expect("иконка трея — PNG из репозитория")
 }
 
+/// Иконка трея, пока устройством управляют: белый круг с коралловым маршрутом.
+fn tray_controlled() -> tauri::image::Image<'static> {
+    tauri::image::Image::from_bytes(include_bytes!("../icons/tray/controlled-32.png"))
+        .expect("иконка трея — PNG из репозитория")
+}
+
 const TRAY: &str = "ferry";
 
 /// Трей: режим этого устройства — его выбирает человек за ним; открыть окно; выйти.
@@ -405,7 +412,10 @@ struct Tray {
     /// (выход, установка обновления), и на Windows в трее оставался бы мёртвый значок.
     app: AppHandle,
     modes: Vec<(Mode, CheckMenuItem<tauri::Wry>)>,
-    mode: std::sync::Mutex<Option<Mode>>,
+    /// «Остановить управление» — активен, пока устройством управляют.
+    stop: MenuItem<tauri::Wry>,
+    /// Режим и управляют ли — что сейчас показано.
+    look: std::sync::Mutex<Option<(Mode, bool)>>,
 }
 
 impl Tray {
@@ -418,11 +428,19 @@ impl Tray {
                     .map(|item| (mode, item))
             })
             .collect::<tauri::Result<Vec<_>>>()?;
+        let stop = MenuItem::with_id(
+            app,
+            "stop-control",
+            "Остановить управление",
+            false,
+            None::<&str>,
+        )?;
         let open = MenuItem::with_id(app, "open", "Открыть ferry", true, None::<&str>)?;
         let pair = MenuItem::with_id(app, "pair", "Связать устройство…", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, "quit", "Выйти из ferry", true, None::<&str>)?;
         let separator = || PredefinedMenuItem::separator(app);
-        let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
+        let s0 = separator()?;
+        let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&stop, &s0];
         for (_, item) in &modes {
             items.push(item);
         }
@@ -446,6 +464,10 @@ impl Tray {
                     let _ = app.emit("open-pairing", ());
                 }
                 "quit" => app.exit(0),
+                // Человек за устройством забирает рабочий стол: ввод, снимки и окна отклоняются.
+                "stop-control" => {
+                    let _ = app.state::<Agent>().set_mode(Mode::NoDesktop);
+                }
                 id => {
                     if let Some(mode) = id.strip_prefix("mode:").and_then(Mode::parse) {
                         let _ = app.state::<Agent>().set_mode(mode);
@@ -456,30 +478,49 @@ impl Tray {
         Ok(Tray {
             app: app.clone(),
             modes,
-            mode: std::sync::Mutex::default(),
+            stop,
+            look: std::sync::Mutex::default(),
         })
     }
 
     /// Отметка, иконка и подсказка — по текущему режиму и тому, сколько устройств на связи.
-    fn update(&self, snapshot: &Snapshot) {
-        let Some(icon) = self.app.tray_by_id(TRAY) else {
-            return;
-        };
+    /// Ответ — через сколько снять отметку «управляют», если она стоит.
+    fn update(&self, snapshot: &Snapshot) -> Option<std::time::Duration> {
+        let icon = self.app.tray_by_id(TRAY)?;
         let mode = snapshot.me.mode;
-        if self.mode.lock().unwrap().replace(mode) != Some(mode) {
+        let now = ferry_core::now();
+        // В других режимах ввод и снимки и так отклоняются.
+        let control = snapshot.controlled(now).filter(|_| mode == Mode::Active);
+        let look = (mode, control.is_some());
+        if self.look.lock().unwrap().replace(look) != Some(look) {
             for (m, item) in &self.modes {
                 let _ = item.set_checked(*m == mode);
             }
-            let _ = icon.set_icon(Some(tray_icon(mode)));
+            let image = if control.is_some() {
+                tray_controlled()
+            } else {
+                tray_icon(mode)
+            };
+            let _ = icon.set_icon(Some(image));
+            let _ = self.stop.set_enabled(control.is_some());
         }
         let online = snapshot.peers.iter().filter(|p| p.online).count();
+        // Подсказка трея в Windows — до 128 знаков.
+        let state = match control {
+            Some(a) => format!(
+                "управляет {}: {}",
+                a.who,
+                a.what.chars().take(40).collect::<String>()
+            ),
+            None => label(mode).to_string(),
+        };
         let tip = format!(
-            "ferry — {}: {}\nна связи {online} из {}",
+            "ferry — {}: {state}\nна связи {online} из {}",
             snapshot.me.name,
-            label(mode),
             snapshot.peers.len()
         );
         let _ = icon.set_tooltip(Some(tip));
+        control.map(|a| std::time::Duration::from_secs(CONTROL_SECS - now.saturating_sub(a.at)))
     }
 }
 
@@ -554,14 +595,24 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let tray = Tray::build(app.handle())?;
-            tray.update(&agent.snapshot());
+            let mut expires = tray.update(&agent.snapshot());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut changes = agent.subscribe();
-                while changes.changed().await.is_ok() {
+                loop {
+                    // Ждать изменений, а пока устройством управляют — не дольше, чем до конца
+                    // отметки: тогда трей вернётся к обычному виду сам.
+                    let wait = expires.unwrap_or(std::time::Duration::from_secs(3600));
+                    let changed = match tokio::time::timeout(wait, changes.changed()).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(_)) => break,
+                        Err(_) => false,
+                    };
                     let snapshot = agent.snapshot();
-                    tray.update(&snapshot);
-                    let _ = handle.emit("state", snapshot);
+                    expires = tray.update(&snapshot);
+                    if changed {
+                        let _ = handle.emit("state", snapshot);
+                    }
                 }
             });
 

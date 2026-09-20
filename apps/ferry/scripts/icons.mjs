@@ -57,6 +57,9 @@ const modes = {
   active: { fill: CORAL, ink: '#FFFFFF' },
   'no-desktop': { fill: '#7C5CFC', ink: '#FFFFFF' },
   paused: { ring: '#9AA3B2', ink: '#9AA3B2' },
+  // Не режим: устройством сейчас управляют с другого — белый круг с коралловой обводкой,
+  // заметный и на тёмной панели, и на светлой.
+  controlled: { fill: '#FFFFFF', ring: CORAL, ink: CORAL },
 }
 const route = ink => `
   <path d="M262 742 C420 742 392 520 512 512 C632 504 604 282 762 282" stroke="${ink}" stroke-width="104" ${line}/>
@@ -65,7 +68,7 @@ const route = ink => `
 const trayIcon = mode => {
   const m = modes[mode]
   const disc = m.ring
-    ? `<circle cx="512" cy="512" r="440" fill="none" stroke="${m.ring}" stroke-width="112"/>`
+    ? `<circle cx="512" cy="512" r="440" fill="${m.fill ?? 'none'}" stroke="${m.ring}" stroke-width="112"/>`
     : `<circle cx="512" cy="512" r="508" fill="${m.fill}"/>`
   const scale = m.ring ? 0.6 : 0.72
   return svg(`${disc}<g transform="translate(512 512) scale(${scale}) translate(-512 -512)">${route(m.ink)}</g>`)
