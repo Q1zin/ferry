@@ -32,22 +32,31 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         s.parse::<i32>()
             .map_err(|_| io::Error::other(format!("ожидалось число, а не {s:?}")))
     };
+    let buttons = |how: &[&str]| -> io::Result<Vec<u32>> {
+        // `right` и `--right` — одно и то же.
+        let how: Vec<&str> = how.iter().map(|h| h.trim_start_matches('-')).collect();
+        let (down, up) = match how.as_slice() {
+            [] | ["left"] => (MOUSE_LEFT_DOWN, MOUSE_LEFT_UP),
+            ["right"] => (MOUSE_RIGHT_DOWN, MOUSE_RIGHT_UP),
+            ["double"] => (MOUSE_LEFT_DOWN, MOUSE_LEFT_UP),
+            _ => return Err(io::Error::other("клик: left, right или double")),
+        };
+        let presses = if how == ["double"] { 2 } else { 1 };
+        Ok((0..presses).flat_map(|_| [down, up]).collect())
+    };
     match args {
         ["windows"] => win::windows(),
-        ["move", x, y] => win::pointer(number(x)?, number(y)?, &[]),
-        ["click", x, y, how @ ..] => {
-            // `right` и `--right` — одно и то же.
-            let how: Vec<&str> = how.iter().map(|h| h.trim_start_matches('-')).collect();
-            let (down, up) = match how.as_slice() {
-                [] | ["left"] => (MOUSE_LEFT_DOWN, MOUSE_LEFT_UP),
-                ["right"] => (MOUSE_RIGHT_DOWN, MOUSE_RIGHT_UP),
-                ["double"] => (MOUSE_LEFT_DOWN, MOUSE_LEFT_UP),
-                _ => return Err(io::Error::other("клик: left, right или double")),
-            };
-            let presses = if how == ["double"] { 2 } else { 1 };
-            let buttons: Vec<u32> = (0..presses).flat_map(|_| [down, up]).collect();
-            win::pointer(number(x)?, number(y)?, &buttons)
+        ["ui", window @ ..] => win::ui(&window.join(" ")),
+        ["move", "--name", name] => {
+            let (x, y) = win::find(name)?;
+            win::pointer(x, y, &[])
         }
+        ["click", "--name", name, how @ ..] => {
+            let (x, y) = win::find(name)?;
+            win::pointer(x, y, &buttons(how)?)
+        }
+        ["move", x, y] => win::pointer(number(x)?, number(y)?, &[]),
+        ["click", x, y, how @ ..] => win::pointer(number(x)?, number(y)?, &buttons(how)?),
         ["scroll", clicks] => win::scroll(number(clicks)?),
         ["type", text @ ..] if !text.is_empty() => win::type_text(&text.join(" ")),
         ["key", combos @ ..] if !combos.is_empty() => {
@@ -58,8 +67,8 @@ pub fn input(args: &[&str]) -> io::Result<String> {
             win::keys(&combos)
         }
         _ => Err(io::Error::other(
-            "ferry input windows | move <x> <y> | click <x> <y> [right|double] | scroll <n> \
-             | type <текст> | key <комбинация>…",
+            "ferry input windows | ui [<окно>] | move <x> <y> | click <x> <y> [right|double] \
+             | click --name <имя> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
         )),
     }
 }
@@ -242,6 +251,12 @@ mod win {
     }
     pub fn windows() -> io::Result<String> {
         unsupported()
+    }
+    pub fn ui(_: &str) -> io::Result<String> {
+        unsupported()
+    }
+    pub fn find(_: &str) -> io::Result<(i32, i32)> {
+        Err(io::Error::other("окна и ввод пока только на Windows-узлах"))
     }
     pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
         unsupported()
@@ -492,6 +507,116 @@ mod win {
         }
         Ok(table)
     }
+
+    /// Элементы окна (UI Automation): роль, имя, #id, место в пикселях снимка. Окно — с фокусом
+    /// или по имени процесса / части заголовка.
+    pub fn ui(window: &str) -> io::Result<String> {
+        automation(&["tree", window])
+    }
+
+    /// Центр видимого элемента с этим именем в окне с фокусом: точное совпадение, иначе — часть
+    /// имени. Не нашёлся или их несколько — ошибка со списком кандидатов.
+    pub fn find(name: &str) -> io::Result<(i32, i32)> {
+        let out = automation(&["find", name])?;
+        let mut xy = out.split_whitespace().map(str::parse::<i32>);
+        match (xy.next(), xy.next()) {
+            (Some(Ok(x)), Some(Ok(y))) => Ok((x, y)),
+            _ => Err(io::Error::other(format!(
+                "UI Automation ответил непонятно: {out}"
+            ))),
+        }
+    }
+
+    fn automation(args: &[&str]) -> io::Result<String> {
+        let out = super::powershell("ferry-ui.ps1", UI_SCRIPT)?
+            .args(args)
+            .stdin(Stdio::null())
+            .output()?;
+        let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+        if out.status.success() {
+            Ok(text(&out.stdout) + "\n")
+        } else {
+            Err(io::Error::other(text(&out.stderr)))
+        }
+    }
+
+    /// Обход дерева UI Automation. Безымянные контейнеры (Pane, Group, Custom) не печатаются —
+    /// только их дети; невидимое (за краем, свёрнутое) пропускается. Предел — 1500 элементов:
+    /// дерево страницы в браузере бывает огромным.
+    const UI_SCRIPT: &str = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+'@ -Name Win -Namespace Ferry
+[Ferry.Win]::SetProcessDPIAware() | Out-Null
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
+$screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$AE = [System.Windows.Automation.AutomationElement]
+$all = [System.Windows.Automation.Condition]::TrueCondition
+$walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+$mode = $args[0]; $arg = $args[1]
+
+function Fail($text) { [Console]::Error.WriteLine($text); exit 2 }
+
+function Window($filter) {
+    if (-not $filter) { return $AE::FromHandle([Ferry.Win]::GetForegroundWindow()) }
+    foreach ($w in $AE::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, $all)) {
+        $proc = (Get-Process -Id $w.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
+        if ($w.Current.Name -like "*$filter*" -or $proc -eq $filter -or "$proc.exe" -eq $filter) { return $w }
+    }
+    Fail "нет окна «$filter» — ferry windows покажет, какие есть"
+}
+
+function Line($e, $depth) {
+    $c = $e.Current
+    $text = $c.ControlType.ProgrammaticName -replace '^ControlType\.', ''
+    $name = ($c.Name -replace '\s+', ' ').Trim()
+    if ($name.Length -gt 80) { $name = $name.Substring(0, 79) + '…' }
+    if ($name) { $text += ' "' + $name + '"' }
+    if ($c.AutomationId) { $text += ' #' + $c.AutomationId }
+    $r = $c.BoundingRectangle
+    if (-not $r.IsEmpty) {
+        $text += ' {0},{1} {2}×{3}' -f [int]($r.X - $screen.X), [int]($r.Y - $screen.Y), [int]$r.Width, [int]$r.Height
+    }
+    if (-not $c.IsEnabled) { $text += ' выключен' }
+    if ($c.HasKeyboardFocus) { $text += ' *фокус' }
+    ('  ' * $depth) + $text
+}
+
+$script:count = 0
+function Walk($e, $depth) {
+    if ($script:count -ge 1500 -or $depth -gt 40) { return }
+    $c = $e.Current
+    if ($depth -gt 0 -and $c.IsOffscreen) { return }
+    $noise = -not $c.Name -and -not $c.AutomationId -and
+        $c.ControlType.ProgrammaticName -in 'ControlType.Pane', 'ControlType.Group', 'ControlType.Custom'
+    $next = $depth
+    if ($depth -eq 0 -or -not $noise) { Line $e $depth; $script:count++; $next = $depth + 1 }
+    $child = $walker.GetFirstChild($e)
+    while ($child) { Walk $child $next; $child = $walker.GetNextSibling($child) }
+}
+
+if ($mode -eq 'tree') {
+    Walk (Window $arg) 0
+    if ($script:count -ge 1500) { '… дальше не показано: элементов больше 1500' }
+    exit 0
+}
+
+$w = Window ''
+$visible = @($w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $all) |
+    Where-Object { -not $_.Current.IsOffscreen -and -not $_.Current.BoundingRectangle.IsEmpty })
+$hits = @($visible | Where-Object { $_.Current.Name -eq $arg })
+if (-not $hits) { $hits = @($visible | Where-Object { $_.Current.Name -like "*$arg*" }) }
+if ($hits.Count -eq 1) {
+    $r = $hits[0].Current.BoundingRectangle
+    '{0} {1}' -f [int]($r.X + $r.Width / 2 - $screen.X), [int]($r.Y + $r.Height / 2 - $screen.Y)
+    exit 0
+}
+if (-not $hits) { Fail "в окне «$($w.Current.Name)» нет элемента «$arg» — ferry ui покажет, что там есть" }
+$list = ($hits | Select-Object -First 10 | ForEach-Object { Line $_ 1 }) -join "`n"
+Fail "«$arg» — элементов несколько ($($hits.Count)), уточни имя:`n$list"
+"#;
 
     /// pid → имя exe: один tasklist на всех.
     fn process_names() -> HashMap<u32, String> {
