@@ -145,8 +145,11 @@ async fn journal_shows_who_did_what_here() {
     let (a, b) = paired("jr-ctl", "jr-node").await;
     let node = a.device("jr-node").unwrap();
     run(&node, "echo hi", Dir::Home, false).await;
-    // Ввод на маке без экрана откажет — в журнал попадает сам запрос, текст — нет.
-    let _ = node.input(vec!["type".into(), "пароль".into()]).await;
+    // Устройство откажет (не трогать рабочий стол) до ввода: настоящий ввод в тесте напечатал бы
+    // текст в окно разработчика. В журнал попадает сам запрос, набранный текст — нет.
+    b.set_mode(Mode::NoDesktop).unwrap();
+    let refused = node.input(vec!["type".into(), "пароль".into()]).await;
+    assert_eq!(refused.unwrap_err().code, 75);
     let journal = b.snapshot().activity;
     let lines: Vec<_> = journal
         .iter()

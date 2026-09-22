@@ -1,5 +1,6 @@
 //! Экран узла: снимок, запись кадрами, окна и настоящий ввод — мышь и клавиатура через ОС,
-//! а не через CDP. Всё это запускается на рабочем столе (`ferry desk`): в Session 0 экрана нет.
+//! а не через CDP. Windows — SendInput и UI Automation, macOS — CGEvent (нужен доступ к
+//! «Универсальному доступу»); элементы окон (`ui`, `--name`) — пока только на Windows.
 //!
 //! Координаты везде — пиксели снимка (`ferry shot`): от левого верхнего угла всего рабочего
 //! стола, в физических пикселях (процесс объявляет себя DPI-aware, иначе на экране с
@@ -18,12 +19,23 @@ pub fn screenshot(file: &str) -> io::Result<i32> {
 
 /// `ferry record <секунды> <кадров в секунду> <каталог>`: кадры `frame-0001.png`… с курсором
 /// и `sheet.png` — до 12 равномерно выбранных кадров с отметкой времени на одном листе.
+/// На маке листа нет — только кадры.
 pub fn record(seconds: &str, fps: &str, dir: &str) -> io::Result<i32> {
     let dir = std::path::absolute(dir)?;
+    #[cfg(target_os = "macos")]
+    return mac::record(seconds, fps, &dir);
+    #[cfg(not(target_os = "macos"))]
     Ok(exit_code(
         record_command()?.arg(dir).args([seconds, fps]).status()?,
     ))
 }
+
+#[cfg(target_os = "macos")]
+use mac as os;
+#[cfg(not(any(windows, target_os = "macos")))]
+use none as os;
+#[cfg(windows)]
+use win as os;
 
 /// `ferry input <действие> …` — окна и ввод на этой машине. Для `windows` — таблица окон,
 /// для действий — пусто.
@@ -45,27 +57,21 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         Ok((0..presses).flat_map(|_| [down, up]).collect())
     };
     match args {
-        ["windows"] => win::windows(),
-        ["ui", window @ ..] => win::ui(&window.join(" ")),
+        ["windows"] => os::windows(),
+        ["ui", window @ ..] => os::ui(&window.join(" ")),
         ["move", "--name", name] => {
-            let (x, y) = win::find(name)?;
-            win::pointer(x, y, &[])
+            let (x, y) = os::find(name)?;
+            os::pointer(x, y, &[])
         }
         ["click", "--name", name, how @ ..] => {
-            let (x, y) = win::find(name)?;
-            win::pointer(x, y, &buttons(how)?)
+            let (x, y) = os::find(name)?;
+            os::pointer(x, y, &buttons(how)?)
         }
-        ["move", x, y] => win::pointer(number(x)?, number(y)?, &[]),
-        ["click", x, y, how @ ..] => win::pointer(number(x)?, number(y)?, &buttons(how)?),
-        ["scroll", clicks] => win::scroll(number(clicks)?),
-        ["type", text @ ..] if !text.is_empty() => win::type_text(&text.join(" ")),
-        ["key", combos @ ..] if !combos.is_empty() => {
-            let combos = combos
-                .iter()
-                .map(|c| combo(c))
-                .collect::<Result<Vec<_>, _>>()?;
-            win::keys(&combos)
-        }
+        ["move", x, y] => os::pointer(number(x)?, number(y)?, &[]),
+        ["click", x, y, how @ ..] => os::pointer(number(x)?, number(y)?, &buttons(how)?),
+        ["scroll", clicks] => os::scroll(number(clicks)?),
+        ["type", text @ ..] if !text.is_empty() => os::type_text(&text.join(" ")),
+        ["key", combos @ ..] if !combos.is_empty() => os::keys(combos),
         _ => Err(io::Error::other(
             "ferry input windows | ui [<окно>] | move <x> <y> | click <x> <y> [right|double] \
              | click --name <имя> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
@@ -78,10 +84,11 @@ const MOUSE_LEFT_UP: u32 = 0x0004;
 const MOUSE_RIGHT_DOWN: u32 = 0x0008;
 const MOUSE_RIGHT_UP: u32 = 0x0010;
 
-/// Клавиша: виртуальный код и нужен ли ей флаг «расширенная» (стрелки, Home, Delete…).
+/// Клавиша Windows: виртуальный код и нужен ли ей флаг «расширенная» (стрелки, Home, Delete…).
 type Key = (u16, bool);
 
-/// `ctrl+shift+s` → клавиши по порядку нажатия; последняя — основная.
+/// `ctrl+shift+s` → клавиши Windows по порядку нажатия; последняя — основная.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn combo(text: &str) -> io::Result<Vec<Key>> {
     text.split('+')
         .map(|name| {
@@ -96,6 +103,7 @@ fn combo(text: &str) -> io::Result<Vec<Key>> {
         .collect()
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn key(name: &str) -> Option<Key> {
     let plain = |code| Some((code, false));
     let extended = |code| Some((code, true));
@@ -234,20 +242,19 @@ fn screenshot_command() -> io::Result<Command> {
     ))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn record_command() -> io::Result<Command> {
     Err(io::Error::other(
         "запись экрана пока только на Windows-узлах",
     ))
 }
 
-#[cfg(not(windows))]
-mod win {
-    use super::Key;
+#[cfg(not(any(windows, target_os = "macos")))]
+mod none {
     use std::io;
 
     fn unsupported() -> io::Result<String> {
-        Err(io::Error::other("окна и ввод пока только на Windows-узлах"))
+        Err(io::Error::other("окна и ввод — только на Windows и macOS"))
     }
     pub fn windows() -> io::Result<String> {
         unsupported()
@@ -256,7 +263,7 @@ mod win {
         unsupported()
     }
     pub fn find(_: &str) -> io::Result<(i32, i32)> {
-        Err(io::Error::other("окна и ввод пока только на Windows-узлах"))
+        Err(io::Error::other("окна и ввод — только на Windows и macOS"))
     }
     pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
         unsupported()
@@ -267,8 +274,356 @@ mod win {
     pub fn type_text(_: &str) -> io::Result<String> {
         unsupported()
     }
-    pub fn keys(_: &[Vec<Key>]) -> io::Result<String> {
+    pub fn keys(_: &[&str]) -> io::Result<String> {
         unsupported()
+    }
+}
+
+/// Ввод через CGEvent, окна через CGWindowList. Координаты — пиксели снимка главного дисплея
+/// (`screencapture`), CGEvent ждёт точки: на Retina в точке два пикселя.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::io;
+    use std::path::Path;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
+    use core_graphics::display::CGDisplay;
+    use core_graphics::event::{
+        CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
+        ScrollEventUnit,
+    };
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::{CGPoint, CGRect};
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowName,
+        kCGWindowOwnerName, kCGWindowOwnerPID,
+    };
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    /// Ввод macOS пускает только приложениям с доступом к «Универсальному доступу». Нет его —
+    /// система сама покажет запрос, а команда скажет, куда идти.
+    fn trusted() -> io::Result<()> {
+        let prompt = CFDictionary::from_CFType_pairs(&[(
+            CFString::new("AXTrustedCheckOptionPrompt"),
+            CFBoolean::true_value(),
+        )]);
+        if unsafe { AXIsProcessTrustedWithOptions(prompt.as_concrete_TypeRef()) } {
+            return Ok(());
+        }
+        Err(io::Error::other(
+            "ввод на этом маке не пускают: «Системные настройки» → «Конфиденциальность и \
+             безопасность» → «Универсальный доступ» — включи ferry и повтори",
+        ))
+    }
+
+    /// Пикселей в точке на главном дисплее. `pixels_wide` на Retina отдаёт точки — настоящие
+    /// пиксели, как у `screencapture`, знает только режим дисплея.
+    fn scale() -> f64 {
+        let main = CGDisplay::main();
+        let points = main.bounds().size.width;
+        let pixels = main
+            .display_mode()
+            .map_or(points, |mode| mode.pixel_width() as f64);
+        if points > 0.0 { pixels / points } else { 1.0 }
+    }
+
+    fn event(made: Result<CGEvent, ()>) -> io::Result<CGEvent> {
+        made.map_err(|()| io::Error::other("событие ввода не создалось"))
+    }
+
+    fn source() -> io::Result<CGEventSource> {
+        CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| io::Error::other("источник событий ввода не создался"))
+    }
+
+    /// Курсор — в точку снимка, затем нажатия кнопок (коды — как у Windows: `MOUSE_*`).
+    pub fn pointer(x: i32, y: i32, buttons: &[u32]) -> io::Result<String> {
+        trusted()?;
+        let k = scale();
+        let at = CGPoint::new(f64::from(x) / k, f64::from(y) / k);
+        event(CGEvent::new_mouse_event(
+            source()?,
+            CGEventType::MouseMoved,
+            at,
+            CGMouseButton::Left,
+        ))?
+        .post(CGEventTapLocation::HID);
+        // Двойной клик — второе нажатие с отметкой «второй по счёту».
+        let mut presses = 0;
+        for &b in buttons {
+            let (kind, button) = match b {
+                super::MOUSE_LEFT_DOWN => (CGEventType::LeftMouseDown, CGMouseButton::Left),
+                super::MOUSE_LEFT_UP => (CGEventType::LeftMouseUp, CGMouseButton::Left),
+                super::MOUSE_RIGHT_DOWN => (CGEventType::RightMouseDown, CGMouseButton::Right),
+                _ => (CGEventType::RightMouseUp, CGMouseButton::Right),
+            };
+            if b == super::MOUSE_LEFT_DOWN || b == super::MOUSE_RIGHT_DOWN {
+                presses += 1;
+            }
+            let click = event(CGEvent::new_mouse_event(source()?, kind, at, button))?;
+            click.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, presses);
+            click.post(CGEventTapLocation::HID);
+        }
+        Ok(String::new())
+    }
+
+    /// Колесо: больше нуля — вверх.
+    pub fn scroll(clicks: i32) -> io::Result<String> {
+        trusted()?;
+        let wheel = CGEvent::new_scroll_event(source()?, ScrollEventUnit::LINE, 1, clicks, 0, 0);
+        event(wheel)?.post(CGEventTapLocation::HID);
+        Ok(String::new())
+    }
+
+    fn key(code: u16, down: bool, flags: CGEventFlags) -> io::Result<()> {
+        let press = event(CGEvent::new_keyboard_event(source()?, code, down))?;
+        press.set_flags(flags);
+        press.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    /// Текст юникодом — раскладка не важна; перевод строки и таб — настоящими клавишами.
+    pub fn type_text(text: &str) -> io::Result<String> {
+        trusted()?;
+        let none = CGEventFlags::CGEventFlagNull;
+        let mut run = String::new();
+        let flush = |run: &mut String| -> io::Result<()> {
+            if !run.is_empty() {
+                for down in [true, false] {
+                    let press = event(CGEvent::new_keyboard_event(source()?, 0, down))?;
+                    press.set_string(run);
+                    press.post(CGEventTapLocation::HID);
+                }
+                run.clear();
+            }
+            Ok(())
+        };
+        for c in text.chars() {
+            let special = match c {
+                '\n' => Some(36),
+                '\t' => Some(48),
+                _ => None,
+            };
+            match special {
+                Some(code) => {
+                    flush(&mut run)?;
+                    key(code, true, none)?;
+                    key(code, false, none)?;
+                }
+                // Одно событие несёт до 20 знаков UTF-16.
+                None => {
+                    run.push(c);
+                    if run.encode_utf16().count() >= 16 {
+                        flush(&mut run)?;
+                    }
+                }
+            }
+        }
+        flush(&mut run)?;
+        Ok(String::new())
+    }
+
+    /// Каждая комбинация: нажать по порядку, отпустить в обратном. Модификаторы — ещё и флагами
+    /// на каждом событии: по ним приложения узнают cmd+s.
+    pub fn keys(combos: &[&str]) -> io::Result<String> {
+        let combos = combos
+            .iter()
+            .map(|c| combo(c))
+            .collect::<io::Result<Vec<_>>>()?;
+        trusted()?;
+        for keys in combos {
+            let mut flags = CGEventFlags::CGEventFlagNull;
+            for &(code, flag) in &keys {
+                flags |= flag;
+                key(code, true, flags)?;
+            }
+            for &(code, flag) in keys.iter().rev() {
+                flags.remove(flag);
+                key(code, false, flags)?;
+            }
+        }
+        Ok(String::new())
+    }
+
+    pub(super) fn combo(text: &str) -> io::Result<Vec<(u16, CGEventFlags)>> {
+        text.split('+')
+            .map(|name| {
+                keycode(&name.to_ascii_lowercase()).ok_or_else(|| {
+                    io::Error::other(format!(
+                        "неизвестная клавиша {name:?}: буквы, цифры, f1–f20, cmd, ctrl, shift, \
+                         alt, enter, esc, tab, space, backspace, delete, home, end, pageup, \
+                         pagedown, up, down, left, right"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// Коды клавиш macOS (раскладка ANSI) и флаг модификатора.
+    fn keycode(name: &str) -> Option<(u16, CGEventFlags)> {
+        let plain = |code| Some((code, CGEventFlags::CGEventFlagNull));
+        match name {
+            "cmd" | "command" | "win" | "meta" => Some((55, CGEventFlags::CGEventFlagCommand)),
+            "ctrl" | "control" => Some((59, CGEventFlags::CGEventFlagControl)),
+            "shift" => Some((56, CGEventFlags::CGEventFlagShift)),
+            "alt" | "option" | "opt" => Some((58, CGEventFlags::CGEventFlagAlternate)),
+            "enter" | "return" => plain(36),
+            "esc" | "escape" => plain(53),
+            "tab" => plain(48),
+            "space" => plain(49),
+            "backspace" => plain(51),
+            "delete" | "del" => plain(117),
+            "home" => plain(115),
+            "end" => plain(119),
+            "pageup" | "pgup" => plain(116),
+            "pagedown" | "pgdn" => plain(121),
+            "up" => plain(126),
+            "down" => plain(125),
+            "left" => plain(123),
+            "right" => plain(124),
+            _ => {
+                const LETTERS: &[u8] = b"asdfhgzxcv\0bqweryt";
+                const MORE: &[(u8, u16)] = &[
+                    (b'o', 31),
+                    (b'u', 32),
+                    (b'i', 34),
+                    (b'p', 35),
+                    (b'l', 37),
+                    (b'j', 38),
+                    (b'k', 40),
+                    (b'n', 45),
+                    (b'm', 46),
+                ];
+                const DIGITS: [u16; 10] = [29, 18, 19, 20, 21, 23, 22, 26, 28, 25];
+                const F: [u16; 20] = [
+                    122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64,
+                    79, 80, 90,
+                ];
+                match name.as_bytes() {
+                    [c @ b'a'..=b'z'] => LETTERS
+                        .iter()
+                        .position(|l| l == c)
+                        .map(|i| i as u16)
+                        .or_else(|| MORE.iter().find(|(l, _)| l == c).map(|&(_, code)| code))
+                        .and_then(plain),
+                    [d @ b'0'..=b'9'] => plain(DIGITS[usize::from(d - b'0')]),
+                    [b'f', digits @ ..] => std::str::from_utf8(digits)
+                        .ok()?
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| (1..=20).contains(n))
+                        .and_then(|n| plain(F[n - 1])),
+                    _ => None,
+                }
+            }
+        }
+    }
+
+    /// Видимые окна приложений — сверху вниз; `*` — самое верхнее. Заголовки чужих окон macOS
+    /// отдаёт только с доступом к записи экрана (он и так нужен снимкам).
+    pub fn windows() -> io::Result<String> {
+        let k = scale();
+        let list = copy_window_info(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+        .ok_or_else(|| io::Error::other("macOS не отдал список окон"))?;
+        let mut table = format!(
+            "  {:<26} {:>11} {:>11}  заголовок\n",
+            "процесс (pid)", "x,y", "ширина×выс."
+        );
+        let mut top = true;
+        for item in list.iter() {
+            let window: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
+            let field =
+                |name: CFStringRef| window.find(unsafe { CFString::wrap_under_get_rule(name) });
+            let number = |name| {
+                field(name)
+                    .and_then(|v| v.downcast::<CFNumber>())
+                    .and_then(|n| n.to_i64())
+            };
+            let text = |name| {
+                field(name)
+                    .and_then(|v| v.downcast::<CFString>())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+            };
+            // Слой 0 — обычные окна; выше — строка меню, док, всплывающие.
+            if number(unsafe { kCGWindowLayer }) != Some(0) {
+                continue;
+            }
+            let Some(rect) = field(unsafe { kCGWindowBounds })
+                .and_then(|v| v.downcast::<CFDictionary>())
+                .and_then(|d| CGRect::from_dict_representation(&d))
+            else {
+                continue;
+            };
+            let px = |v: f64| (v * k).round() as i64;
+            let process = format!(
+                "{} ({})",
+                text(unsafe { kCGWindowOwnerName }),
+                number(unsafe { kCGWindowOwnerPID }).unwrap_or_default()
+            );
+            let place = format!("{},{}", px(rect.origin.x), px(rect.origin.y));
+            let size = format!("{}×{}", px(rect.size.width), px(rect.size.height));
+            let mark = if top { '*' } else { ' ' };
+            top = false;
+            let title = text(unsafe { kCGWindowName });
+            table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {title}\n");
+        }
+        Ok(table)
+    }
+
+    pub fn ui(_: &str) -> io::Result<String> {
+        Err(io::Error::other(
+            "элементы окон (ferry ui, --name) пока только на Windows — на маке ferry shot и клик по координатам",
+        ))
+    }
+
+    pub fn find(name: &str) -> io::Result<(i32, i32)> {
+        ui(name).map(|_| (0, 0))
+    }
+
+    /// Кадры `frame-0001.png`… с курсором по расписанию от секундомера. Листа-обзора нет.
+    pub fn record(seconds: &str, fps: &str, dir: &Path) -> io::Result<i32> {
+        let number = |s: &str| {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| *v > 0.0)
+                .ok_or_else(|| io::Error::other(format!("ожидалось число больше нуля, а не {s:?}")))
+        };
+        let (seconds, fps) = (number(seconds)?, number(fps)?);
+        std::fs::create_dir_all(dir)?;
+        let start = Instant::now();
+        let mut frames = 0;
+        while start.elapsed().as_secs_f64() < seconds {
+            frames += 1;
+            let frame = dir.join(format!("frame-{frames:04}.png"));
+            let status = Command::new("screencapture")
+                .args(["-x", "-C", "-t", "png"])
+                .arg(frame)
+                .status()?;
+            if !status.success() {
+                return Ok(super::exit_code(status));
+            }
+            let next = Duration::from_secs_f64(f64::from(frames) / fps);
+            if let Some(wait) = next.checked_sub(start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+        Ok(0)
     }
 }
 
@@ -447,9 +802,13 @@ mod win {
     }
 
     /// Каждая комбинация: всё нажать по порядку, отпустить в обратном.
-    pub fn keys(combos: &[Vec<Key>]) -> io::Result<String> {
+    pub fn keys(combos: &[&str]) -> io::Result<String> {
+        let combos = combos
+            .iter()
+            .map(|c| super::combo(c))
+            .collect::<io::Result<Vec<Vec<Key>>>>()?;
         let mut inputs = Vec::new();
-        for combo in combos {
+        for combo in &combos {
             let flags = |extended: bool| if extended { KEY_EXTENDED } else { 0 };
             inputs.extend(combo.iter().map(|&(vk, ext)| key(vk, 0, flags(ext))));
             inputs.extend(
@@ -657,5 +1016,24 @@ mod tests {
         assert_eq!(combo("7").unwrap(), [(0x37, false)]);
         assert!(combo("ctrl+f25").is_err());
         assert!(combo("ctrl+ыы").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_mac_key_combos() {
+        use core_graphics::event::CGEventFlags as F;
+        let codes = |text| mac::combo(text).unwrap();
+        assert_eq!(
+            codes("cmd+s"),
+            [(55, F::CGEventFlagCommand), (1, F::CGEventFlagNull)]
+        );
+        assert_eq!(
+            codes("Alt+F4"),
+            [(58, F::CGEventFlagAlternate), (118, F::CGEventFlagNull)]
+        );
+        assert_eq!(codes("m"), [(46, F::CGEventFlagNull)]);
+        assert_eq!(codes("0"), [(29, F::CGEventFlagNull)]);
+        assert!(mac::combo("ctrl+f21").is_err());
+        assert!(mac::combo("ctrl+ыы").is_err());
     }
 }
