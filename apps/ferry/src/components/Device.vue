@@ -65,8 +65,7 @@ watch(
   { immediate: true },
 )
 
-function power(action: string, question?: string) {
-  if (question && !confirm(question)) return
+function power(action: string) {
   act(`power:${action}`, () => api.power(props.device.id!, action), 'Готово')
 }
 
@@ -102,7 +101,6 @@ function rename() {
 
 async function forget() {
   if (!props.device.id) return
-  if (!confirm(`Забыть ${props.device.name}? Чтобы вернуть, устройства придётся связать заново.`)) return
   try {
     await api.forget(props.device.id)
     emit('say', `${props.device.name} забыто`)
@@ -251,14 +249,14 @@ async function forget() {
         <button
           :disabled="!!busy"
           :aria-busy="busy === 'power:reboot'"
-          @click="power('reboot', `Перезагрузить ${device.name}? Через 10 с, можно отменить.`)"
+          @click="power('reboot')"
         >
           Перезагрузить
         </button>
         <button
           :disabled="!!busy"
           :aria-busy="busy === 'power:sleep'"
-          @click="power('sleep', `Усыпить ${device.name}? Разбудить по сети получится только по кабелю.`)"
+          @click="power('sleep')"
         >
           Усыпить
         </button>
@@ -266,12 +264,16 @@ async function forget() {
           class="danger"
           :disabled="!!busy"
           :aria-busy="busy === 'power:shutdown'"
-          @click="power('shutdown', `Выключить ${device.name}? Через 10 с, можно отменить.`)"
+          @click="power('shutdown')"
         >
           Выключить
         </button>
         <button :disabled="!!busy" :aria-busy="busy === 'power:cancel'" @click="power('cancel')">Отменить</button>
       </div>
+      <p class="muted small">
+        Перезагрузка и выключение — через 10 с, «Отменить» успеет их снять. Уснувшее устройство по сети будится только
+        по кабелю.
+      </p>
     </div>
 
     <div v-if="!me" class="row">

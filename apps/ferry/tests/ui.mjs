@@ -192,6 +192,11 @@ try {
     await page.getByRole('button', { name: 'Экран', exact: true }).click()
     await page.getByText('Устройство не на связи.').waitFor()
     await page.getByRole('button', { name: 'Обзор', exact: true }).click()
+    // Забыть — сразу, без подтверждения: confirm() в окне Tauri на маке не показывается.
+    await page.getByRole('button', { name: 'Забыть устройство' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'forget'))
+    assert.deepEqual((await calls()).find(([c]) => c === 'forget'), ['forget', { id: OLD }])
+    await page.getByRole('heading', { name: 'Устройства' }).waitFor()
 
     // Это устройство: режим выбирают здесь.
     await page.locator('nav .node-link', { hasText: 'macbook' }).click()
