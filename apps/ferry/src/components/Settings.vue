@@ -85,6 +85,7 @@ async function toggle() {
       <h3>Команда ferry в терминале</h3>
       <p class="muted small">
         Через неё работают Claude и скрипты: <code>ferry run all -- bun test</code>, снимки, ввод, туннели.
+        Скилл для Claude Code — <code>ferry skill</code>.
       </p>
       <template v-if="cli?.path">
         <p v-if="cli.installed" class="small">Стоит: <code>{{ cli.installed }}</code></p>
