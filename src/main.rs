@@ -1,5 +1,6 @@
 mod desk;
 mod doctor;
+mod find;
 mod hub;
 mod jobs;
 mod project;
@@ -15,7 +16,9 @@ ferry — разработка на нескольких машинах: это�
 
 На хабе:
   ferry add <узел> <user@адрес>     записать узел и проверить связь
-  ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол
+  ferry ls                          узлы: на связи ли, ОС, отвечает ли рабочий стол;
+                                    сменивший адрес узел ищет сам
+  ferry find <узел>                 найти узел по ключу хоста: tailnet, затем подсети хаба
   ferry doctor <узел>               готов ли узел собирать этот проект: инструменты,
                                     доступ к git-зависимостям, файлы проекта
   ferry sync <узел>                 рабочее дерево проекта → ~/ferry/<проект> на узле
@@ -75,6 +78,7 @@ fn main() {
     let result = match args.as_slice() {
         ["add", name, target] => hub::add(name, target),
         ["ls"] => hub::ls(),
+        ["find", host] => hub::find(host),
         ["sync", host] => hub::sync(host),
         ["run", host, rest @ ..] => run(host, rest),
         ["pull", host] => hub::pull(host),
