@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 ferry-core = { path = "../ferry-core" }
+serde_json = "1"
 
 [dev-dependencies]
 ferry-net = { path = "../ferry-net" }

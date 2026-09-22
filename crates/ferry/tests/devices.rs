@@ -95,6 +95,27 @@ async fn cli_drives_devices_through_the_app() {
         "{list}"
     );
 
+    // --json: устройства — одной строкой, свойства — строкой на устройство, без подписей.
+    let out = ferry(&outside, &["devices", "--json"]).await;
+    let view: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let names: Vec<&str> = view["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(names.contains(&"win") && names.contains(&"mac"), "{view}");
+    let out = ferry(&outside, &["info", "win,mac", "--json"]).await;
+    let lines: Vec<serde_json::Value> = text(&out.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{}", text(&out.stdout));
+    assert!(
+        lines.iter().all(|l| l["info"]["os"].is_string()),
+        "{lines:?}"
+    );
+
     // Одна цель: вывод как есть, код — устройства. Вне репозитория — в доме устройства.
     let out = ferry(&outside, &["run", "win", "--", "echo hi; pwd; exit 4"]).await;
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));
