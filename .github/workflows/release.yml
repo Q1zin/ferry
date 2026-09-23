@@ -1,7 +1,8 @@
 # Релиз по тегу v<версия>: сборки для macOS и Windows, подписанные пакеты обновления и
 # latest.json — в черновик релиза. Публикует черновик человек: только тогда устройства увидят
 # новую версию. Запуск вручную (без тега) — только сборка, файлы — в артефактах прогона.
-# Нужен секрет TAURI_SIGNING_PRIVATE_KEY — содержимое ключа подписи обновлений.
+# Секреты: TAURI_SIGNING_PRIVATE_KEY — ключ подписи обновлений; MACOS_CERTIFICATE (base64 .p12)
+# и MACOS_CERTIFICATE_PASSWORD — свой сертификат подписи кода для мака.
 name: release
 
 on:
@@ -21,6 +22,28 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      # Подпись своим самоподписанным сертификатом, а не ad-hoc: требование к подписи у всех
+      # сборок одно, и выданные macOS доступы (экран, «Универсальный доступ») переживают
+      # обновления. Сертификат не от Apple — codesign примет его только доверенным, а Tauri с
+      # APPLE_CERTIFICATE ищет только сертификаты Apple, поэтому ключник готовим сами.
+      - name: ключник с сертификатом подписи
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/ferry.keychain-db"
+          security create-keychain -p ferry "$keychain"
+          security set-keychain-settings -t 3600 -u "$keychain"
+          security unlock-keychain -p ferry "$keychain"
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/ferry.p12"
+          security import "$RUNNER_TEMP/ferry.p12" -k "$keychain" -P "$PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k ferry "$keychain" >/dev/null
+          # Остальные ключники — тоже в списке поиска: по одному на строку, слова в путях не делим.
+          others=()
+          while IFS= read -r line; do others+=("$(echo "$line" | tr -d '"' | sed 's/^ *//')"); done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${others[@]}"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain apps/ferry/src-tauri/macos-signing.pem
+          security find-identity -v -p codesigning "$keychain"
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
@@ -30,6 +53,8 @@ jobs:
         working-directory: apps/ferry
       - run: bun run release:mac
         working-directory: apps/ferry
+        env:
+          APPLE_SIGNING_IDENTITY: ferry
       - uses: actions/upload-artifact@v4
         with:
           name: mac
