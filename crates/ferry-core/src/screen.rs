@@ -74,7 +74,7 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["key", combos @ ..] if !combos.is_empty() => os::keys(combos),
         _ => Err(io::Error::other(
             "ferry input windows | ui [<окно>] | move <x> <y> | click <x> <y> [right|double] \
-             | click --name <имя> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
+             | click --name <имя|#id> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
         )),
     }
 }
@@ -144,7 +144,9 @@ fn key(name: &str) -> Option<Key> {
 #[cfg(windows)]
 pub(crate) fn powershell(name: &str, script: &str) -> io::Result<Command> {
     let path = std::env::temp_dir().join(name);
-    std::fs::write(&path, script)?;
+    // С BOM: файл без него Windows PowerShell 5.1 читает в кодировке ANSI, и кириллица в
+    // скрипте ломает разбор.
+    std::fs::write(&path, format!("\u{feff}{script}"))?;
     use std::os::windows::process::CommandExt;
     let mut command = Command::new("powershell");
     // Без своего окна консоли: из приложения (GUI-процесс) оно открылось бы поверх рабочего
@@ -873,8 +875,9 @@ mod win {
         automation(&["tree", window])
     }
 
-    /// Центр видимого элемента с этим именем в окне с фокусом: точное совпадение, иначе — часть
-    /// имени. Не нашёлся или их несколько — ошибка со списком кандидатов.
+    /// Центр видимого элемента в окне с фокусом: по имени (точно, иначе — часть имени) или по
+    /// `#id` — у безымянных элементов, вроде поля Блокнота. Не нашёлся или их несколько —
+    /// ошибка со списком кандидатов.
     pub fn find(name: &str) -> io::Result<(i32, i32)> {
         let out = automation(&["find", name])?;
         let mut xy = out.split_whitespace().map(str::parse::<i32>);
@@ -965,8 +968,8 @@ if ($mode -eq 'tree') {
 $w = Window ''
 $visible = @($w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $all) |
     Where-Object { -not $_.Current.IsOffscreen -and -not $_.Current.BoundingRectangle.IsEmpty })
-$hits = @($visible | Where-Object { $_.Current.Name -eq $arg })
-if (-not $hits) { $hits = @($visible | Where-Object { $_.Current.Name -like "*$arg*" }) }
+$hits = @($visible | Where-Object { $_.Current.Name -eq $arg -or ('#' + $_.Current.AutomationId) -eq $arg })
+if (-not $hits -and -not $arg.StartsWith('#')) { $hits = @($visible | Where-Object { $_.Current.Name -like "*$arg*" }) }
 if ($hits.Count -eq 1) {
     $r = $hits[0].Current.BoundingRectangle
     '{0} {1}' -f [int]($r.X + $r.Width / 2 - $screen.X), [int]($r.Y + $r.Height / 2 - $screen.Y)
