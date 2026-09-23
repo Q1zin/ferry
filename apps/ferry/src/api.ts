@@ -37,6 +37,9 @@ export type JobRow = { name: string; label: string; ago: string; running: boolea
 /// Что связанное устройство делало на этом: `at` — секунды Unix, `desk` — трогало рабочий стол.
 export type Activity = { at: number; who: string; what: string; desk: boolean }
 
+/// Доступы macOS: запись экрана и «Универсальный доступ» (ввод). На других системах — null.
+export type Permissions = { screen: boolean; input: boolean }
+
 export type Snapshot = {
   id: string
   me: Status
@@ -71,6 +74,9 @@ export const api = {
   /// Версия новее этой, если есть в релизах.
   checkUpdate: () => invoke<string | null>('check_update'),
   installUpdate: () => invoke<string>('install_update'),
+  permissions: () => invoke<Permissions | null>('permissions'),
+  askPermission: (kind: 'screen' | 'input') => invoke<void>('ask_permission', { kind }),
+  restartApp: () => invoke<void>('restart_app'),
 }
 
 /// Почему с устройством сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий

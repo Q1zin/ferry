@@ -248,6 +248,34 @@ try {
     await shot('settings')
     await page.close()
   }
+
+  // Мак без доступов: страница разрешений открывается сама, «Выдать» просит нужный доступ.
+  {
+    const page = await browser.newPage({ viewport: { width: win0.minWidth, height: win0.minHeight } })
+    page.on('pageerror', (e) => failures.push(`разрешения: ${e.message}`))
+    await page.addInitScript((fx) => {
+      window.__calls = []
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
+      window.__TAURI_INTERNALS__ = {
+        transformCallback: () => 0,
+        invoke: async (cmd, args = {}) => {
+          if (cmd !== 'plugin:event|listen') window.__calls.push([cmd, args])
+          return cmd in fx ? fx[cmd] : null
+        },
+      }
+    }, { ...fixtures, permissions: { screen: false, input: true } })
+    await page.goto(url)
+    await page.getByRole('heading', { name: 'Разрешения' }).waitFor()
+    await page.getByRole('button', { name: 'Разрешения · нужно выдать' }).waitFor()
+    await page.getByRole('button', { name: 'Выдать', exact: true }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'ask_permission'))
+    const calls = await page.evaluate(() => window.__calls)
+    assert.deepEqual(calls.find(([c]) => c === 'ask_permission'), ['ask_permission', { kind: 'screen' }])
+    await page.getByRole('button', { name: 'Перезапустить ferry' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'restart_app'))
+    if (SHOTS) await page.screenshot({ path: join(SHOTS, 'permissions.png') })
+    await page.close()
+  }
 } finally {
   await browser.close()
   server.close()
