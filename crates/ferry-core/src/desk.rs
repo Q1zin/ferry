@@ -152,6 +152,15 @@ fn serve(stream: TcpStream, token: &str, jobs: &Jobs) -> io::Result<()> {
         return finish(&out, msg.as_bytes(), 1);
     }
 
+    let mode = crate::mode::current();
+    if !mode.allows_desktop() {
+        let msg = format!(
+            "ferry: рабочий стол сейчас трогать нельзя — на узле режим «{}»\n",
+            mode.label()
+        );
+        return finish(&out, msg.as_bytes(), crate::mode::REFUSED);
+    }
+
     let (reader, writer) = io::pipe()?;
     let mut command = shell(&cmd);
     command

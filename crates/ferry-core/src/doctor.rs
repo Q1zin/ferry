@@ -47,10 +47,11 @@ pub fn run(host: &str, repo: Option<(&Path, &str)>) -> io::Result<i32> {
         }
         script
     };
-    let ssh = results(Command::new("ssh").args([host, &script(false)]))?;
+    let guarded = |script: String| format!("{}{script}", crate::mode::GUARD);
+    let ssh = results(Command::new("ssh").args([host, &guarded(script(false))]))?;
     let desk = if ssh.get("desk").is_some_and(|(ok, _)| *ok) {
         let desk = format!("ferry desk {}", sh_quote(&script(true)));
-        Some(results(Command::new("ssh").args([host, &desk]))?)
+        Some(results(Command::new("ssh").args([host, &guarded(desk)]))?)
     } else {
         None
     };

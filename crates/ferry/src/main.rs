@@ -1,5 +1,6 @@
 use std::io;
 
+use ferry_core::mode::{self, Mode};
 use ferry_core::{desk, hub, jobs, relay, screen};
 
 const USAGE: &str = "\
@@ -31,6 +32,8 @@ ferry — разработка на нескольких машинах: это�
                                     127.0.0.1:<порт> здесь → <порт> узла (CDP, dev-сервер);
                                     без аргументов — открытые туннели
   ferry stop <узел>                 снять всё: команды --desk и фоновые задачи
+  ferry mode <узел>                 режим узла: работает / не трогать рабочий стол /
+                                    отключён от хаба (выбирают на самом узле)
 
 Экран узла (координаты — пиксели снимка ferry shot):
   ferry windows <узел>              окна сверху вниз: процесс, место, размер; * — фокус
@@ -58,6 +61,9 @@ ferry — разработка на нескольких машинах: это�
   ferry jobs | log <имя> [-f] | kill <имя>
                                     задачи этой машины
   ferry stop                        снять все команды рабочего стола и задачи
+  ferry mode [active|no-desktop|paused]
+                                    режим этой машины: работать, не трогать рабочий стол,
+                                    отключиться от хаба
 
 Служебные: ferry relay — релей git на хабе; на узле — ferry ssh (ssh для git),
 ferry job <имя> <команда> (запуск задачи), ferry job-supervise <имя> (надсмотрщик задачи).
@@ -115,6 +121,9 @@ fn main() {
         ["record", seconds, fps, dir] => screen::record(seconds, fps, dir),
         ["input", rest @ ..] => screen::input(rest),
         ["stop"] => desk::stop(),
+        ["mode"] => mode::command(None),
+        ["mode", name] if Mode::parse(name).is_some() => mode::command(Some(name)),
+        ["mode", host] => hub::mode(host),
         ["job", name, cmd @ ..] if !cmd.is_empty() => jobs::start(name, &cmd.join(" ")),
         ["job-supervise", name] => jobs::supervise(name),
         ["jobs"] => jobs::list(),

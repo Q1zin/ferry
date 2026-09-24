@@ -152,3 +152,34 @@ fn stop_kills_running_commands() {
     assert_eq!(client.wait().unwrap().code(), Some(128 + 15));
     assert!(start.elapsed() < Duration::from_secs(5));
 }
+
+// Режим узла: «не трогать рабочий стол» и пауза — демон отклоняет команды, stop работает всегда.
+#[test]
+fn modes_other_than_active_refuse_desktop_commands() {
+    let d = daemon("mode");
+    let ferry = |args: &[&str]| {
+        Command::new(FERRY)
+            .args(args)
+            .env("HOME", &d.home)
+            .current_dir(&d.home)
+            .output()
+            .unwrap()
+    };
+    for mode in ["no-desktop", "paused"] {
+        assert!(ferry(&["mode", mode]).status.success());
+        let out = desk(&d, "echo should-not-run").output().unwrap();
+        assert_eq!(out.status.code(), Some(75), "{mode}");
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("трогать нельзя") && !text.contains("should-not-run"),
+            "{mode}: {text}"
+        );
+        assert!(ferry(&["stop"]).status.success(), "{mode}: stop");
+    }
+    assert!(ferry(&["mode", "active"]).status.success());
+    assert_eq!(
+        String::from_utf8(desk(&d, "echo ok").output().unwrap().stdout).unwrap(),
+        "ok\n"
+    );
+    assert!(!ferry(&["mode", "sleepy"]).status.success());
+}
