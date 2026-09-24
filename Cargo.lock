@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "ferry"
 version = "0.1.0"
+dependencies = [
+ "ferry-core",
+]
+
+[[package]]
+name = "ferry-core"
+version = "0.1.0"
