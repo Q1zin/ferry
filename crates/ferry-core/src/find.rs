@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::{ferry_home, home, write_private};
+use crate::home;
 
 /// Найти узел и записать его новый адрес. `Ok(Some(адрес))` — нашёлся (или и не терялся).
 pub fn find(name: &str, addr: &str, quiet: bool) -> io::Result<Option<String>> {
@@ -36,7 +36,7 @@ pub fn find(name: &str, addr: &str, quiet: bool) -> io::Result<Option<String>> {
         .collect();
     if let Some(ip) = first_with_key(&peers, &known) {
         remember(name, &ip, &known)?;
-        set_hostname(name, &ip)?;
+        crate::nodes::set_hostname(name, &ip)?;
         eprintln!("ferry: {name} нашёлся в tailnet на {ip} (был {addr})");
         return Ok(Some(ip));
     }
@@ -52,7 +52,7 @@ pub fn find(name: &str, addr: &str, quiet: bool) -> io::Result<Option<String>> {
     let open = scan(&subnets);
     if let Some(ip) = first_with_key(&open, &known) {
         remember(name, &ip, &known)?;
-        set_hostname(name, &ip)?;
+        crate::nodes::set_hostname(name, &ip)?;
         eprintln!("ferry: {name} нашёлся на {ip} (был {addr})");
         return Ok(Some(ip));
     }
@@ -73,20 +73,10 @@ pub fn find(name: &str, addr: &str, quiet: bool) -> io::Result<Option<String>> {
 
 /// Ключи хоста, которые знает ssh, по любому из имён: `тип base64`.
 fn known_keys(names: &[&str]) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    for name in names {
-        let Ok(out) = Command::new("ssh-keygen").args(["-F", name]).output() else {
-            continue;
-        };
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            if let [_, kind, key, ..] = line.split_whitespace().collect::<Vec<_>>()[..] {
-                if !line.starts_with('#') {
-                    keys.insert(format!("{kind} {key}"));
-                }
-            }
-        }
-    }
-    keys
+    names
+        .iter()
+        .flat_map(|name| crate::nodes::known_keys(name))
+        .collect()
 }
 
 /// Ключи, которые предъявляет sshd по адресу: `тип base64`.
@@ -235,42 +225,6 @@ fn remember(name: &str, ip: &str, known: &BTreeSet<String>) -> io::Result<()> {
     Ok(())
 }
 
-/// `HostName` узла в `~/.ferry/ssh_config` — на новый адрес; `HostKeyAlias` — если не было.
-pub fn set_hostname(name: &str, ip: &str) -> io::Result<()> {
-    let path = ferry_home()?.join("ssh_config");
-    let text = fs::read_to_string(&path)?;
-    write_private(&path, &with_hostname(&text, name, ip))?;
-    // Общее соединение, если вдруг живо, — к старому адресу.
-    let _ = Command::new("ssh")
-        .args(["-O", "exit", name])
-        .stderr(Stdio::null())
-        .status();
-    Ok(())
-}
-
-/// Новый `HostName` в блоке узла и `HostKeyAlias` сразу за ним (прежний, где бы ни стоял,
-/// убирается — так он ровно один).
-fn with_hostname(text: &str, name: &str, ip: &str) -> String {
-    let mut out = String::new();
-    let mut inside = false;
-    for line in text.lines() {
-        if let Some(host) = line.strip_prefix("Host ") {
-            inside = host.trim() == name;
-        }
-        let key = line.trim_start();
-        if inside && key.starts_with("HostKeyAlias ") {
-            continue;
-        }
-        if inside && key.starts_with("HostName ") {
-            out.push_str(&format!("  HostName {ip}\n  HostKeyAlias {name}\n"));
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,25 +243,5 @@ utun10: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1280
 \tinet 100.75.204.87 --> 100.75.204.87 netmask 0xffffffff
 ";
         assert_eq!(lan_prefixes(ifconfig), ["192.168.100"]);
-    }
-
-    #[test]
-    fn moves_only_the_named_host_and_keeps_one_alias() {
-        let text = "Host a\n  HostName 1.1.1.1\n  User u\n\nHost b\n  HostName 2.2.2.2\n";
-        let moved = with_hostname(text, "a", "9.9.9.9");
-        assert_eq!(
-            moved,
-            "Host a\n  HostName 9.9.9.9\n  HostKeyAlias a\n  User u\n\nHost b\n  HostName 2.2.2.2\n"
-        );
-        assert_eq!(
-            with_hostname(&moved, "a", "8.8.8.8"),
-            moved.replace("9.9.9.9", "8.8.8.8")
-        );
-        // Блок, где алиас стоял в конце (так писала первая версия), чинится.
-        let tail = "Host a\n  HostName 1.1.1.1\n  User u\n\n  HostKeyAlias a\n";
-        assert_eq!(
-            with_hostname(tail, "a", "9.9.9.9"),
-            "Host a\n  HostName 9.9.9.9\n  HostKeyAlias a\n  User u\n\n"
-        );
     }
 }

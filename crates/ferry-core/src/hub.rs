@@ -16,51 +16,14 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mode::{GUARD, Mode};
-use crate::{exit_code, ferry_home, home, sh_quote, write_private};
-
-const INCLUDE: &str = "Include ~/.ferry/ssh_config";
+use crate::nodes;
+use crate::{exit_code, ferry_home, home, sh_quote};
 
 pub fn add(name: &str, target: &str) -> io::Result<i32> {
     let (user, addr) = target
         .split_once('@')
         .ok_or_else(|| io::Error::other("адрес узла — user@адрес"))?;
-    // Всё это уходит в ssh_config как есть: пробел или перевод строки дописали бы свои опции.
-    let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
-    check("имя узла", name, alias)?;
-    if Mode::parse(name).is_some() {
-        return Err(io::Error::other(format!(
-            "{name:?} — имя режима, назови узел иначе"
-        )));
-    }
-    check("пользователь", user, |c| {
-        !c.is_whitespace() && !c.is_control() && c != '"'
-    })?;
-    check("адрес", addr, |c| alias(c) || c == ':')?;
-
-    let dir = ferry_home()?;
-    fs::create_dir_all(&dir)?;
-    let path = dir.join("ssh_config");
-    let mut text = without_host(&fs::read_to_string(&path).unwrap_or_default(), name);
-    // BatchMode: ssh не ждёт пароль, а сразу падает — для Claude и скриптов это важнее.
-    // ControlMaster: одно соединение на узел, остальные команды идут без handshake.
-    // RemoteForward: порт на узле → релей git этого хаба (см. relay.rs).
-    // HostKeyAlias: ключ узла — под его именем; сменит адрес — ferry find узнает его по ключу.
-    let relay = dir.join("relay.sock");
-    text.push_str(&format!(
-        "Host {name}\n  HostName {addr}\n  HostKeyAlias {name}\n  User {user}\n  IdentityFile ~/.ssh/ferry\n  \
-         IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking accept-new\n  \
-         ServerAliveInterval 15\n  ControlMaster auto\n  ControlPath ~/.ferry/cm-%C\n  \
-         ControlPersist 10m\n  RemoteForward 127.0.0.1:{} \"{}\"\n\n",
-        crate::relay::NODE_PORT,
-        relay.display()
-    ));
-    write_private(&path, &text)?;
-    include_in_ssh_config()?;
-    // Старое общее соединение живёт со старыми настройками — закрываем.
-    let _ = Command::new("ssh")
-        .args(["-O", "exit", name])
-        .stderr(Stdio::null())
-        .status();
+    nodes::register(name, user, addr)?;
 
     if !home()?.join(".ssh/ferry").exists() {
         eprintln!("ferry: нет ключа ~/.ssh/ferry — ssh-keygen -t ed25519 -f ~/.ssh/ferry -N ''");
@@ -80,43 +43,74 @@ pub fn add(name: &str, target: &str) -> io::Result<i32> {
 }
 
 pub fn ls() -> io::Result<i32> {
-    let hosts = hosts()?;
-    if hosts.is_empty() {
+    let nodes = nodes::list()?;
+    if nodes.is_empty() {
         eprintln!("ferry: узлов нет; добавить — ferry add <узел> <user@адрес>");
         return Ok(0);
     }
     let states: Vec<String> = thread::scope(|s| {
-        let probes: Vec<_> = hosts
+        let probes: Vec<_> = nodes
             .iter()
-            .map(|(name, _)| s.spawn(move || probe(name)))
+            .map(|node| {
+                s.spawn(move || {
+                    if node.paused {
+                        String::new()
+                    } else {
+                        probe(&node.name)
+                    }
+                })
+            })
             .collect();
         probes
             .into_iter()
             .map(|p| p.join().unwrap_or_default())
             .collect()
     });
-    for ((name, addr), state) in hosts.iter().zip(states) {
-        if state != "нет связи" {
+    for (node, state) in nodes.iter().zip(states) {
+        let (name, addr) = (&node.name, &node.addr);
+        if node.paused {
+            println!("{name:<14} {addr:<16} пауза на хабе (ferry resume {name})");
+        } else if state != "нет связи" {
             println!("{name:<14} {addr:<16} {state}");
-            continue;
-        }
-        // Не отвечает — может, сменил адрес: ищем по ключу хоста.
-        match crate::find::find(name, addr, true) {
-            Ok(Some(found)) if found != *addr => println!("{name:<14} {found:<16} {}", probe(name)),
-            _ => println!("{name:<14} {addr:<16} нет связи (ferry find {name} — подробнее)"),
+        } else {
+            // Не отвечает — может, сменил адрес: ищем по ключу хоста.
+            match crate::find::find(name, addr, true) {
+                Ok(Some(found)) if found != *addr => {
+                    println!("{name:<14} {found:<16} {}", probe(name))
+                }
+                _ => println!("{name:<14} {addr:<16} нет связи (ferry find {name} — подробнее)"),
+            }
         }
     }
     Ok(0)
 }
 
+pub fn pause(host: &str, paused: bool) -> io::Result<i32> {
+    nodes::set_paused(host, paused)?;
+    let what = if paused {
+        "на паузе: ferry его не трогает"
+    } else {
+        "снова в работе"
+    };
+    eprintln!("ferry: {host} {what}");
+    Ok(0)
+}
+
+pub fn rename(old: &str, new: &str) -> io::Result<i32> {
+    nodes::rename(old, new)?;
+    eprintln!("ferry: {old} теперь {new}");
+    Ok(0)
+}
+
+pub fn remove(host: &str) -> io::Result<i32> {
+    nodes::remove(host)?;
+    eprintln!("ferry: {host} убран с хаба (ferry на самом узле остался)");
+    Ok(0)
+}
+
 /// Узел сменил адрес — найти его по ключу хоста и записать новый.
 pub fn find(host: &str) -> io::Result<i32> {
-    node(host)?;
-    let addr = hosts()?
-        .into_iter()
-        .find(|(name, _)| name == host)
-        .map(|(_, addr)| addr)
-        .unwrap_or_default();
+    let addr = nodes::active(host)?.addr;
     match crate::find::find(host, &addr, false)? {
         Some(found) if found == addr => {
             eprintln!("ferry: {host} на месте — {addr}");
@@ -768,29 +762,9 @@ fn save_patch(host: &str, repo: &Repo, patch: &[u8]) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Узлы из `~/.ferry/ssh_config`: имя и адрес.
-fn hosts() -> io::Result<Vec<(String, String)>> {
-    let text = fs::read_to_string(ferry_home()?.join("ssh_config")).unwrap_or_default();
-    let mut hosts: Vec<(String, String)> = Vec::new();
-    for line in text.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix("Host ") {
-            hosts.push((name.trim().into(), String::new()));
-        } else if let (Some(addr), Some(host)) = (line.strip_prefix("HostName "), hosts.last_mut())
-        {
-            host.1 = addr.trim().into();
-        }
-    }
-    Ok(hosts)
-}
-
-/// Узел должен быть записан через `ferry add`: заодно имя не превратится в опцию ssh.
+/// Узел, который можно трогать: записан и не на паузе на хабе.
 fn node(name: &str) -> io::Result<()> {
-    if hosts()?.iter().any(|(host, _)| host == name) {
-        return Ok(());
-    }
-    Err(io::Error::other(format!(
-        "нет узла {name:?}; список — ferry ls, добавить — ferry add"
-    )))
+    nodes::active(name).map(drop)
 }
 
 fn probe(host: &str) -> String {
@@ -816,47 +790,6 @@ fn probe(host: &str) -> String {
         (Mode::Active, _) => format!("{os}, рабочий стол НЕ отвечает"),
         (mode, _) => format!("{os}, на узле: {}", mode.label()),
     }
-}
-
-/// Текст ssh_config без Host-блока `name` — от строки `Host name` до следующей `Host`.
-fn without_host(text: &str, name: &str) -> String {
-    let mut out = String::new();
-    let mut skip = false;
-    for line in text.lines() {
-        if let Some(host) = line.strip_prefix("Host ") {
-            skip = host.trim() == name;
-        }
-        if !skip {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-fn include_in_ssh_config() -> io::Result<()> {
-    let dir = home()?.join(".ssh");
-    let path = dir.join("config");
-    let text = fs::read_to_string(&path).unwrap_or_default();
-    if text.lines().any(|line| line.trim() == INCLUDE) {
-        return Ok(());
-    }
-    fs::create_dir_all(&dir)?;
-    // В самое начало: после первого Host строка попала бы в его условную область.
-    write_private(&path, &format!("{INCLUDE}\n\n{text}"))?;
-    eprintln!(
-        "ferry: в начало ~/.ssh/config добавлено `{INCLUDE}` — узлы доступны как `ssh <узел>`"
-    );
-    Ok(())
-}
-
-fn check(what: &str, value: &str, allowed: impl Fn(char) -> bool) -> io::Result<()> {
-    if value.is_empty() || value.starts_with('-') || !value.chars().all(allowed) {
-        return Err(io::Error::other(format!(
-            "недопустимое значение ({what}): {value:?}"
-        )));
-    }
-    Ok(())
 }
 
 /// Запустить, вернуть stdout; при ошибке — вывод команды в тексте ошибки.
@@ -897,14 +830,6 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), cmd);
-    }
-
-    #[test]
-    fn re_adding_a_host_replaces_its_block() {
-        let text = "Host a\n  HostName 1\n\nHost b\n  HostName 2\n\n";
-        assert_eq!(without_host(text, "a"), "Host b\n  HostName 2\n\n");
-        assert_eq!(without_host(text, "b"), "Host a\n  HostName 1\n\n");
-        assert_eq!(without_host(text, "c"), text);
     }
 
     /// Снимок берёт незакоммиченное и новые файлы, детерминирован и не трогает ветку и индекс.
