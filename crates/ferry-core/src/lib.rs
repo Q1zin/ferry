@@ -5,6 +5,7 @@ pub mod desk;
 pub mod doctor;
 pub mod find;
 pub mod hub;
+pub mod info;
 pub mod jobs;
 pub mod mode;
 pub mod nodes;
@@ -15,6 +16,9 @@ pub mod screen;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+
+/// Версия ferry — у хаба и узлов она должна совпадать.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn home() -> io::Result<PathBuf> {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };

@@ -153,6 +153,30 @@ pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
     remote_status(host, &remote)
 }
 
+/// Свойства узла — пары `ключ=значение` от `ferry info` на нём.
+pub fn info(host: &str) -> io::Result<Vec<(String, String)>> {
+    node(host)?;
+    let out = text(&mut ssh_on(host, "ferry info"))?;
+    Ok(crate::info::parse(&out))
+}
+
+pub fn info_command(host: &str) -> io::Result<i32> {
+    let pairs = info(host)?;
+    let shown = crate::info::describe(&pairs);
+    let width = shown
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in shown {
+        println!("  {label:<width$}  {value}");
+    }
+    for warning in crate::info::warnings(&pairs) {
+        println!("  ⚠ {warning}");
+    }
+    Ok(0)
+}
+
 /// Режим узла — его выбирают на самом узле, хаб только смотрит.
 pub fn mode(host: &str) -> io::Result<i32> {
     node(host)?;
