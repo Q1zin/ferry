@@ -48,15 +48,15 @@ pub fn ls() -> io::Result<i32> {
         eprintln!("ferry: узлов нет; добавить — ferry add <узел> <user@адрес>");
         return Ok(0);
     }
-    let states: Vec<String> = thread::scope(|s| {
+    let states: Vec<Status> = thread::scope(|s| {
         let probes: Vec<_> = nodes
             .iter()
             .map(|node| {
                 s.spawn(move || {
                     if node.paused {
-                        String::new()
+                        Status::default()
                     } else {
-                        probe(&node.name)
+                        status(&node.name)
                     }
                 })
             })
@@ -70,13 +70,13 @@ pub fn ls() -> io::Result<i32> {
         let (name, addr) = (&node.name, &node.addr);
         if node.paused {
             println!("{name:<14} {addr:<16} пауза на хабе (ferry resume {name})");
-        } else if state != "нет связи" {
-            println!("{name:<14} {addr:<16} {state}");
+        } else if state.online {
+            println!("{name:<14} {addr:<16} {}", state.summary());
         } else {
             // Не отвечает — может, сменил адрес: ищем по ключу хоста.
             match crate::find::find(name, addr, true) {
                 Ok(Some(found)) if found != *addr => {
-                    println!("{name:<14} {found:<16} {}", probe(name))
+                    println!("{name:<14} {found:<16} {}", status(name).summary())
                 }
                 _ => println!("{name:<14} {addr:<16} нет связи (ferry find {name} — подробнее)"),
             }
@@ -198,9 +198,45 @@ pub fn log(host: &str, name: &str, follow: bool) -> io::Result<i32> {
     exec_ssh(host, &format!("ferry log {}{follow}", sh_quote(name)))
 }
 
-pub fn kill(host: &str, name: &str) -> io::Result<i32> {
+pub fn kill(host: &str, name: &str) -> io::Result<String> {
+    ferry_on(host, false, &["kill", name])
+}
+
+/// Задачи узла.
+pub fn jobs_list(host: &str) -> io::Result<Vec<crate::jobs::Job>> {
+    Ok(crate::jobs::parse_tsv(&ferry_on(
+        host,
+        false,
+        &["jobs", "--tsv"],
+    )?))
+}
+
+/// Лог задачи целиком (без слежения).
+pub fn job_log(host: &str, name: &str) -> io::Result<String> {
+    ferry_on(host, false, &["log", name])
+}
+
+/// `ferry <аргументы>` на узле (с `desk` — на его рабочем столе): вывод, а при ошибке — он же
+/// в тексте ошибки. Для приложения хаба и для команд, чей ответ CLI просто печатает.
+pub fn ferry_on(host: &str, desk: bool, args: &[&str]) -> io::Result<String> {
     node(host)?;
-    remote_status(host, &format!("ferry kill {}", sh_quote(name)))
+    let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
+    let mut cmd = format!("ferry {}", quoted.join(" "));
+    if desk {
+        cmd = format!("ferry desk {}", sh_quote(&cmd));
+    }
+    // Оба потока: подтверждения вроде «задача остановлена» узел пишет в stderr.
+    let out = ssh_on(host, &cmd).stdin(Stdio::null()).output()?;
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        Ok(said)
+    } else {
+        Err(io::Error::other(said.trim().to_string()))
+    }
 }
 
 /// Каталог на узле, где выполнять команду: тот же подкаталог проекта (после sync) или дом.
@@ -429,11 +465,11 @@ pub fn get(host: &str, path: &str, dest: Option<&str>) -> io::Result<i32> {
 }
 
 /// Окна и настоящий ввод на рабочем столе узла: `ferry input …` через desk.
-pub fn input(host: &str, args: &[&str]) -> io::Result<i32> {
-    node(host)?;
-    let quoted: Vec<String> = args.iter().map(|a| sh_quote(a)).collect();
-    let input = format!("ferry input {}", quoted.join(" "));
-    remote_status(host, &format!("ferry desk {}", sh_quote(&input)))
+pub fn input(host: &str, args: &[&str]) -> io::Result<String> {
+    let args: Vec<&str> = std::iter::once("input")
+        .chain(args.iter().copied())
+        .collect();
+    ferry_on(host, true, &args)
 }
 
 /// Запись экрана узла кадрами — сюда, в `~/.ferry/recs/<узел>-<время>/`. В stdout — путь к
@@ -496,9 +532,15 @@ pub fn rec(host: &str, seconds: &str, fps: &str) -> io::Result<i32> {
 }
 
 pub fn shot(host: &str, file: Option<&str>) -> io::Result<i32> {
+    println!("{}", screenshot(host, file.map(Path::new))?.display());
+    Ok(0)
+}
+
+/// Снимок экрана узла в файл (по умолчанию `~/.ferry/shots/<узел>.png`) — путь к нему.
+pub fn screenshot(host: &str, file: Option<&Path>) -> io::Result<PathBuf> {
     node(host)?;
     let file = match file {
-        Some(file) => PathBuf::from(file),
+        Some(file) => file.to_path_buf(),
         None => {
             let dir = ferry_home()?.join("shots");
             fs::create_dir_all(&dir)?;
@@ -515,8 +557,7 @@ pub fn shot(host: &str, file: Option<&str>) -> io::Result<i32> {
             .arg(format!("{host}:.ferry/shot.png"))
             .arg(&file),
     )?;
-    println!("{}", file.display());
-    Ok(0)
+    Ok(file)
 }
 
 pub fn stop(host: &str) -> io::Result<i32> {
@@ -563,7 +604,7 @@ pub fn update(host: &str, file: &str) -> io::Result<i32> {
 }
 
 /// Питание узла. Перезагрузка и выключение — через 10 с, их можно отменить: `cancel`.
-pub fn power(host: &str, action: &str) -> io::Result<i32> {
+pub fn power(host: &str, action: &str) -> io::Result<String> {
     windows_node(host)?;
     let (remote, done) = match action {
         "reboot" => (
@@ -587,17 +628,18 @@ pub fn power(host: &str, action: &str) -> io::Result<i32> {
             ));
         }
     };
-    let code = remote_status(host, remote)?;
-    if code == 0 {
-        eprintln!("ferry: {host} {done}");
-    }
-    Ok(code)
+    // UTF-8 в консоли: иначе ответы shutdown приходят в OEM-кодировке, кракозябрами.
+    text(&mut ssh_on(
+        host,
+        &format!("chcp.com 65001 >/dev/null 2>&1; {remote}"),
+    ))?;
+    Ok(format!("ferry: {host} {done}"))
 }
 
 /// Перезапустить демон: он снова прочитает окружение (новый PATH и т. п.).
-pub fn restart(host: &str) -> io::Result<i32> {
+pub fn restart(host: &str) -> io::Result<String> {
     windows_node(host)?;
-    remote_status(host, RESTART)
+    text(&mut ssh_on(host, RESTART))
 }
 
 /// Демон перезапускает планировщик — так он снова окажется на рабочем столе, а не в Session 0.
@@ -823,7 +865,35 @@ fn node(name: &str) -> io::Result<()> {
     nodes::active(name).map(drop)
 }
 
-fn probe(host: &str) -> String {
+/// Состояние узла для `ls` и приложения хаба.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub online: bool,
+    /// `uname -s` узла, например `MINGW64_NT-10.0-17763`.
+    pub os: String,
+    pub mode: Option<Mode>,
+    /// Демон рабочего стола отвечает.
+    pub desk: bool,
+    /// Время TCP-соединения с sshd, мс.
+    pub latency_ms: Option<u32>,
+}
+
+impl Status {
+    pub fn summary(&self) -> String {
+        if !self.online {
+            return "нет связи".into();
+        }
+        let os = &self.os;
+        match (self.mode.unwrap_or(Mode::Active), self.desk) {
+            (Mode::Active, true) => format!("{os}, рабочий стол отвечает"),
+            (Mode::Active, false) => format!("{os}, рабочий стол НЕ отвечает"),
+            (mode, _) => format!("{os}, на узле: {}", mode.label()),
+        }
+    }
+}
+
+pub fn status(host: &str) -> Status {
+    let latency_ms = nodes::get(host).ok().and_then(|n| latency(&n.addr));
     let out = Command::new("ssh")
         .args(["-o", "ConnectTimeout=3", host])
         .arg("uname -s; cat ~/.ferry/mode 2>/dev/null || echo active; ferry desk true >/dev/null 2>&1 && echo desk")
@@ -831,21 +901,28 @@ fn probe(host: &str) -> String {
         .stderr(Stdio::null())
         .output();
     let Ok(out) = out else {
-        return "нет ssh".into();
+        return Status::default();
     };
     let out = String::from_utf8_lossy(&out.stdout);
     let mut lines = out.lines();
-    let (Some(os), mode, desk) = (lines.next(), lines.next(), lines.next()) else {
-        return "нет связи".into();
+    let Some(os) = lines.next() else {
+        return Status::default();
     };
-    match (
-        Mode::parse(mode.unwrap_or_default()).unwrap_or(Mode::Active),
-        desk,
-    ) {
-        (Mode::Active, Some("desk")) => format!("{os}, рабочий стол отвечает"),
-        (Mode::Active, _) => format!("{os}, рабочий стол НЕ отвечает"),
-        (mode, _) => format!("{os}, на узле: {}", mode.label()),
+    Status {
+        online: true,
+        os: os.into(),
+        mode: lines.next().and_then(Mode::parse),
+        desk: lines.next() == Some("desk"),
+        latency_ms,
     }
+}
+
+fn latency(addr: &str) -> Option<u32> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let target = (addr, 22).to_socket_addrs().ok()?.next()?;
+    let start = std::time::Instant::now();
+    TcpStream::connect_timeout(&target, std::time::Duration::from_secs(2)).ok()?;
+    Some(start.elapsed().as_millis() as u32)
 }
 
 /// Запустить, вернуть stdout; при ошибке — вывод команды в тексте ошибки.
