@@ -48,12 +48,21 @@ pub fn daemon() -> io::Result<i32> {
     detach_console();
     let token: Arc<str> = token.into();
     let jobs = Jobs::default();
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        let (token, jobs) = (token.clone(), jobs.clone());
-        thread::spawn(move || {
-            let _ = serve(stream, &token, &jobs);
-        });
+    let accept = move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let (token, jobs) = (token.clone(), jobs.clone());
+            thread::spawn(move || {
+                let _ = serve(stream, &token, &jobs);
+            });
+        }
+    };
+    // На Windows главный поток отдаём иконке в трее (её цикл сообщений), команды — в фоне.
+    if cfg!(windows) {
+        thread::spawn(accept);
+        crate::tray::run();
+    } else {
+        accept();
     }
     Ok(0)
 }

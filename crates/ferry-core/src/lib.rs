@@ -12,6 +12,7 @@ pub mod nodes;
 pub mod project;
 pub mod relay;
 pub mod screen;
+pub mod tray;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
