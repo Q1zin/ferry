@@ -51,6 +51,8 @@ ferry — разработка на нескольких машинах: это�
                                     печатает лист-обзор, с ffmpeg на хабе — ещё и mp4
   ferry update <узел> <ferry.exe>   заменить ferry на узле и перезапустить демон
   ferry restart <узел>              перезапустить демон (подхватит новый PATH)
+  ferry power <узел> reboot|sleep|shutdown|cancel
+                                    питание узла; reboot и shutdown — через 10 с, cancel отменяет
   ferry trust [<хост>]              git с хоста на узлах — через ключи этого хаба (только
                                     чтение); без аргумента — список доверенных хостов
 
@@ -120,6 +122,7 @@ fn main() {
         ["rec", host, seconds, fps] => hub::rec(host, seconds, fps),
         ["update", host, file] => hub::update(host, file),
         ["restart", host] => hub::restart(host),
+        ["power", host, action] => hub::power(host, action),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["relay"] => relay::serve(),
