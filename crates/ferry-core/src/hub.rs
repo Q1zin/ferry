@@ -142,7 +142,7 @@ pub fn run(host: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
 }
 
 /// Фоновая задача на рабочем столе узла — там же, где выполнился бы `run`.
-pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
+pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<String> {
     node(host)?;
     let dir = project_dir(host, sync)?;
     // Окружение релея — у запуска задачи: надсмотрщик и команда наследуют его, а в списке
@@ -150,7 +150,7 @@ pub fn start(host: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
     let env = crate::relay::node_env()?;
     let job = format!("{env}ferry job {} {}", sh_quote(name), sh_quote(cmd));
     let remote = format!("cd {} && ferry desk {}", sh_quote(&dir), sh_quote(&job));
-    remote_status(host, &remote)
+    text(&mut ssh_on(host, &remote))
 }
 
 /// Свойства узла — пары `ключ=значение` от `ferry info` на нём.
