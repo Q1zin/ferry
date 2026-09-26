@@ -17,6 +17,7 @@ pub fn run() {
 #[cfg(windows)]
 mod win {
     use std::mem::{size_of, zeroed};
+    use std::sync::atomic::{AtomicIsize, Ordering};
 
     use crate::mode::{self, Mode};
 
@@ -41,8 +42,37 @@ mod win {
     const TPM_RIGHTBUTTON: u32 = 2;
     const TPM_RETURNCMD: u32 = 0x100;
 
-    const IDI_APPLICATION: usize = 32512;
     const WS_OVERLAPPED: u32 = 0;
+    const SM_CXSMICON: i32 = 49;
+
+    /// Иконки режимов (`apps/hub/scripts/icons.mjs`): 16–32 px под масштаб экрана.
+    const SIZES: [i32; 4] = [16, 20, 24, 32];
+    const PNGS: [[&[u8]; 4]; 3] = [
+        [
+            include_bytes!("../assets/tray/active-16.png"),
+            include_bytes!("../assets/tray/active-20.png"),
+            include_bytes!("../assets/tray/active-24.png"),
+            include_bytes!("../assets/tray/active-32.png"),
+        ],
+        [
+            include_bytes!("../assets/tray/no-desktop-16.png"),
+            include_bytes!("../assets/tray/no-desktop-20.png"),
+            include_bytes!("../assets/tray/no-desktop-24.png"),
+            include_bytes!("../assets/tray/no-desktop-32.png"),
+        ],
+        [
+            include_bytes!("../assets/tray/paused-16.png"),
+            include_bytes!("../assets/tray/paused-20.png"),
+            include_bytes!("../assets/tray/paused-24.png"),
+            include_bytes!("../assets/tray/paused-32.png"),
+        ],
+    ];
+    /// Загружены один раз: трей обновляется по таймеру, новая иконка на каждый раз — утечка.
+    static ICONS: [AtomicIsize; 3] = [
+        AtomicIsize::new(0),
+        AtomicIsize::new(0),
+        AtomicIsize::new(0),
+    ];
 
     type Wndproc = extern "system" fn(isize, u32, usize, isize) -> isize;
 
@@ -110,7 +140,17 @@ mod win {
 
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn LoadIconW(instance: isize, name: usize) -> isize;
+        fn SetProcessDPIAware() -> i32;
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn CreateIconFromResourceEx(
+            bits: *const u8,
+            size: u32,
+            icon: i32,
+            version: u32,
+            w: i32,
+            h: i32,
+            flags: u32,
+        ) -> isize;
         fn RegisterClassW(class: *const WndClass) -> u16;
         fn CreateWindowExW(
             ex_style: u32,
@@ -157,8 +197,37 @@ mod win {
         text.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// Иконка ferry, свой uID = 1; остальное заполняет вызывающий под действие (ADD/MODIFY).
-    // ponytail: пока системная иконка приложения; своя .ico — когда в сборку добавим windres.
+    /// Иконки режимов в размере, который Windows хочет для трея при текущем масштабе.
+    fn load_icons() {
+        let want = unsafe { GetSystemMetrics(SM_CXSMICON) };
+        let i = SIZES
+            .iter()
+            .position(|&s| s >= want)
+            .unwrap_or(SIZES.len() - 1);
+        for (slot, pngs) in ICONS.iter().zip(PNGS) {
+            let png = pngs[i];
+            // PNG прямо в иконку (Vista+): ни ресурсов, ни windres.
+            let icon = unsafe {
+                CreateIconFromResourceEx(
+                    png.as_ptr(),
+                    png.len() as u32,
+                    1,
+                    0x0003_0000,
+                    SIZES[i],
+                    SIZES[i],
+                    0,
+                )
+            };
+            slot.store(icon, Ordering::Relaxed);
+        }
+    }
+
+    fn icon_for(mode: Mode) -> isize {
+        let i = Mode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+        ICONS[i].load(Ordering::Relaxed)
+    }
+
+    /// Иконка ferry, свой uID = 1: картинка и подсказка — по текущему режиму.
     fn icon_data(hwnd: isize) -> NotifyIconData {
         let mut data: NotifyIconData = unsafe { zeroed() };
         data.cb_size = size_of::<NotifyIconData>() as u32;
@@ -166,8 +235,9 @@ mod win {
         data.id = 1;
         data.flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.callback = WM_APP_TRAY;
-        data.icon = unsafe { LoadIconW(0, IDI_APPLICATION) };
-        let tip = wide(&format!("ferry — {}", mode::current().label()));
+        let mode = mode::current();
+        data.icon = icon_for(mode);
+        let tip = wide(&format!("ferry — {}", mode.label()));
         data.tip[..tip.len()].copy_from_slice(&tip);
         data
     }
@@ -255,6 +325,9 @@ mod win {
     }
 
     fn setup() -> Option<()> {
+        // Без этого Windows отдаст 16 px и растянет иконку на экране с масштабом.
+        unsafe { SetProcessDPIAware() };
+        load_icons();
         let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
         let class_name = wide("ferry-tray");
         let class = WndClass {
