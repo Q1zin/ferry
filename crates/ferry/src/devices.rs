@@ -568,7 +568,14 @@ pub fn kill(spec: &str, name: &str) -> io::Result<i32> {
 
 /// `ferry shot <цели> [файл.png]`: путь к снимку — в stdout. Без файла (и на нескольких целях) —
 /// `~/.ferry/shots/<устройство>.png`.
-pub fn shot(spec: &str, file: Option<&str>) -> io::Result<i32> {
+/// Что снять: весь экран, окно (процесс или часть заголовка) или область `x,y,ширина,высота`.
+pub enum Area<'a> {
+    Screen,
+    Window(&'a str),
+    Region([i32; 4]),
+}
+
+pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
     each(spec, |device, printer| {
         let path = match file {
             Some(file) => std::path::absolute(file)?,
@@ -576,11 +583,47 @@ pub fn shot(spec: &str, file: Option<&str>) -> io::Result<i32> {
                 .join("shots")
                 .join(format!("{device}.png")),
         };
-        ask(Request::Shot {
-            device: device.into(),
-            file: path.clone(),
-        })?;
+        let region = match area {
+            Area::Screen => None,
+            Area::Region(region) => Some(region),
+            // Место окна знает устройство: ответ — `x y ширина высота`.
+            Area::Window(name) => {
+                let Response::Message(place) = ask(Request::Input {
+                    device: device.into(),
+                    args: vec!["window".into(), name.into()],
+                })?
+                else {
+                    return Err(unexpected());
+                };
+                let numbers: Vec<i32> = place
+                    .split_whitespace()
+                    .filter_map(|n| n.parse().ok())
+                    .collect();
+                let region: [i32; 4] = numbers.try_into().map_err(|_| unexpected())?;
+                Some(region)
+            }
+        };
+        match region {
+            None => ask(Request::Shot {
+                device: device.into(),
+                file: path.clone(),
+            })?,
+            Some(area) => ask(Request::ShotArea {
+                device: device.into(),
+                file: path.clone(),
+                area,
+            })?,
+        };
         printer.line(&path.display().to_string(), false);
+        // Клик и ввод ждут координаты всего экрана — к точке на снимке прибавить начало области.
+        if let Some([x, y, width, height]) = region {
+            printer.line(
+                &format!(
+                    "ferry: область {x},{y} {width}×{height} — для click прибавь {x},{y} к точке на снимке"
+                ),
+                true,
+            );
+        }
         Ok(0)
     })
 }
