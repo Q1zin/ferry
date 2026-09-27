@@ -1,0 +1,27 @@
+{
+  "name": "ferry-hub",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "icons": "bun scripts/icons.mjs",
+    "test:ui": "node tests/ui.mjs"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "playwright-core": "1.64.1",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vue-tsc": "^3.3.5"
+  }
+}
