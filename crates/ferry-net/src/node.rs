@@ -159,6 +159,22 @@ impl Node {
                 };
                 files::reply_file(result.await, &tx).await;
             }
+            DeviceMessage::ShotWindow(WithChannels { inner, tx, .. }) => {
+                let result = async {
+                    self.check(true)?;
+                    let file = files::temp(&self.dir, "png")?;
+                    let path = file.clone();
+                    let code = blocking(move || {
+                        screen::screenshot_window(&path.to_string_lossy(), &inner.name)
+                    })
+                    .await?;
+                    if code != 0 || !file.exists() {
+                        return Err(Fail::new(format!("снимок окна не вышел (код {code})")));
+                    }
+                    Ok(file)
+                };
+                files::reply_file(result.await, &tx).await;
+            }
             DeviceMessage::ShotArea(WithChannels { inner, tx, .. }) => {
                 let result = async {
                     self.check(true)?;

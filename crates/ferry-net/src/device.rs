@@ -112,6 +112,22 @@ impl Device {
     }
 
     /// Снимок экрана устройства в PNG-файл `file`.
+    /// Снимок самого окна — даже закрытого другими.
+    pub async fn shot_window(&self, file: &Path, name: &str) -> Reply<()> {
+        need(&self.name, self.version.as_deref(), "0.1.7", "снимок окна")?;
+        let shot = ShotWindow { name: name.into() };
+        let mut rx = self
+            .client
+            .0
+            .server_streaming(shot, 8)
+            .await
+            .map_err(lost)?;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        files::recv_file(&mut rx, file).await
+    }
+
     /// Снимок области `[x, y, ширина, высота]` — окна или части экрана.
     pub async fn shot_area(&self, file: &Path, area: [i32; 4]) -> Reply<()> {
         need(

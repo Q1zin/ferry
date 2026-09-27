@@ -155,6 +155,10 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             agent.device(&device)?.shot(&file).await?;
             Response::Done
         }
+        Request::ShotWindow { device, file, name } => {
+            agent.device(&device)?.shot_window(&file, &name).await?;
+            Response::Done
+        }
         Request::ShotArea { device, file, area } => {
             agent.device(&device)?.shot_area(&file, area).await?;
             Response::Done

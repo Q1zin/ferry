@@ -156,6 +156,12 @@ pub struct ShotArea {
     pub area: [i32; 4],
 }
 
+/// Снимок самого окна (процесс или часть заголовка) — даже закрытого другими окнами.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ShotWindow {
+    pub name: String,
+}
+
 /// Последние `lines` строк лога приложения на устройстве.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Logs {
@@ -237,6 +243,9 @@ pub enum DeviceProtocol {
     /// С 0.1.6.
     #[rpc(tx = mpsc::Sender<Chunk>)]
     ShotArea(ShotArea),
+    /// С 0.1.7.
+    #[rpc(tx = mpsc::Sender<Chunk>)]
+    ShotWindow(ShotWindow),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
