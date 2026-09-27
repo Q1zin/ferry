@@ -1,8 +1,16 @@
 [workspace]
-members = ["crates/ferry-core", "crates/ferry"]
+members = ["crates/ferry-core", "crates/ferry", "apps/hub/src-tauri"]
 resolver = "3"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.90"
+
+# Профиль задаётся на весь workspace (у члена он игнорируется).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
