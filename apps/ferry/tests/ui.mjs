@@ -66,6 +66,7 @@ const fixtures = {
   install_cli: 'Команда ferry: /opt/homebrew/bin/ferry',
   version: '0.1.0',
   check_update: '0.1.1',
+  update_all: 'win-10: ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
   install_update: 'ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
 }
 
@@ -242,8 +243,10 @@ try {
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'install_cli'))
     // Обновление: тихая проверка при запуске уже нашла версию.
     await page.getByText('Есть ferry 0.1.1').waitFor()
+    await page.getByRole('button', { name: 'Обновить все устройства' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'update_all'))
     await page.getByRole('button', { name: 'Обновить и перезапустить' }).click()
-    await page.getByText('ставлю и перезапускаюсь').waitFor()
+    await page.getByText('ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь', { exact: true }).waitFor()
     await fits('настройки')
     await shot('settings')
     await page.close()

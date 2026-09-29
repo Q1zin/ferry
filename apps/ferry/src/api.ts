@@ -74,6 +74,7 @@ export const api = {
   /// Версия новее этой, если есть в релизах.
   checkUpdate: () => invoke<string | null>('check_update'),
   installUpdate: () => invoke<string>('install_update'),
+  updateAll: () => invoke<string>('update_all'),
   permissions: () => invoke<Permissions | null>('permissions'),
   askPermission: (kind: 'screen' | 'input') => invoke<void>('ask_permission', { kind }),
   restartApp: () => invoke<void>('restart_app'),

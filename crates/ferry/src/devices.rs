@@ -43,11 +43,13 @@ fn finish(result: Result<i32, Fail>) -> io::Result<i32> {
 // --- Цели ------------------------------------------------------------------------------------
 
 /// Имена устройств по спецификации целей.
-fn targets(spec: &str) -> Result<Vec<String>, Fail> {
+/// `any_role` — и пульты тоже: обновлять нужно всех, а команды пульт не принимает.
+fn targets(spec: &str, any_role: bool) -> Result<Vec<String>, Fail> {
     let snap = state()?;
     let mut names = Vec::new();
     let mut skipped = Vec::new();
-    let accepts = |p: &PeerView| p.status.as_ref().is_some_and(|s| s.role.accepts_commands());
+    let accepts =
+        |p: &PeerView| any_role || p.status.as_ref().is_some_and(|s| s.role.accepts_commands());
     for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let matched: Vec<&PeerView> = match item {
             "all" => snap.peers.iter().collect(),
@@ -167,7 +169,15 @@ fn emit(prefix: &str, line: &[u8], err: bool) {
 
 /// Выполнить на каждой цели параллельно. Одна цель — вывод как есть.
 fn each(spec: &str, job: impl Fn(&str, &Printer) -> Result<i32, Fail> + Sync) -> io::Result<i32> {
-    let names = match targets(spec) {
+    each_of(spec, false, job)
+}
+
+fn each_of(
+    spec: &str,
+    any_role: bool,
+    job: impl Fn(&str, &Printer) -> Result<i32, Fail> + Sync,
+) -> io::Result<i32> {
+    let names = match targets(spec, any_role) {
         Ok(names) => names,
         Err(fail) => return finish(Err(fail)),
     };
@@ -820,7 +830,10 @@ pub fn update(spec: Option<&str>) -> io::Result<i32> {
         |device: Option<String>, printer: &Printer| said(ask(Request::Update { device })?, printer);
     match spec {
         None => finish(one(None, &Printer::new(None))),
-        Some(spec) => each(spec, |device, printer| one(Some(device.into()), printer)),
+        // Обновлять — и пульты: команды они не принимают, а обновление — да.
+        Some(spec) => each_of(spec, true, |device, printer| {
+            one(Some(device.into()), printer)
+        }),
     }
 }
 
@@ -836,7 +849,9 @@ pub fn logs(spec: Option<&str>, lines: usize) -> io::Result<i32> {
         };
     match spec {
         None => finish(one(None, &Printer::new(None))),
-        Some(spec) => each(spec, |device, printer| one(Some(device.into()), printer)),
+        Some(spec) => each_of(spec, true, |device, printer| {
+            one(Some(device.into()), printer)
+        }),
     }
 }
 
