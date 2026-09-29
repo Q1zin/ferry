@@ -69,6 +69,12 @@ impl Device {
     }
 
     pub async fn input(&self, args: Vec<String>) -> Reply<String> {
+        if args
+            .first()
+            .is_some_and(|a| a == "probe" || a == "probe-window")
+        {
+            need(&self.name, self.version.as_deref(), "0.1.8", "ferry wait")?;
+        }
         if args.first().is_some_and(|a| a == "window") {
             need(
                 &self.name,

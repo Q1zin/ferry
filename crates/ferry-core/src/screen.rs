@@ -128,6 +128,17 @@ pub fn input(args: &[&str]) -> io::Result<String> {
     match args {
         ["windows"] => Ok(table(&os::windows()?)),
         ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
+        // Для `ferry wait`: есть ли сейчас — ответ, а не ошибка, чтобы «нет» не спутать с обрывом.
+        ["probe-window", name @ ..] if !name.is_empty() => {
+            Ok(match find_window(&os::windows()?, &name.join(" ")) {
+                Ok(w) => {
+                    let (x, y, width, height) = w.rect.unwrap_or_default();
+                    format!("found {x} {y} {width} {height}\n")
+                }
+                Err(_) => "none\n".into(),
+            })
+        }
+        ["probe", name @ ..] if !name.is_empty() => os::probe(&name.join(" ")),
         ["ui", window @ ..] => os::ui(&window.join(" ")),
         ["move", "--name", name] => {
             let (x, y) = os::find(name)?;
@@ -440,6 +451,9 @@ mod none {
     }
     pub fn find(_: &str) -> io::Result<(i32, i32)> {
         Err(io::Error::other("окна и ввод — только на Windows и macOS"))
+    }
+    pub fn probe(_: &str) -> io::Result<String> {
+        unsupported()
     }
     pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
         unsupported()
@@ -801,6 +815,10 @@ mod mac {
         ui(name).map(|_| (0, 0))
     }
 
+    pub fn probe(name: &str) -> io::Result<String> {
+        ui(name)
+    }
+
     /// Кадры `frame-0001.png`… с курсором по расписанию от секундомера. Листа-обзора нет.
     pub fn record(seconds: &str, fps: &str, dir: &Path) -> io::Result<i32> {
         let number = |s: &str| {
@@ -1093,6 +1111,11 @@ mod win {
         }
     }
 
+    /// Есть ли элемент сейчас: `found x y`, `none` или `many N` — для `ferry wait`.
+    pub fn probe(name: &str) -> io::Result<String> {
+        automation(&["probe", name])
+    }
+
     fn automation(args: &[&str]) -> io::Result<String> {
         let out = super::powershell("ferry-ui.ps1", UI_SCRIPT)?
             .args(args)
@@ -1174,6 +1197,13 @@ $visible = @($w.FindAll([System.Windows.Automation.TreeScope]::Descendants, $all
     Where-Object { -not $_.Current.IsOffscreen -and -not $_.Current.BoundingRectangle.IsEmpty })
 $hits = @($visible | Where-Object { $_.Current.Name -eq $arg -or ('#' + $_.Current.AutomationId) -eq $arg })
 if (-not $hits -and -not $arg.StartsWith('#')) { $hits = @($visible | Where-Object { $_.Current.Name -like "*$arg*" }) }
+if ($mode -eq 'probe') {
+    if ($hits.Count -eq 1) {
+        $r = $hits[0].Current.BoundingRectangle
+        'found {0} {1}' -f [int]($r.X + $r.Width / 2 - $screen.X), [int]($r.Y + $r.Height / 2 - $screen.Y)
+    } elseif (-not $hits) { 'none' } else { "many $($hits.Count)" }
+    exit 0
+}
 if ($hits.Count -eq 1) {
     $r = $hits[0].Current.BoundingRectangle
     '{0} {1}' -f [int]($r.X + $r.Width / 2 - $screen.X), [int]($r.Y + $r.Height / 2 - $screen.Y)

@@ -116,6 +116,22 @@ async fn cli_drives_devices_through_the_app() {
         "{lines:?}"
     );
 
+    // wait только читает список окон: окна нет — с --gone сразу 0, без — 1 по таймауту.
+    let missing = "ferry-нет-такого-окна";
+    let out = ferry(&outside, &["wait", "win", "--window", missing, "--gone"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = ferry(
+        &outside,
+        &["wait", "win", "--window", missing, "--timeout", "1"],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("не появилось"),
+        "{}",
+        text(&out.stderr)
+    );
+
     // Одна цель: вывод как есть, код — устройства. Вне репозитория — в доме устройства.
     let out = ferry(&outside, &["run", "win", "--", "echo hi; pwd; exit 4"]).await;
     assert_eq!(out.status.code(), Some(4), "{}", text(&out.stderr));

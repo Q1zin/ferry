@@ -68,6 +68,10 @@ ferry — разработка и тесты на нескольких устр�
   ferry type <устройство> <текст>   ввести текст (юникод, раскладка не важна)
   ferry key <устройство> <комбинация>...
                                     клавиши: enter, ctrl+s, alt+tab, win+d, f5…
+  ferry wait <устройство> --window <окно> | --name <имя|#id> [--gone] [--timeout <секунд>]
+                                    ждать, пока окно (процесс или часть заголовка) или элемент
+                                    окна с фокусом появится (с --gone — исчезнет); по умолчанию
+                                    30 с; появилось — печатает его место, не дождался — код 1
   ferry rec <устройство> <секунды> [кадр/с]
                                     запись кадрами (5 в секунду) → ~/.ferry/recs/…;
                                     печатает лист-обзор, с ffmpeg здесь — ещё и mp4
@@ -105,6 +109,7 @@ fn main() {
         ["get", device, path] => devices::get(device, path, None),
         ["get", device, path, dest] => devices::get(device, path, Some(dest)),
         ["shot", spec, rest @ ..] => shot(spec, rest),
+        ["wait", device, rest @ ..] => wait(device, rest),
         ["stop", spec] => devices::stop(spec),
         ["start", spec, name, rest @ ..] => start(spec, name, rest),
         // Раньше `jobs <цели>`: иначе `--tsv` приняли бы за имя устройства.
@@ -235,6 +240,39 @@ fn shot(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
         }
     }
     devices::shot(spec, file, area)
+}
+
+/// `wait <устройство> (--window <окно> | --name <имя>) [--gone] [--timeout <секунд>]`.
+fn wait(device: &str, mut rest: &[&str]) -> io::Result<i32> {
+    let (mut what, mut gone, mut timeout) = (None, false, 30);
+    while let Some((first, tail)) = rest.split_first() {
+        match (*first, tail) {
+            ("--window", [name, tail @ ..]) => {
+                what = Some(devices::Wait::Window(name));
+                rest = tail;
+            }
+            ("--name", [name, tail @ ..]) => {
+                what = Some(devices::Wait::Name(name));
+                rest = tail;
+            }
+            ("--gone", tail) => {
+                gone = true;
+                rest = tail;
+            }
+            ("--timeout", [seconds, tail @ ..]) => {
+                let Ok(seconds) = seconds.parse() else {
+                    return usage();
+                };
+                timeout = seconds;
+                rest = tail;
+            }
+            _ => return usage(),
+        }
+    }
+    match what {
+        Some(what) => devices::wait(device, what, gone, std::time::Duration::from_secs(timeout)),
+        None => usage(),
+    }
 }
 
 /// `logs [<цели>] [-n <строк>]`.
