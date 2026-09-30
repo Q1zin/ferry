@@ -59,6 +59,8 @@ ferry — разработка и тесты на нескольких устр�
                                     другими, --region — область; печатает, что прибавить к точке на
                                     снимке для click
   ferry windows <устройство>        окна сверху вниз: процесс, место, размер; * — фокус
+  ferry focus <устройство> <окно>   вывести окно (процесс или часть заголовка) вперёд, с фокусом:
+                                    окна задач ferry открываются позади (только Windows)
   ferry ui <устройство> [<окно>]    элементы окна с фокусом (или по процессу, части заголовка):
                                     роль, «имя», #id, место — по ним кликать надёжнее
   ferry click <устройство> <x> <y> [right|double]
@@ -124,6 +126,9 @@ fn main() {
         ["tunnel", device, port] => devices::tunnel(Some((device, port)), false),
         ["tunnel", device, port, "--close"] => devices::tunnel(Some((device, port)), true),
         ["windows", device] => devices::input(device, owned(&["windows"])),
+        ["focus", device, window @ ..] if !window.is_empty() => {
+            devices::input(device, owned(&[&["focus"][..], window].concat()))
+        }
         ["ui", device, window @ ..] => {
             devices::input(device, owned(&[&["ui"][..], window].concat()))
         }
