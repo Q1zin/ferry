@@ -28,9 +28,9 @@ use crate::node::Node;
 use crate::pair;
 use crate::proto::Fail;
 use crate::proto::{
-    self, DeviceClient, DeviceMessage, DeviceProtocol, Rename, Role, SetRole, Status,
+    self, DeviceClient, DeviceMessage, DeviceProtocol, Peers, Rename, Role, SetRole, Status,
 };
-use crate::store::{self, Peer, Store};
+use crate::store::{self, Store};
 
 pub struct Options {
     /// Где ключ, `device.json` и файл режима: `~/.ferry`.
@@ -471,18 +471,17 @@ impl Agent {
         Ok(())
     }
 
-    /// Забыть связанное устройство.
+    /// Забыть связанное устройство — здесь и на всех связанных: они узнают из нашего списка.
     pub fn forget(&self, id: EndpointId) -> Result<()> {
         let inner = &self.inner;
         {
             let mut store = inner.store.lock().unwrap();
-            store.peers.retain(|p| p.id != id);
+            store.forget(id, ferry_core::now());
             store.save(&inner.dir)?;
         }
-        if let Some(task) = inner.peers.lock().unwrap().remove(&id).and_then(|l| l.task) {
-            task.abort();
-        }
+        inner.disconnect(id);
         inner.notify();
+        inner.share(None);
         Ok(())
     }
 
@@ -663,19 +662,88 @@ impl Inner {
             .with_context(|| format!("{name} не на связи"))
     }
 
+    /// Связали сейчас: запомнить и рассказать о нём остальным связанным.
     fn add_peer(self: Arc<Self>, id: EndpointId, name: String) {
         {
             let mut store = self.store.lock().unwrap();
-            match store.peers.iter_mut().find(|p| p.id == id) {
-                Some(peer) => peer.name = name,
-                None => store.peers.push(Peer { id, name }),
-            }
+            store.paired(id, name, ferry_core::now());
             if let Err(e) = store.save(&self.dir) {
                 tracing::warn!("не сохранить связанное устройство: {e:#}");
             }
         }
         self.clone().keep(id);
         self.notify();
+        self.share(None);
+    }
+
+    /// Список соседа: связать с теми, кого он знает, забыть тех, кого забыли, — и если что-то
+    /// изменилось, рассказать остальным. Так связанные устройства сходятся к одному списку.
+    fn merge(self: Arc<Self>, theirs: &Peers, from: EndpointId) {
+        let (added, removed) = {
+            let mut store = self.store.lock().unwrap();
+            let before: Vec<EndpointId> = store.peers.iter().map(|p| p.id).collect();
+            if !store.merge(self.endpoint.id(), theirs) {
+                return;
+            }
+            if let Err(e) = store.save(&self.dir) {
+                tracing::warn!("не сохранить связанные устройства: {e:#}");
+            }
+            let after: Vec<EndpointId> = store.peers.iter().map(|p| p.id).collect();
+            let added: Vec<_> = after
+                .iter()
+                .filter(|id| !before.contains(id))
+                .copied()
+                .collect();
+            let removed: Vec<_> = before
+                .into_iter()
+                .filter(|id| !after.contains(id))
+                .collect();
+            (added, removed)
+        };
+        tracing::info!(
+            "{}: список устройств — связаны {}, забыты {}",
+            from.fmt_short(),
+            added.len(),
+            removed.len()
+        );
+        for id in removed {
+            self.disconnect(id);
+        }
+        for id in added {
+            self.clone().keep(id);
+        }
+        self.notify();
+        self.share(None);
+    }
+
+    /// Рассказать устройствам на связи (или только `only`), кого знаем и кого забыли.
+    fn share(&self, only: Option<EndpointId>) {
+        let peers = self.store.lock().unwrap().shared();
+        let clients: Vec<DeviceClient> = self
+            .peers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| only.is_none_or(|only| only == **id))
+            .filter(|(_, live)| {
+                let version = live.status.as_ref().map(|s| s.version.as_str());
+                version.is_some_and(|v| crate::device::at_least(v, "0.1.9"))
+            })
+            .filter_map(|(_, live)| live.client.clone())
+            .collect();
+        for client in clients {
+            let peers = peers.clone();
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(10), client.peers(peers)).await;
+            });
+        }
+    }
+
+    /// Больше не держать связь с устройством (его забыли).
+    fn disconnect(&self, id: EndpointId) {
+        if let Some(task) = self.peers.lock().unwrap().remove(&id).and_then(|l| l.task) {
+            task.abort();
+        }
     }
 
     /// Держать связь с устройством: подключиться, подписаться на статус, при обрыве — снова.
@@ -771,13 +839,19 @@ impl Inner {
                 let _ = store.save(&self.dir);
             }
         }
+        let connected = client.is_some();
         if let Some(live) = self.peers.lock().unwrap().get_mut(&id) {
             live.status = Some(status);
-            if client.is_some() {
+            if connected {
                 live.client = client;
                 live.since = Some(std::time::Instant::now());
                 live.conn = Some(conn.clone());
             }
+        }
+        // Новое соединение: пусть устройство сверит свой список с нашим — пока его не было,
+        // кого-то могли связать или забыть.
+        if connected {
+            self.share(Some(id));
         }
         self.on_path(id, conn);
         self.notify();
@@ -867,6 +941,10 @@ impl Inner {
                 let result = store::valid_name(&name)
                     .and_then(|name| self.remote_change(|| self.rename(name)));
                 tx.send(result).await.ok();
+            }
+            DeviceMessage::Peers(WithChannels { tx, inner, .. }) => {
+                self.clone().merge(&inner, from);
+                tx.send(()).await.ok();
             }
             other => self.node.clone().handle(other, from).await,
         }
@@ -959,22 +1037,39 @@ impl ProtocolHandler for DeviceHandler {
         }
         let from = conn.remote_id();
         self.0.clone().refresh(from);
-        loop {
-            match irpc_iroh::read_request::<DeviceProtocol>(&conn).await {
-                Ok(Some(msg)) => {
-                    tokio::spawn(self.0.clone().handle(msg, from));
+        // Забыли устройство — рвём и его соединение сюда, вместе с подпиской на статус.
+        let inner = self.0.clone();
+        let watched = conn.clone();
+        let forgotten = tokio::spawn(async move {
+            let mut changed = inner.changed.subscribe();
+            while changed.changed().await.is_ok() {
+                if inner.store.lock().unwrap().peer(from).is_none() {
+                    watched.close(1u32.into(), b"not paired");
+                    return;
                 }
-                Ok(None) => return Ok(()),
-                // Запрос из версии новее этой: отказать только ему, связь и статус не рвать.
-                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                    tracing::warn!(
-                        "{}: незнакомый запрос (ferry там новее?): {e}",
-                        from.fmt_short()
-                    );
+            }
+        });
+        let result = async {
+            loop {
+                match irpc_iroh::read_request::<DeviceProtocol>(&conn).await {
+                    Ok(Some(msg)) => {
+                        tokio::spawn(self.0.clone().handle(msg, from));
+                    }
+                    Ok(None) => return Ok(()),
+                    // Запрос из версии новее этой: отказать только ему, связь и статус не рвать.
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        tracing::warn!(
+                            "{}: незнакомый запрос (ferry там новее?): {e}",
+                            from.fmt_short()
+                        );
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(e) => return Err(e.into()),
             }
         }
+        .await;
+        forgotten.abort();
+        result
     }
 }
 

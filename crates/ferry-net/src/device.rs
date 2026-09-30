@@ -414,13 +414,18 @@ fn make_bundle(root: &Path, commit: &str, head: Option<&str>, out: &Path) -> std
 /// Знает ли устройство запрос, появившийся в версии `since`. Устройство старше не разберёт его
 /// и оборвёт связь — лучше сразу сказать, что его надо обновить.
 fn need(name: &str, version: Option<&str>, since: &str, what: &str) -> Reply<()> {
-    let parts = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
     match version {
-        Some(version) if parts(version) < parts(since) => Err(Fail::new(format!(
+        Some(version) if !at_least(version, since) => Err(Fail::new(format!(
             "на {name} ferry {version}, а {what} — с {since}: обнови его — ferry update {name}"
         ))),
         _ => Ok(()),
     }
+}
+
+/// Версия `version` — `since` или новее.
+pub(crate) fn at_least(version: &str, since: &str) -> bool {
+    let parts = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
+    parts(version) >= parts(since)
 }
 
 async fn blocking<T: Send + 'static>(

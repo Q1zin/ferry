@@ -3,6 +3,7 @@
 //! их у себя, в сессии пользователя, и отвечает разово или потоком.
 
 use ferry_core::jobs::Job;
+use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use irpc::{
     Client,
@@ -168,6 +169,15 @@ pub struct Logs {
     pub lines: usize,
 }
 
+/// Кого знает отправитель (ключ, имя, когда связали) и кого забыли (ключ, когда): получатель
+/// сводит это со своим списком — по каждому устройству побеждает то, что новее. Так связанное
+/// однажды устройство знакомится со всеми, а забытое на одном забывают все.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct Peers {
+    pub known: Vec<(EndpointId, String, u64)>,
+    pub forgotten: Vec<(EndpointId, u64)>,
+}
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -246,6 +256,9 @@ pub enum DeviceProtocol {
     /// С 0.1.7.
     #[rpc(tx = mpsc::Sender<Chunk>)]
     ShotWindow(ShotWindow),
+    /// С 0.1.9.
+    #[rpc(tx = oneshot::Sender<()>)]
+    Peers(Peers),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
@@ -274,6 +287,10 @@ impl DeviceClient {
 
     pub async fn rename(&self, name: String) -> anyhow::Result<()> {
         self.0.rpc(Rename(name)).await?.map_err(anyhow::Error::msg)
+    }
+
+    pub async fn peers(&self, peers: Peers) -> irpc::Result<()> {
+        self.0.rpc(peers).await
     }
 
     /// Разовый запрос: ответ устройства или ошибка связи.
