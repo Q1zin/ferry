@@ -14,7 +14,9 @@
       {
         "title": "ferry — пульт узлов",
         "width": 1100,
-        "height": 720
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 540
       }
     ],
     "security": {
