@@ -1,6 +1,6 @@
 //! Бэкенд приложения хаба: команды Tauri — тонкие обёртки над `ferry-core`, та же логика, что
-//! у CLI. Каждая команда ходит в узел по ssh, поэтому они синхронные — Tauri выполняет их не в
-//! главном потоке, UI не замирает.
+//! у CLI. Команды ходят в узел по ssh и ждут его: `#[tauri::command(async)]` уносит их в пул
+//! потоков — без него синхронная команда идёт в главном потоке и окно замирает до ответа.
 
 use base64::Engine;
 use ferry_core::{find, hub, info, nodes, relay};
@@ -27,7 +27,7 @@ struct NodeRow {
 }
 
 /// Узлы со статусом — для главного экрана. Опрашиваются параллельно внутри ядра.
-#[tauri::command]
+#[tauri::command(async)]
 fn nodes() -> Reply<Vec<NodeRow>> {
     let list = nodes::list().map_err(err)?;
     let rows = std::thread::scope(|s| {
@@ -85,7 +85,7 @@ struct Detail {
     warnings: Vec<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn detail(host: String) -> Reply<Detail> {
     let pairs = hub::info(&host).map_err(err)?;
     Ok(Detail {
@@ -103,7 +103,7 @@ struct JobRow {
     cmd: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn jobs(host: String) -> Reply<Vec<JobRow>> {
     let jobs = hub::jobs_list(&host).map_err(err)?;
     Ok(jobs
@@ -118,23 +118,23 @@ fn jobs(host: String) -> Reply<Vec<JobRow>> {
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn job_log(host: String, name: String) -> Reply<String> {
     hub::job_log(&host, &name).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_job(host: String, name: String, cmd: String) -> Reply<String> {
     hub::start(&host, &name, true, &cmd).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn kill_job(host: String, name: String) -> Reply<String> {
     hub::kill(&host, &name).map_err(err)
 }
 
 /// Снимок экрана узла как data-URL — показать прямо в вебвью.
-#[tauri::command]
+#[tauri::command(async)]
 fn screenshot(host: String) -> Reply<String> {
     let path = hub::screenshot(&host, None).map_err(err)?;
     let bytes = std::fs::read(&path).map_err(err)?;
@@ -142,13 +142,13 @@ fn screenshot(host: String) -> Reply<String> {
     Ok(format!("data:image/png;base64,{b64}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn input(host: String, args: Vec<String>) -> Reply<String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     hub::input(&host, &args).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn add_node(name: String, target: String) -> Reply<()> {
     nodes::register(
         &name,
@@ -158,44 +158,44 @@ fn add_node(name: String, target: String) -> Reply<()> {
     .map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pause(host: String, paused: bool) -> Reply<()> {
     nodes::set_paused(&host, paused).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn rename(host: String, new_name: String) -> Reply<()> {
     nodes::rename(&host, &new_name).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn remove(host: String) -> Reply<()> {
     nodes::remove(&host).map_err(err)
 }
 
 /// Найти узел по ключу хоста; вернуть новый адрес, если нашёлся.
-#[tauri::command]
+#[tauri::command(async)]
 fn find(host: String) -> Reply<Option<String>> {
     let addr = nodes::get(&host).map_err(err)?.addr;
     find::find(&host, &addr, true).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn restart(host: String) -> Reply<String> {
     hub::restart(&host).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn power(host: String, action: String) -> Reply<String> {
     hub::power(&host, &action).map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn trusted() -> Reply<Vec<String>> {
     relay::trusted().map_err(err)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn trust(host: String) -> Reply<()> {
     relay::trust(Some(&host)).map(|_| ()).map_err(err)
 }
