@@ -43,7 +43,12 @@ async function add() {
       <div class="row">
         <input v-model="name" placeholder="имя: win-11" />
         <input v-model="target" class="grow" placeholder="пользователь@адрес" @keydown.enter="add" />
-        <button class="primary" :disabled="busy || !name.trim() || !target.includes('@')" @click="add">
+        <button
+          class="primary"
+          :disabled="busy || !name.trim() || !target.includes('@')"
+          :aria-busy="busy"
+          @click="add"
+        >
           Добавить
         </button>
       </div>

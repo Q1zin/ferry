@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { api, type Detail, type NodeRow } from '../api'
+import { computed, ref, watch } from 'vue'
+import { api, blocked, type Detail, type NodeRow } from '../api'
 
 const props = defineProps<{ node: NodeRow }>()
 const emit = defineEmits<{
@@ -15,8 +15,17 @@ const loading = ref(false)
 const busy = ref('')
 const newName = ref('')
 
+// Узел на паузе или не на связи — показываем почему; пока опрашивается — заглушку.
+const away = computed(() => props.node.paused || props.node.status?.online === false)
+const off = computed(() => !!blocked(props.node))
+const mode = computed(() => {
+  const s = props.node.status
+  if (props.node.paused || s?.online === false) return '—'
+  return s ? (s.mode ?? 'работает') : null
+})
+
 async function load() {
-  if (props.node.paused || !props.node.online) return
+  if (off.value || loading.value) return
   loading.value = true
   try {
     detail.value = await api.detail(props.node.name)
@@ -98,7 +107,14 @@ async function find() {
   }
 }
 
-onMounted(load)
+// Свойства — как только узел ответил на опрос: открыть узел можно и раньше.
+watch(
+  off,
+  (no) => {
+    if (!no && !detail.value) load()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -106,14 +122,10 @@ onMounted(load)
     <div class="card">
       <div class="row head">
         <h3>Свойства</h3>
-        <button :disabled="loading || node.paused || !node.online" @click="load">
-          {{ loading ? 'Опрашиваю…' : 'Обновить' }}
-        </button>
+        <button :disabled="loading || off" :aria-busy="loading" @click="load">Обновить</button>
       </div>
-      <p v-if="node.paused" class="muted">На паузе на хабе — ferry узел не трогает.</p>
-      <p v-else-if="!node.online" class="muted">Узел не на связи. Если он сменил адрес — «Найти».</p>
-      <p v-else-if="!detail" class="muted">Опрашиваю узел…</p>
-      <template v-else>
+      <p v-if="away" class="muted">{{ blocked(node) }}</p>
+      <template v-else-if="detail">
         <table>
           <tr v-for="[label, value] in detail.properties" :key="label">
             <th>{{ label }}</th>
@@ -124,12 +136,22 @@ onMounted(load)
           <li v-for="w in detail.warnings" :key="w" class="warning">⚠ {{ w }}</li>
         </ul>
       </template>
+      <!-- Столько же строк, сколько отдаёт узел: таблица встаёт на место заглушки. -->
+      <table v-else>
+        <tr v-for="i in 12" :key="i">
+          <th><span class="skeleton short"></span></th>
+          <td><span class="skeleton"></span></td>
+        </tr>
+      </table>
     </div>
 
     <div class="side">
       <div class="card">
         <h3>Режим узла</h3>
-        <p>{{ node.mode ?? (node.online ? 'работает' : '—') }}</p>
+        <p>
+          <template v-if="mode">{{ mode }}</template>
+          <span v-else class="skeleton short"></span>
+        </p>
         <p class="muted small">
           Режим выбирает человек за узлом — иконкой ferry в трее: работать, не трогать рабочий
           стол, отключиться от хаба.
@@ -139,15 +161,21 @@ onMounted(load)
       <div class="card">
         <h3>Узел на хабе</h3>
         <div class="row">
-          <input v-model="newName" :placeholder="node.name" @keydown.enter="rename" />
-          <button :disabled="busy === 'rename' || !newName.trim()" @click="rename">Переименовать</button>
+          <input v-model="newName" class="grow" :placeholder="node.name" @keydown.enter="rename" />
+          <button
+            :disabled="!!busy || !newName.trim()"
+            :aria-busy="busy === 'rename'"
+            @click="rename"
+          >
+            Переименовать
+          </button>
         </div>
         <div class="row">
-          <button :disabled="!!busy" @click="togglePause">
+          <button :disabled="!!busy" :aria-busy="busy === 'pause'" @click="togglePause">
             {{ node.paused ? 'Вернуть в работу' : 'Пауза на хабе' }}
           </button>
-          <button :disabled="!!busy || node.paused" @click="find">
-            {{ busy === 'find' ? 'Ищу…' : 'Найти' }}
+          <button :disabled="!!busy || node.paused" :aria-busy="busy === 'find'" @click="find">
+            Найти
           </button>
           <button class="danger" :disabled="!!busy" @click="remove">Убрать</button>
         </div>
@@ -156,31 +184,34 @@ onMounted(load)
       <div class="card">
         <h3>Обслуживание</h3>
         <div class="row">
-          <button :disabled="!!busy || node.paused || !node.online" @click="restart">
-            {{ busy === 'restart' ? 'Перезапускаю…' : 'Перезапустить демон' }}
+          <button :disabled="!!busy || off" :aria-busy="busy === 'restart'" @click="restart">
+            Перезапустить демон
           </button>
         </div>
         <div class="row">
           <button
-            :disabled="!!busy || node.paused || !node.online"
+            :disabled="!!busy || off"
+            :aria-busy="busy === 'reboot'"
             @click="power('reboot', `Перезагрузить ${node.name}? Через 10 с, можно отменить.`)"
           >
             Перезагрузить
           </button>
           <button
-            :disabled="!!busy || node.paused || !node.online"
+            :disabled="!!busy || off"
+            :aria-busy="busy === 'sleep'"
             @click="power('sleep', `Усыпить ${node.name}? Разбудить по сети получится только по кабелю.`)"
           >
             Усыпить
           </button>
           <button
             class="danger"
-            :disabled="!!busy || node.paused || !node.online"
+            :disabled="!!busy || off"
+            :aria-busy="busy === 'shutdown'"
             @click="power('shutdown', `Выключить ${node.name}? Через 10 с, можно отменить.`)"
           >
             Выключить
           </button>
-          <button :disabled="!!busy || node.paused || !node.online" @click="cancelPower">
+          <button :disabled="!!busy || off" :aria-busy="busy === 'cancel'" @click="cancelPower">
             Отменить
           </button>
         </div>
@@ -195,6 +226,13 @@ onMounted(load)
   grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
   gap: 16px;
   align-items: start;
+}
+
+/* Узкое окно: действия — под свойствами, а не впритык сбоку. */
+@media (max-width: 1000px) {
+  .overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .head {
@@ -251,5 +289,13 @@ tr:last-child td {
 
 .small {
   font-size: 12px;
+}
+
+.grow {
+  flex: 1;
+}
+
+.skeleton.short {
+  width: 6em;
 }
 </style>

@@ -9,8 +9,8 @@ import Settings from './components/Settings.vue'
 type View = { kind: 'home' } | { kind: 'node'; name: string } | { kind: 'settings' } | { kind: 'add' }
 
 const nodes = ref<NodeRow[]>([])
-const loading = ref(false)
 const loadedOnce = ref(false)
+const probing = ref(new Set<string>())
 const view = ref<View>({ kind: 'home' })
 const notice = ref<{ text: string; error: boolean } | null>(null)
 
@@ -19,17 +19,45 @@ const selected = computed(() => {
   return v.kind === 'node' ? nodes.value.find((n) => n.name === v.name) : undefined
 })
 
+// Реестр — мгновенно, без ssh; статус каждого узла приходит сам по себе. Пока узел
+// переопрашивается, виден прежний ответ — карточки не мигают.
 async function refresh() {
-  if (loading.value) return
-  loading.value = true
   try {
-    nodes.value = await api.nodes()
+    const known = new Map(nodes.value.map((n) => [n.name, n]))
+    nodes.value = (await api.nodes()).map((n) => {
+      const old = n.paused ? undefined : known.get(n.name)
+      return { ...n, status: old?.status ?? null, warnings: old?.warnings ?? null }
+    })
   } catch (e) {
     say(String(e), true)
   } finally {
-    loading.value = false
     loadedOnce.value = true
   }
+  for (const n of nodes.value) if (!n.paused) probe(n.name)
+}
+
+// Статус — один ssh, предупреждения — ещё один, следом. Узел, который ещё отвечает на прошлый
+// опрос, не дёргаем: пропавший отвечает секунды.
+async function probe(name: string) {
+  if (probing.value.has(name)) return
+  probing.value.add(name)
+  try {
+    const status = await api.status(name)
+    patch(name, { status })
+    if (!status.online) return patch(name, { warnings: [] })
+    const detail = await api.detail(name).catch(() => null)
+    if (detail) patch(name, { warnings: detail.warnings })
+  } catch (e) {
+    say(String(e), true)
+  } finally {
+    probing.value.delete(name)
+  }
+}
+
+// По имени, а не по ссылке: пока шёл ssh, список могли перечитать.
+function patch(name: string, fields: Partial<NodeRow>) {
+  const row = nodes.value.find((n) => n.name === name)
+  if (row) Object.assign(row, fields)
 }
 
 let noticeTimer = 0
@@ -74,7 +102,7 @@ onUnmounted(() => clearInterval(timer))
         >
           <span class="dot" :class="tone(node)"></span>
           <span class="name">{{ node.name }}</span>
-          <span v-if="node.warnings.length" class="warning">⚠ {{ node.warnings.length }}</span>
+          <span v-if="node.warnings?.length" class="warning">⚠ {{ node.warnings.length }}</span>
         </button>
         <p v-if="loadedOnce && !nodes.length" class="muted hint">Узлов пока нет</p>
       </nav>
@@ -83,8 +111,13 @@ onUnmounted(() => clearInterval(timer))
         <button @click="view = { kind: 'add' }">+ Добавить узел</button>
         <div class="row">
           <button class="grow" @click="view = { kind: 'settings' }">Настройки</button>
-          <button :disabled="loading" title="Обновить статусы" @click="refresh">
-            {{ loading ? '…' : '↻' }}
+          <button
+            title="Обновить статусы"
+            aria-label="Обновить статусы"
+            :aria-busy="probing.size > 0"
+            @click="refresh"
+          >
+            ↻
           </button>
         </div>
       </footer>
@@ -108,8 +141,7 @@ onUnmounted(() => clearInterval(timer))
       />
       <section v-else class="home">
         <h1>Узлы</h1>
-        <p v-if="!loadedOnce" class="muted">Опрашиваю узлы…</p>
-        <p v-else-if="!nodes.length" class="muted">
+        <p v-if="loadedOnce && !nodes.length" class="muted">
           Добавь первый узел: поставь на нём ferry (node/install.ps1) и нажми «Добавить узел».
         </p>
         <div class="cards">
@@ -118,11 +150,17 @@ onUnmounted(() => clearInterval(timer))
               <span class="dot" :class="tone(node)"></span>
               <strong>{{ node.name }}</strong>
               <span class="muted">{{ node.addr }}</span>
-              <span v-if="node.latency_ms != null" class="muted latency">{{ node.latency_ms }} мс</span>
+              <span v-if="node.status?.latency_ms != null" class="muted latency">
+                {{ node.status.latency_ms }} мс
+              </span>
             </div>
-            <p class="summary">{{ node.summary }}</p>
-            <ul v-if="node.warnings.length" class="warnings">
-              <li v-for="w in node.warnings" :key="w" class="warning">⚠ {{ w }}</li>
+            <p class="summary">
+              <template v-if="node.paused">пауза на хабе</template>
+              <template v-else-if="node.status">{{ node.status.summary }}</template>
+              <span v-else class="skeleton"></span>
+            </p>
+            <ul class="warnings">
+              <li v-for="w in node.warnings ?? []" :key="w" class="warning">⚠ {{ w }}</li>
             </ul>
           </button>
         </div>
@@ -138,7 +176,7 @@ onUnmounted(() => clearInterval(timer))
 <style scoped>
 .app {
   display: grid;
-  grid-template-columns: 230px 1fr;
+  grid-template-columns: 230px minmax(0, 1fr);
   height: 100vh;
 }
 
@@ -215,7 +253,10 @@ footer {
   flex: 1;
 }
 
+/* Колонкой — чтобы страница узла могла занять всю высоту (снимок экрана тянется под окно). */
 main {
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   padding: 24px 28px;
 }
@@ -241,14 +282,18 @@ main {
   margin-left: auto;
 }
 
+/* Место под ответ узла занято заранее: две строки статуса и строка предупреждений —
+   карточки не растут, когда узел ответит. */
 .summary {
   margin: 0;
+  min-height: 2lh;
   color: var(--muted);
 }
 
 .warnings {
   margin: 0;
   padding: 0;
+  min-height: 1lh;
   list-style: none;
 }
 
@@ -269,5 +314,15 @@ main {
 .notice.error {
   background: var(--red);
   color: #fff;
+}
+
+@media (max-width: 960px) {
+  .app {
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+
+  main {
+    padding: 18px 20px;
+  }
 }
 </style>

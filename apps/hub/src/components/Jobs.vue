@@ -1,23 +1,29 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
-import { api, type JobRow, type NodeRow } from '../api'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { api, blocked, type JobRow, type NodeRow } from '../api'
 
 const props = defineProps<{ node: NodeRow }>()
 const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 
 const jobs = ref<JobRow[]>([])
+const loaded = ref(false)
 const loading = ref(false)
 const shown = ref('')
-const log = ref('')
+// null — лог ещё едет: не показывать под новым именем лог прошлой задачи.
+const log = ref<string | null>(null)
 const name = ref('')
 const cmd = ref('')
 const starting = ref(false)
 
+const away = computed(() => props.node.paused || props.node.status?.online === false)
+const off = computed(() => !!blocked(props.node))
+
 async function load() {
-  if (loading.value || props.node.paused || !props.node.online) return
+  if (loading.value || off.value) return
   loading.value = true
   try {
     jobs.value = await api.jobs(props.node.name)
+    loaded.value = true
   } catch (e) {
     emit('say', String(e), true)
   } finally {
@@ -25,12 +31,23 @@ async function load() {
   }
 }
 
+// Лог какой задачи сейчас едет: тот же не запрашиваем дважды, другой — можно.
+let fetching = ''
 async function showLog(job: string) {
-  shown.value = job
+  if (shown.value !== job) {
+    shown.value = job
+    log.value = null
+  }
+  if (fetching === job) return
+  fetching = job
   try {
-    log.value = await api.jobLog(props.node.name, job)
+    const text = await api.jobLog(props.node.name, job)
+    // Пока шёл ssh, могли открыть лог другой задачи.
+    if (shown.value === job) log.value = text
   } catch (e) {
     emit('say', String(e), true)
+  } finally {
+    if (fetching === job) fetching = ''
   }
 }
 
@@ -60,10 +77,18 @@ async function start() {
   }
 }
 
+// Список — как только узел ответил на опрос: открыть узел можно и раньше.
+watch(
+  off,
+  (no) => {
+    if (!no && !loaded.value) load()
+  },
+  { immediate: true },
+)
+
 // Пока открыт лог работающей задачи — дописываем его, и список задач освежаем.
 let timer = 0
 onMounted(() => {
-  load()
   timer = window.setInterval(() => {
     load()
     const open = jobs.value.find((j) => j.name === shown.value)
@@ -75,9 +100,7 @@ onUnmounted(() => clearInterval(timer))
 
 <template>
   <div class="jobs">
-    <p v-if="node.paused || !node.online" class="card muted">
-      {{ node.paused ? 'Узел на паузе на хабе.' : 'Узел не на связи.' }}
-    </p>
+    <p v-if="away" class="card muted">{{ blocked(node) }}</p>
     <template v-else>
       <div class="card">
         <h3>Новая задача</h3>
@@ -88,8 +111,13 @@ onUnmounted(() => clearInterval(timer))
         <div class="row">
           <input v-model="name" class="name" placeholder="имя: app" />
           <input v-model="cmd" class="grow" placeholder="команда" @keydown.enter="start" />
-          <button class="primary" :disabled="starting || !name.trim() || !cmd.trim()" @click="start">
-            {{ starting ? 'Запускаю…' : 'Запустить' }}
+          <button
+            class="primary"
+            :disabled="starting || off || !name.trim() || !cmd.trim()"
+            :aria-busy="starting"
+            @click="start"
+          >
+            Запустить
           </button>
         </div>
       </div>
@@ -97,26 +125,34 @@ onUnmounted(() => clearInterval(timer))
       <div class="card">
         <div class="row head">
           <h3>Задачи</h3>
-          <button :disabled="loading" @click="load">{{ loading ? '…' : 'Обновить' }}</button>
+          <button :disabled="loading || off" :aria-busy="loading" @click="load">Обновить</button>
         </div>
-        <p v-if="!jobs.length" class="muted">Задач нет.</p>
-        <table v-else>
-          <tr v-for="job in jobs" :key="job.name" :class="{ selected: shown === job.name }">
-            <td>
-              <span class="jname">
-                <span class="dot" :class="job.running ? 'ok' : 'off'"></span>
-                {{ job.name }}
+        <ul v-if="!loaded" class="list">
+          <li v-for="i in 2" :key="i">
+            <span class="dot probing"></span>
+            <span class="info">
+              <span class="skeleton short"></span>
+              <span class="skeleton"></span>
+            </span>
+          </li>
+        </ul>
+        <p v-else-if="!jobs.length" class="muted">Задач нет.</p>
+        <ul v-else class="list">
+          <li v-for="job in jobs" :key="job.name" :class="{ selected: shown === job.name }">
+            <span class="dot" :class="job.running ? 'ok' : 'off'"></span>
+            <span class="info">
+              <span>
+                <strong>{{ job.name }}</strong>
+                <span class="muted"> · {{ job.label }} · {{ job.ago }}</span>
               </span>
-            </td>
-            <td>{{ job.label }}</td>
-            <td class="muted">{{ job.ago }}</td>
-            <td class="cmd"><code>{{ job.cmd }}</code></td>
-            <td class="actions">
-              <button @click="showLog(job.name)">Лог</button>
+              <code>{{ job.cmd }}</code>
+            </span>
+            <span class="actions">
               <button v-if="job.running" class="danger" @click="kill(job.name)">Остановить</button>
-            </td>
-          </tr>
-        </table>
+              <button @click="showLog(job.name)">Лог</button>
+            </span>
+          </li>
+        </ul>
       </div>
 
       <div v-if="shown" class="card">
@@ -124,7 +160,8 @@ onUnmounted(() => clearInterval(timer))
           <h3>Лог: {{ shown }}</h3>
           <button @click="shown = ''">Закрыть</button>
         </div>
-        <pre class="log">{{ log || '(пусто)' }}</pre>
+        <pre v-if="log !== null" class="log">{{ log || '(пусто)' }}</pre>
+        <div v-else class="log"><span class="skeleton"></span></div>
       </div>
     </template>
   </div>
@@ -164,43 +201,55 @@ onUnmounted(() => clearInterval(timer))
   flex: 1;
 }
 
-table {
-  border-collapse: collapse;
-  width: 100%;
+/* Список, а не таблица: команда — отдельной строкой, на узком окне не сжимается в столбик. */
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-td {
-  padding: 6px 8px 6px 0;
+.list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px;
   border-bottom: 1px solid var(--line);
-  vertical-align: middle;
 }
 
-tr:last-child td {
+.list li:last-child {
   border-bottom: none;
 }
 
-tr.selected td {
+.list li.selected {
+  border-radius: 8px;
   background: color-mix(in srgb, var(--coral) 8%, transparent);
 }
 
-.jname {
-  display: inline-flex;
-  gap: 8px;
-  align-items: center;
-  white-space: nowrap;
+.info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.cmd code {
+.info code {
   font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-  word-break: break-all;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.skeleton.short {
+  width: 8em;
 }
 
 .actions {
-  white-space: nowrap;
-  text-align: right;
+  display: flex;
+  gap: 6px;
 }
 
 .log {
+  min-height: 120px;
   max-height: 360px;
   overflow: auto;
   background: var(--paper);
