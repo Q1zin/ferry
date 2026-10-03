@@ -1,4 +1,4 @@
-// Иконки ferry из исходников: `bun run icons` в apps/hub.
+// Иконки ferry из исходников: `bun run icons` в apps/ferry.
 // - иконка приложения хаба → src-tauri/icons (все размеры — через `tauri icon`);
 // - иконки трея узла (по режиму, 16–32 px под масштаб экрана) → crates/ferry-core/assets/tray,
 //   ferry.exe вшивает их в себя.
