@@ -106,48 +106,22 @@ async fn strangers_get_nothing() {
 }
 
 #[tokio::test]
-async fn pairing_once_introduces_everyone() {
-    // Две пары: a–b и c–d. Связали b и c — и знакомы все четверо.
-    let (a, b) = paired("mesh-a", "mesh-b").await;
-    let (c, d) = paired("mesh-c", "mesh-d").await;
-    let all = [&a, &b, &c, &d];
-    // Адреса в тестах дают руками: поиска по ключу без интернета нет.
-    for x in all {
-        for y in all {
-            x.learn(y.addr());
-        }
-    }
-    pair(&b, &c).await;
-    for x in all {
-        until(
-            x,
-            "знает всех троих, все на связи",
-            |s| s.peers.len() == 3 && s.peers.iter().all(|p| p.online),
-        )
-        .await;
-    }
-
-    // Забыли d на a — забыли все, и списки друг друга его не вернут.
-    a.forget(d.id()).unwrap();
-    let knows_d = |s: &Snapshot| s.peers.iter().any(|p| p.id == d.id().to_string());
-    for x in [&a, &b, &c] {
-        until(x, "d забыт", |s| !knows_d(s) && s.peers.len() == 2).await;
-    }
+async fn forgotten_device_is_cut_off_at_once() {
+    let (a, b) = paired("cut-a", "cut-b").await;
+    let c = agent("cut-c").await;
+    pair(&a, &c).await;
+    // Связь — только та, что настроили: b и c через a друг о друге не узнают.
     tokio::time::sleep(Duration::from_secs(1)).await;
-    assert!(!knows_d(&a.snapshot()), "d вернулся из чужого списка");
-    until(&d, "d отключён от всех", |s| {
-        s.peers.iter().all(|p| !p.online)
-    })
-    .await;
+    assert_eq!(b.snapshot().peers.len(), 1);
+    assert_eq!(c.snapshot().peers.len(), 1);
 
-    // Связали снова — снова у всех.
-    pair(&a, &d).await;
-    for x in [&a, &b, &c] {
-        until(x, "d снова связан", |s| {
-            s.peers
-                .iter()
-                .any(|p| p.id == d.id().to_string() && p.online)
-        })
-        .await;
-    }
+    // Окно зовёт forget из своего потока, вне рантайма Tokio, — так и здесь.
+    let (forgetter, id) = (a.clone(), b.id());
+    std::thread::spawn(move || forgetter.forget(id))
+        .join()
+        .expect("forget вне рантайма не падает")
+        .unwrap();
+    // У b подписка на статус шла по его же соединению — её тоже рвём, не ждём переподключения.
+    until(&b, "b отключён от a", |s| !s.peers[0].online).await;
+    assert_eq!(a.snapshot().peers.len(), 1, "c остался");
 }
