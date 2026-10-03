@@ -15,6 +15,8 @@ ferry — разработка и тесты на нескольких устр�
   ferry pair <код|ссылка>           связать с устройством, которое показало код
   ferry role [<устройство>] <роль>  роль этого или связанного устройства:
                                     both (узел и пульт), node (узел), console (пульт)
+  ferry forget <устройство>         забыть связанное устройство здесь (на нём связь останется,
+                                    пока не забудут и там)
 
 <цели> — имя устройства, несколько через запятую, all — все на связи, os:windows — по системе.
 На нескольких целях команда идёт параллельно, строки вывода — с [устройство], код выхода —
@@ -102,6 +104,7 @@ fn main() {
         ["pair", code] => devices::pair(Some(code)),
         ["role", role] => devices::role(None, role),
         ["role", device, role] => devices::role(Some(device), role),
+        ["forget", device] => devices::forget(device),
         ["info", spec] => devices::info(spec, false),
         ["info", spec, "--json"] => devices::info(spec, true),
         ["sync", spec] => devices::sync(spec),

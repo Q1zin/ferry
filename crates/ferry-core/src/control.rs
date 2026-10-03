@@ -133,6 +133,10 @@ pub enum Request {
         device: Option<String>,
         lines: usize,
     },
+    /// Забыть связанное устройство — только здесь, как кнопка «Забыть устройство».
+    Forget {
+        device: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
