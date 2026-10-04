@@ -20,8 +20,9 @@ pub struct Device {
     pub(crate) client: DeviceClient,
     /// `~/.ferry` этого устройства: временные файлы, сохранённые патчи.
     pub(crate) dir: PathBuf,
-    /// Версия ferry на устройстве, если статус уже пришёл.
+    /// Версия ferry и система устройства (`macos`, `windows`), если статус уже пришёл.
     pub(crate) version: Option<String>,
+    pub(crate) os: Option<String>,
 }
 
 impl Device {
@@ -69,30 +70,8 @@ impl Device {
     }
 
     pub async fn input(&self, args: Vec<String>) -> Reply<String> {
-        if args
-            .first()
-            .is_some_and(|a| a == "probe" || a == "probe-window")
-        {
-            need(&self.name, self.version.as_deref(), "0.1.8", "ferry wait")?;
-        }
-        if args.first().is_some_and(|a| a == "focus") {
-            need(&self.name, self.version.as_deref(), "0.1.9", "ferry focus")?;
-        }
-        if args.first().is_some_and(|a| a == "window") {
-            need(
-                &self.name,
-                self.version.as_deref(),
-                "0.1.6",
-                "ferry shot --window",
-            )?;
-        }
-        if args.first().is_some_and(|a| a == "ui") || args.iter().any(|a| a == "--name") {
-            need(
-                &self.name,
-                self.version.as_deref(),
-                "0.1.4",
-                "ferry ui и --name",
-            )?;
+        if let Some((since, what)) = input_since(&args, self.os.as_deref()) {
+            need(&self.name, self.version.as_deref(), since, what)?;
         }
         self.client.ask(Input { args }).await
     }
@@ -423,6 +402,20 @@ fn need(name: &str, version: Option<&str>, since: &str, what: &str) -> Reply<()>
     }
 }
 
+/// С какой версии устройство понимает этот ввод — и как его назвать в просьбе обновиться.
+fn input_since(args: &[String], os: Option<&str>) -> Option<(&'static str, &'static str)> {
+    let first = args.first().map_or("", String::as_str);
+    let elements = first == "ui" || first == "probe" || args.iter().any(|a| a == "--name");
+    Some(match first {
+        _ if elements && os == Some("macos") => ("0.1.10", "элементы окон на маке"),
+        "focus" => ("0.1.9", "ferry focus"),
+        "probe" | "probe-window" => ("0.1.8", "ferry wait"),
+        "window" => ("0.1.6", "ferry shot --window"),
+        _ if elements => ("0.1.4", "ferry ui и --name"),
+        _ => return None,
+    })
+}
+
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
 ) -> Reply<T> {
@@ -434,7 +427,30 @@ async fn blocking<T: Send + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::need;
+    use super::{input_since, need};
+
+    #[test]
+    fn input_needs_the_version_that_knows_it() {
+        let since = |args: &[&str], os| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            input_since(&args, os).map(|(v, _)| v)
+        };
+        let (mac, win) = (Some("macos"), Some("windows"));
+        assert_eq!(since(&["ui"], win), Some("0.1.4"));
+        assert_eq!(
+            since(&["ui"], mac),
+            Some("0.1.10"),
+            "на маке элементы — с 0.1.10"
+        );
+        assert_eq!(since(&["click", "--name", "Ок"], mac), Some("0.1.10"));
+        assert_eq!(since(&["click", "--name", "Ок"], win), Some("0.1.4"));
+        assert_eq!(since(&["probe", "Ок"], win), Some("0.1.8"));
+        assert_eq!(since(&["probe", "Ок"], mac), Some("0.1.10"));
+        assert_eq!(since(&["probe-window", "app"], mac), Some("0.1.8"));
+        assert_eq!(since(&["focus", "app"], win), Some("0.1.9"));
+        assert_eq!(since(&["window", "app"], win), Some("0.1.6"));
+        assert_eq!(since(&["click", "1", "2"], mac), None);
+    }
 
     #[test]
     fn older_device_is_asked_to_update() {

@@ -501,6 +501,7 @@ impl Agent {
             client,
             dir: self.inner.dir.clone(),
             version: peer.status.as_ref().map(|s| s.version.clone()),
+            os: peer.status.as_ref().map(|s| s.os.clone()),
         })
     }
 
