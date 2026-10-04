@@ -2,10 +2,14 @@
 //! коду и агент, который держит связь со всеми связанными устройствами. Каждое устройство
 //! адресуется своим ключом, а не IP: сменился адрес, VPN, другая сеть — связь та же.
 
+pub mod agent;
+pub mod lan;
 pub mod pair;
 pub mod proto;
 pub mod store;
 
+pub use agent::{Agent, Options, PairingInfo, PeerView, Snapshot};
 pub use ferry_core::mode::Mode;
 pub use iroh::EndpointId;
+pub use lan::LanDevice;
 pub use proto::{Role, Status};
