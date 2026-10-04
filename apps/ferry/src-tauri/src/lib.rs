@@ -595,6 +595,16 @@ fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// В релизе паника — сразу abort (`panic = "abort"`), а stderr у приложения никто не видит:
+/// сообщение и место пишем ещё и в лог, его покажет `ferry logs`.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!("паника: {info}");
+        default(info);
+    }));
+}
+
 pub fn run() {
     // Лог — в ~/.ferry/logs/ferry.log (его хвост отдаёт `ferry logs`, в том числе издалека) и в
     // stderr. `RUST_LOG=ferry_net=debug` — подробности связи.
@@ -611,6 +621,7 @@ pub fn run() {
             .init(),
         Err(_) => tracing_subscriber::fmt().with_env_filter(filter()).init(),
     }
+    log_panics();
     tauri::Builder::default()
         // Второй запуск (ярлык, автозапуск) не поднимает второго агента — показывает окно.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -716,4 +727,41 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Buffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn panics_land_in_the_log() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Buffer(writer.clone()))
+            .finish();
+        super::log_panics();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = std::panic::catch_unwind(|| panic!("проверка лога"));
+        });
+        let log = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("паника: ") && log.contains("проверка лога"),
+            "{log}"
+        );
+    }
 }
