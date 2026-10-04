@@ -32,6 +32,19 @@ pub fn write_field(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
 /// Шелл устройства для команды: Git Bash на Windows, login-шелл пользователя на unix.
 pub fn shell(cmd: &str) -> Command {
     let mut command = Command::new(shell_path());
+    // `ferry` лежит рядом с приложением: команды на устройстве находят его, даже если его не
+    // ставили в PATH («Настройки» → «Поставить команду ferry»).
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        if let Ok(path) =
+            std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
+        {
+            command.env("PATH", path);
+        }
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -212,5 +225,26 @@ pub fn kill_tree(pid: u32) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other(status.to_string()))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_find_ferry_next_to_the_app() {
+        let dir = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let out = shell("printf %s \"$PATH\"").output().unwrap();
+        let path = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            std::env::split_paths(&path).any(|p| p == dir),
+            "{} нет в PATH команды: {path}",
+            dir.display()
+        );
     }
 }
