@@ -221,7 +221,11 @@ struct Project {
     snapshot: Option<(String, String)>,
 }
 
-fn project(snapshot: bool) -> Result<Option<Project>, Fail> {
+/// `home` — как вне репозитория: без снимка, в доме устройства.
+fn project(snapshot: bool, home: bool) -> Result<Option<Project>, Fail> {
+    if home {
+        return Ok(None);
+    }
     let Some(repo) = sync::repo()? else {
         return Ok(None);
     };
@@ -436,8 +440,8 @@ pub fn forget(device: &str) -> io::Result<i32> {
 
 /// `ferry run <цели> [--desk] [--no-sync] -- <команда>`: снимок проекта на цели, затем команда
 /// в том же подкаталоге проекта (или в доме, если мы не в репозитории).
-pub fn run(spec: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
-    let project = match project(sync) {
+pub fn run(spec: &str, desk: bool, sync: bool, home: bool, cmd: &str) -> io::Result<i32> {
+    let project = match project(sync, home) {
         Ok(project) => project,
         Err(fail) => return finish(Err(fail)),
     };
@@ -457,7 +461,7 @@ pub fn run(spec: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
 
 /// `ferry sync <цели>`.
 pub fn sync(spec: &str) -> io::Result<i32> {
-    let project = match project(true) {
+    let project = match project(true, false) {
         Ok(Some(project)) => project,
         Ok(None) => {
             return finish(Err(Fail::new(
@@ -472,8 +476,8 @@ pub fn sync(spec: &str) -> io::Result<i32> {
 }
 
 /// `ferry start <цели> <имя> [--no-sync] -- <команда>`: фоновая задача там же, где шла бы `run`.
-pub fn start(spec: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
-    let project = match project(sync) {
+pub fn start(spec: &str, name: &str, sync: bool, home: bool, cmd: &str) -> io::Result<i32> {
+    let project = match project(sync, home) {
         Ok(project) => project,
         Err(fail) => return finish(Err(fail)),
     };

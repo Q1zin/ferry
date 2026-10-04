@@ -69,7 +69,8 @@ impl Node {
                 if !root.join(".git").exists() {
                     let me = self.me.borrow().name.clone();
                     return Err(Fail::new(format!(
-                        "на {me} нет проекта {name} — сначала ferry sync"
+                        "на {me} нет проекта {name} — сначала ferry sync (или run без --no-sync); \
+                         в доме устройства — ferry run {me} --home -- …"
                     )));
                 }
                 Ok(root.join(prefix))

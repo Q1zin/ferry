@@ -23,13 +23,14 @@ ferry — разработка и тесты на нескольких устр�
 первый ненулевой. Отказ устройства по режиму или роли — код 75.
 
 Команды на устройствах:
-  ferry run <цели> [--desk] [--no-sync] [--] <команда>
+  ferry run <цели> [--desk] [--no-sync] [--home] [--] <команда>
                                     снимок проекта, затем команда в том же подкаталоге
-                                    проекта на устройстве; --desk — с окнами (GUI, тесты)
+                                    проекта на устройстве; --desk — с окнами (GUI, тесты),
+                                    --home — в доме устройства, как вне репозитория
   ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
   ferry doctor <цели>               готово ли устройство собирать этот проект: инструменты,
                                     доступ к git-зависимостям, файлы проекта
-  ferry start <цели> <имя> [--no-sync] [--] <команда>
+  ferry start <цели> <имя> [--no-sync] [--home] [--] <команда>
                                     фоновая задача (приложение, dev-сервер, сборка): живёт
                                     после вызова, пишет лог; то же имя ещё раз — перезапуск
   ferry jobs <цели> [--json]        задачи: работает, код выхода, когда запущена
@@ -182,11 +183,12 @@ fn main() {
 
 /// `run <цели> [--desk] [--no-sync] [--] <команда>`: флаги — только до команды.
 fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
-    let (mut desk, mut sync) = (false, true);
+    let (mut desk, mut sync, mut home) = (false, true, false);
     loop {
         match rest.first() {
             Some(&"--desk") => desk = true,
             Some(&"--no-sync") => sync = false,
+            Some(&"--home") => home = true,
             Some(&"--") => {
                 rest = &rest[1..];
                 break;
@@ -198,15 +200,16 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    devices::run(spec, desk, sync, &rest.join(" "))
+    devices::run(spec, desk, sync, home, &rest.join(" "))
 }
 
 /// `start <цели> <имя> [--no-sync] [--] <команда>`.
 fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
-    let mut sync = true;
+    let (mut sync, mut home) = (true, false);
     loop {
         match rest.first() {
             Some(&"--no-sync") => sync = false,
+            Some(&"--home") => home = true,
             Some(&"--") => {
                 rest = &rest[1..];
                 break;
@@ -218,7 +221,7 @@ fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    devices::start(spec, name, sync, &rest.join(" "))
+    devices::start(spec, name, sync, home, &rest.join(" "))
 }
 
 /// `shot <цели> [файл.png] [--window <окно>] [--region x,y,ширина,высота]`.

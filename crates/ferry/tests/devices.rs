@@ -253,6 +253,33 @@ async fn cli_drives_devices_through_the_app() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Из репозитория без снимка на устройстве: --no-sync подсказывает --home, а --home —
+    // в доме устройства и без снимка, как вне репозитория.
+    let repo = root("ctl").join("proj");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    assert!(git.success());
+    let out = ferry(&repo, &["run", "win", "--no-sync", "--", "pwd"]).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("--home"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = ferry(&repo, &["run", "win", "--home", "--", "pwd"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // /var на маке — ссылка на /private/var.
+    let said = text(&out.stdout);
+    assert!(
+        said.trim().ends_with(&root("win").display().to_string()),
+        "в доме устройства: {said}"
+    );
+    assert!(!root("win").join("ferry/proj").exists(), "снимок не клали");
+
     // Нет такого устройства — понятная ошибка.
     let out = ferry(&outside, &["run", "nope", "--", "true"]).await;
     assert_eq!(out.status.code(), Some(1));
