@@ -70,14 +70,20 @@ ferry — разработка и тесты на нескольких устр�
                                     окна задач ferry открываются позади (только Windows)
   ferry ui <устройство> [<окно>]    элементы окна с фокусом (или по процессу, части заголовка):
                                     роль, «имя», #id, место — по ним кликать надёжнее
-  ferry click <устройство> <x> <y> [right|double]
-  ferry click <устройство> --name <имя|#id> [right|double]
-                                    клик в центр элемента с этим именем (или #id) в окне с фокусом
+  ferry click <устройство> <x> <y> [right|double] [--hold <комбинация>]
+  ferry click <устройство> --name <имя|#id> [right|double] [--hold <комбинация>]
+                                    клик в центр элемента с этим именем (или #id) в окне с фокусом;
+                                    --hold shift — держать клавиши, пока жмём (shift/cmd+клик)
   ferry move <устройство> <x> <y>   навести курсор (или --name <имя>)
+  ferry drag <устройство> <x1> <y1> <x2> <y2> [--hold <комбинация>]
+                                    перетащить левой кнопкой: выделение, ползунки, перенос
   ferry scroll <устройство> <n>     колесо: больше нуля — вверх
   ferry type <устройство> <текст>   ввести текст (юникод, раскладка не важна)
   ferry key <устройство> <комбинация>...
                                     клавиши: enter, ctrl+s, alt+tab, win+d, f5…
+  ferry key <устройство> <комбинация> --for <секунд>
+                                    держать и отпустить (долгое нажатие, до 60 с)
+  ferry clip <устройство> [<текст>] буфер обмена: без текста — прочитать, с текстом — положить
   ferry wait <устройство> --window <окно> | --name <имя|#id> | --port <порт>
                     | --log <задача> <текст> [--gone] [--timeout <секунд>]
                                     ждать, пока окно (процесс или часть заголовка), элемент
@@ -146,7 +152,16 @@ fn main() {
         ["ui", device, window @ ..] => {
             devices::input(device, owned(&[&["ui"][..], window].concat()))
         }
-        ["move", device, x, y] => devices::input(device, owned(&["move", x, y])),
+        ["move", device, rest @ ..] if rest.len() >= 2 => {
+            devices::input(device, owned(&[&["move"][..], rest].concat()))
+        }
+        ["drag", device, rest @ ..] if rest.len() >= 4 => {
+            devices::input(device, owned(&[&["drag"][..], rest].concat()))
+        }
+        ["clip", device] => devices::input(device, owned(&["clip"])),
+        ["clip", device, text @ ..] => {
+            devices::input(device, owned(&["clip", text.join(" ").as_str()]))
+        }
         ["click", device, x, y, how @ ..] => {
             devices::input(device, owned(&[&["click", *x, *y][..], how].concat()))
         }

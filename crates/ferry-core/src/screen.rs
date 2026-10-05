@@ -125,6 +125,7 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         let presses = if how == ["double"] { 2 } else { 1 };
         Ok((0..presses).flat_map(|_| [down, up]).collect())
     };
+    let (args, hold) = held(args);
     match args {
         ["windows"] => Ok(table(&os::windows()?)),
         ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
@@ -147,20 +148,28 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["ui", window @ ..] => os::ui(&window.join(" ")),
         ["move", "--name", name] => {
             let (x, y) = os::find(name)?;
-            os::pointer(x, y, &[])
+            os::pointer(x, y, &[], hold)
         }
         ["click", "--name", name, how @ ..] => {
             let (x, y) = os::find(name)?;
-            os::pointer(x, y, &buttons(how)?)
+            os::pointer(x, y, &buttons(how)?, hold)
         }
-        ["move", x, y] => os::pointer(number(x)?, number(y)?, &[]),
-        ["click", x, y, how @ ..] => os::pointer(number(x)?, number(y)?, &buttons(how)?),
+        ["move", x, y] => os::pointer(number(x)?, number(y)?, &[], hold),
+        ["click", x, y, how @ ..] => os::pointer(number(x)?, number(y)?, &buttons(how)?, hold),
+        ["drag", x1, y1, x2, y2] => {
+            os::drag((number(x1)?, number(y1)?), (number(x2)?, number(y2)?), hold)
+        }
         ["scroll", clicks] => os::scroll(number(clicks)?),
         ["type", text @ ..] if !text.is_empty() => os::type_text(&text.join(" ")),
+        ["key", combo, "--for", seconds] => os::hold_key(combo, duration(seconds)?),
         ["key", combos @ ..] if !combos.is_empty() => os::keys(combos),
+        ["clip"] => os::clip_get(),
+        ["clip", text] => os::clip_set(text),
         _ => Err(io::Error::other(
             "ferry input windows | ui [<окно>] | focus <окно> | move <x> <y> | click <x> <y> [right|double] \
-             | click --name <имя|#id> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
+             | click --name <имя|#id> [right|double] | drag <x1> <y1> <x2> <y2> | scroll <n> \
+             | type <текст> | key <комбинация>… | key <комбинация> --for <секунд> | clip [<текст>]; \
+             у click, move и drag — [--hold <комбинация>]",
         )),
     }
 }
@@ -267,6 +276,41 @@ $bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
             "снимок экрана есть только на Windows и macOS",
         ))
     }
+}
+
+/// `--hold <комбинация>` в конце `click`, `move` и `drag`: держать её, пока работает мышь
+/// (shift+клик, cmd+клик, перетаскивание с alt).
+fn held<'a, 'b>(args: &'a [&'b str]) -> (&'a [&'b str], &'b str) {
+    match args {
+        [first, .., "--hold", combo] if matches!(*first, "click" | "move" | "drag") => {
+            (&args[..args.len() - 2], combo)
+        }
+        _ => (args, ""),
+    }
+}
+
+/// Сколько держать клавишу: больше нуля и не дольше минуты — чтобы не залипла надолго.
+fn duration(seconds: &str) -> io::Result<std::time::Duration> {
+    seconds
+        .parse::<f64>()
+        .ok()
+        .filter(|s| *s > 0.0 && *s <= 60.0)
+        .map(std::time::Duration::from_secs_f64)
+        .ok_or_else(|| io::Error::other(format!("--for: секунды от 0 до 60, а не {seconds:?}")))
+}
+
+/// Перетаскивание идёт шагами: приложения ждут движения мыши с нажатой кнопкой, а не прыжка.
+const DRAG_STEPS: i32 = 20;
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+const DRAG_PAUSE: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// Точка на шаге `step` из [`DRAG_STEPS`] по пути от `from` к `to`.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn along(from: (i32, i32), to: (i32, i32), step: i32) -> (i32, i32) {
+    (
+        from.0 + (to.0 - from.0) * step / DRAG_STEPS,
+        from.1 + (to.1 - from.1) * step / DRAG_STEPS,
+    )
 }
 
 const MOUSE_LEFT_DOWN: u32 = 0x0002;
@@ -463,7 +507,19 @@ mod none {
     pub fn focus(_: &super::Window) -> io::Result<()> {
         unsupported().map(drop)
     }
-    pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
+    pub fn pointer(_: i32, _: i32, _: &[u32], _: &str) -> io::Result<String> {
+        unsupported()
+    }
+    pub fn drag(_: (i32, i32), _: (i32, i32), _: &str) -> io::Result<String> {
+        unsupported()
+    }
+    pub fn hold_key(_: &str, _: std::time::Duration) -> io::Result<String> {
+        unsupported()
+    }
+    pub fn clip_get() -> io::Result<String> {
+        unsupported()
+    }
+    pub fn clip_set(_: &str) -> io::Result<String> {
         unsupported()
     }
     pub fn scroll(_: i32) -> io::Result<String> {
@@ -592,35 +648,138 @@ mod mac {
             .map_err(|()| io::Error::other("источник событий ввода не создался"))
     }
 
-    /// Курсор — в точку снимка, затем нажатия кнопок (коды — как у Windows: `MOUSE_*`).
-    pub fn pointer(x: i32, y: i32, buttons: &[u32]) -> io::Result<String> {
-        trusted()?;
+    /// Точка снимка → точка экрана.
+    fn point(x: i32, y: i32) -> CGPoint {
         let k = scale();
-        let at = CGPoint::new(f64::from(x) / k, f64::from(y) / k);
-        event(CGEvent::new_mouse_event(
-            source()?,
-            CGEventType::MouseMoved,
-            at,
-            CGMouseButton::Left,
-        ))?
-        .post(CGEventTapLocation::HID);
-        // Двойной клик — второе нажатие с отметкой «второй по счёту».
-        let mut presses = 0;
-        for &b in buttons {
-            let (kind, button) = match b {
-                super::MOUSE_LEFT_DOWN => (CGEventType::LeftMouseDown, CGMouseButton::Left),
-                super::MOUSE_LEFT_UP => (CGEventType::LeftMouseUp, CGMouseButton::Left),
-                super::MOUSE_RIGHT_DOWN => (CGEventType::RightMouseDown, CGMouseButton::Right),
-                _ => (CGEventType::RightMouseUp, CGMouseButton::Right),
-            };
-            if b == super::MOUSE_LEFT_DOWN || b == super::MOUSE_RIGHT_DOWN {
-                presses += 1;
-            }
-            let click = event(CGEvent::new_mouse_event(source()?, kind, at, button))?;
-            click.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, presses);
-            click.post(CGEventTapLocation::HID);
+        CGPoint::new(f64::from(x) / k, f64::from(y) / k)
+    }
+
+    /// Событие мыши с флагами удерживаемых модификаторов — по ним приложения узнают cmd+клик.
+    fn post_mouse(
+        kind: CGEventType,
+        at: CGPoint,
+        button: CGMouseButton,
+        flags: CGEventFlags,
+        clicks: i64,
+    ) -> io::Result<()> {
+        let mouse = event(CGEvent::new_mouse_event(source()?, kind, at, button))?;
+        mouse.set_flags(flags);
+        if clicks > 0 {
+            mouse.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, clicks);
         }
-        Ok(String::new())
+        mouse.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+
+    /// Нажать клавиши комбинации `hold` (пусто — ничего), сделать `act` с их флагами, отпустить
+    /// — отпускаем в любом случае, иначе модификатор залипнет.
+    fn holding(hold: &str, act: impl FnOnce(CGEventFlags) -> io::Result<()>) -> io::Result<String> {
+        let keys = match hold {
+            "" => Vec::new(),
+            _ => combo(hold)?,
+        };
+        trusted()?;
+        let mut flags = CGEventFlags::CGEventFlagNull;
+        let mut pressed = Ok(());
+        let mut down = 0;
+        for &(code, flag) in &keys {
+            flags |= flag;
+            pressed = key(code, true, flags);
+            if pressed.is_err() {
+                break;
+            }
+            down += 1;
+        }
+        let acted = pressed.and_then(|()| act(flags));
+        let mut released = Ok(());
+        for &(code, flag) in keys[..down].iter().rev() {
+            flags.remove(flag);
+            released = released.and(key(code, false, flags));
+        }
+        acted.and(released).map(|()| String::new())
+    }
+
+    /// Курсор — в точку снимка, затем нажатия кнопок (коды — как у Windows: `MOUSE_*`); `hold`
+    /// держится всё это время.
+    pub fn pointer(x: i32, y: i32, buttons: &[u32], hold: &str) -> io::Result<String> {
+        let at = point(x, y);
+        holding(hold, |flags| {
+            post_mouse(CGEventType::MouseMoved, at, CGMouseButton::Left, flags, 0)?;
+            // Двойной клик — второе нажатие с отметкой «второй по счёту».
+            let mut presses = 0;
+            for &b in buttons {
+                let (kind, button) = match b {
+                    super::MOUSE_LEFT_DOWN => (CGEventType::LeftMouseDown, CGMouseButton::Left),
+                    super::MOUSE_LEFT_UP => (CGEventType::LeftMouseUp, CGMouseButton::Left),
+                    super::MOUSE_RIGHT_DOWN => (CGEventType::RightMouseDown, CGMouseButton::Right),
+                    _ => (CGEventType::RightMouseUp, CGMouseButton::Right),
+                };
+                if b == super::MOUSE_LEFT_DOWN || b == super::MOUSE_RIGHT_DOWN {
+                    presses += 1;
+                }
+                post_mouse(kind, at, button, flags, presses)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Нажать левую кнопку в `from`, провести шагами до `to`, отпустить. Кнопку отпускаем, даже
+    /// если по дороге событие не создалось.
+    pub fn drag(from: (i32, i32), to: (i32, i32), hold: &str) -> io::Result<String> {
+        holding(hold, |flags| {
+            let left = CGMouseButton::Left;
+            let start = point(from.0, from.1);
+            let moved = post_mouse(CGEventType::MouseMoved, start, left, flags, 0)
+                .and_then(|()| post_mouse(CGEventType::LeftMouseDown, start, left, flags, 1))
+                .and_then(|()| {
+                    for step in 1..=super::DRAG_STEPS {
+                        std::thread::sleep(super::DRAG_PAUSE);
+                        let (x, y) = super::along(from, to, step);
+                        post_mouse(CGEventType::LeftMouseDragged, point(x, y), left, flags, 1)?;
+                    }
+                    Ok(())
+                });
+            let end = point(to.0, to.1);
+            let released = post_mouse(CGEventType::LeftMouseUp, end, left, flags, 1);
+            moved.and(released)
+        })
+    }
+
+    /// Держать комбинацию `time` и отпустить.
+    pub fn hold_key(combo: &str, time: Duration) -> io::Result<String> {
+        holding(combo, |_| {
+            std::thread::sleep(time);
+            Ok(())
+        })
+    }
+
+    /// pbpaste и pbcopy разбирают байты по локали, а у приложения из Finder её нет — без
+    /// UTF-8 кириллица превратится в мусор.
+    fn pasteboard(tool: &str) -> Command {
+        let mut command = Command::new(tool);
+        command.env("LANG", "en_US.UTF-8");
+        command
+    }
+
+    /// Текст из буфера обмена; не текст или пусто — пустая строка.
+    pub fn clip_get() -> io::Result<String> {
+        let out = pasteboard("pbpaste").output()?;
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    pub fn clip_set(text: &str) -> io::Result<String> {
+        use std::io::Write;
+        let mut copy = pasteboard("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        copy.stdin
+            .take()
+            .ok_or_else(|| io::Error::other("pbcopy без stdin"))?
+            .write_all(text.as_bytes())?;
+        match copy.wait()? {
+            status if status.success() => Ok(String::new()),
+            status => Err(io::Error::other(format!("pbcopy вышел с {status}"))),
+        }
     }
 
     /// Колесо: больше нуля — вверх.
@@ -1220,11 +1379,86 @@ mod win {
         fn AttachThreadInput(attach: u32, to: u32, on: i32) -> i32;
         fn BringWindowToTop(window: isize) -> i32;
         fn SetForegroundWindow(window: isize) -> i32;
+        fn OpenClipboard(owner: isize) -> i32;
+        fn CloseClipboard() -> i32;
+        fn EmptyClipboard() -> i32;
+        fn GetClipboardData(format: u32) -> isize;
+        fn SetClipboardData(format: u32, data: isize) -> isize;
     }
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetCurrentThreadId() -> u32;
+        fn GlobalAlloc(flags: u32, bytes: usize) -> isize;
+        fn GlobalLock(memory: isize) -> *mut u16;
+        fn GlobalUnlock(memory: isize) -> i32;
+        fn GlobalFree(memory: isize) -> isize;
+    }
+
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+
+    /// Открыть буфер обмена: его может держать другое приложение — подождать до полсекунды.
+    fn open_clipboard() -> io::Result<()> {
+        for _ in 0..20 {
+            if unsafe { OpenClipboard(0) } != 0 {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        Err(io::Error::other("буфер обмена занят другим приложением"))
+    }
+
+    /// Текст из буфера обмена; не текст или пусто — пустая строка.
+    pub fn clip_get() -> io::Result<String> {
+        open_clipboard()?;
+        let text = unsafe {
+            let data = GetClipboardData(CF_UNICODETEXT);
+            let chars = if data == 0 {
+                std::ptr::null_mut()
+            } else {
+                GlobalLock(data)
+            };
+            if chars.is_null() {
+                String::new()
+            } else {
+                let len = (0..).take_while(|&i| *chars.add(i) != 0).count();
+                let text = String::from_utf16_lossy(std::slice::from_raw_parts(chars, len));
+                GlobalUnlock(data);
+                text
+            }
+        };
+        unsafe { CloseClipboard() };
+        Ok(text)
+    }
+
+    pub fn clip_set(text: &str) -> io::Result<String> {
+        let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
+        open_clipboard()?;
+        let result = unsafe {
+            EmptyClipboard();
+            let memory = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+            let chars = if memory == 0 {
+                std::ptr::null_mut()
+            } else {
+                GlobalLock(memory)
+            };
+            if chars.is_null() {
+                Err(io::Error::other("нет памяти под текст буфера обмена"))
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), chars, wide.len());
+                GlobalUnlock(memory);
+                // Принятую память буфер обмена забирает себе; не принял — освобождаем сами.
+                if SetClipboardData(CF_UNICODETEXT, memory) == 0 {
+                    GlobalFree(memory);
+                    Err(io::Error::other("Windows не принял текст в буфер обмена"))
+                } else {
+                    Ok(String::new())
+                }
+            }
+        };
+        unsafe { CloseClipboard() };
+        result
     }
 
     /// Левый верхний угол и размер всего рабочего стола (всех мониторов) в физических пикселях.
@@ -1288,19 +1522,75 @@ mod win {
         )))
     }
 
-    /// Курсор — в точку снимка, затем нажатия кнопок (пусто — просто навести).
-    pub fn pointer(x: i32, y: i32, buttons: &[u32]) -> io::Result<String> {
+    /// Курсор — в точку снимка.
+    fn move_to(x: i32, y: i32) -> Input {
         let (_, _, width, height) = desktop();
         // Абсолютные координаты SendInput — 0..65535 по всему рабочему столу.
         let scale = |v: i32, size: i32| (v * 65535 + (size - 1) / 2) / (size - 1).max(1);
-        let mut inputs = vec![mouse(
+        mouse(
             scale(x, width),
             scale(y, height),
             0,
             MOUSE_MOVE | MOUSE_ABSOLUTE | MOUSE_VIRTUAL_DESK,
-        )];
+        )
+    }
+
+    /// Нажать клавиши комбинации по порядку и отпустить в обратном (пусто — ничего).
+    fn presses(combo: &str) -> io::Result<(Vec<Input>, Vec<Input>)> {
+        if combo.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let keys = super::combo(combo)?;
+        let flags = |extended: bool| if extended { KEY_EXTENDED } else { 0 };
+        let down = keys.iter().map(|&(vk, ext)| key(vk, 0, flags(ext)));
+        let up = keys
+            .iter()
+            .rev()
+            .map(|&(vk, ext)| key(vk, 0, flags(ext) | KEY_UP));
+        Ok((down.collect(), up.collect()))
+    }
+
+    /// Курсор — в точку снимка, затем нажатия кнопок (пусто — просто навести); `hold` держится
+    /// всё это время.
+    pub fn pointer(x: i32, y: i32, buttons: &[u32], hold: &str) -> io::Result<String> {
+        let (mut inputs, up) = presses(hold)?;
+        inputs.push(move_to(x, y));
         inputs.extend(buttons.iter().map(|&button| mouse(0, 0, 0, button)));
+        inputs.extend(up);
         send(&inputs)
+    }
+
+    /// Нажать левую кнопку в `from`, провести шагами до `to`, отпустить. Кнопку и клавиши
+    /// отпускаем, даже если по дороге ввод не прошёл, — иначе они залипнут.
+    pub fn drag(from: (i32, i32), to: (i32, i32), hold: &str) -> io::Result<String> {
+        let (mut start, up) = presses(hold)?;
+        start.extend([
+            move_to(from.0, from.1),
+            mouse(0, 0, 0, super::MOUSE_LEFT_DOWN),
+        ]);
+        let moved = send(&start).and_then(|_| {
+            for step in 1..=super::DRAG_STEPS {
+                std::thread::sleep(super::DRAG_PAUSE);
+                let (x, y) = super::along(from, to, step);
+                send(&[move_to(x, y)])?;
+            }
+            Ok(String::new())
+        });
+        let mut end = vec![mouse(0, 0, 0, super::MOUSE_LEFT_UP)];
+        end.extend(up);
+        let released = send(&end);
+        moved.and(released)
+    }
+
+    /// Держать комбинацию `for` и отпустить — отпускаем в любом случае.
+    pub fn hold_key(combo: &str, time: std::time::Duration) -> io::Result<String> {
+        let (down, up) = presses(combo)?;
+        let pressed = send(&down);
+        if pressed.is_ok() {
+            std::thread::sleep(time);
+        }
+        let released = send(&up);
+        pressed.and(released)
     }
 
     /// Колесо: больше нуля — вверх.
@@ -1560,6 +1850,38 @@ Fail "«$arg» — элементов несколько ($($hits.Count)), ут�
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hold_is_taken_only_from_mouse_actions() {
+        assert_eq!(
+            held(&["click", "1", "2", "right", "--hold", "shift"]),
+            (&["click", "1", "2", "right"][..], "shift")
+        );
+        assert_eq!(
+            held(&["drag", "1", "2", "3", "4", "--hold", "ctrl+alt"]),
+            (&["drag", "1", "2", "3", "4"][..], "ctrl+alt")
+        );
+        assert_eq!(held(&["click", "1", "2"]), (&["click", "1", "2"][..], ""));
+        // Текст, который случайно похож на флаг, остаётся текстом.
+        assert_eq!(
+            held(&["type", "--hold", "shift"]),
+            (&["type", "--hold", "shift"][..], "")
+        );
+    }
+
+    #[test]
+    fn key_hold_time_and_drag_path() {
+        assert_eq!(
+            duration("1.5").unwrap(),
+            std::time::Duration::from_millis(1500)
+        );
+        for wrong in ["0", "-1", "61", "долго"] {
+            assert!(duration(wrong).is_err(), "{wrong}");
+        }
+        assert_eq!(along((0, 0), (200, -100), 0), (0, 0));
+        assert_eq!(along((0, 0), (200, -100), DRAG_STEPS / 2), (100, -50));
+        assert_eq!(along((10, 20), (210, 120), DRAG_STEPS), (210, 120));
+    }
 
     #[test]
     fn parses_key_combos() {
