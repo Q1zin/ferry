@@ -220,6 +220,9 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             device: Some(device),
             lines,
         } => Response::Message(agent.device(&device)?.logs(lines).await?),
+        Request::PortOpen { device, port } => {
+            Response::Flag(agent.device(&device)?.port_open(port).await?)
+        }
         Request::Forget { device } => {
             let snapshot = agent.snapshot();
             let id = snapshot.find(&device).map_err(Fail::new)?.id.parse();

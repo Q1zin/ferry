@@ -354,6 +354,13 @@ impl Node {
             DeviceMessage::Peers(WithChannels { tx, .. }) => {
                 tx.send(()).await.ok();
             }
+            DeviceMessage::PortOpen(WithChannels { inner, tx, .. }) => {
+                let result = match self.check(false) {
+                    Ok(()) => Ok(local(inner.port).await.is_some()),
+                    Err(fail) => Err(fail),
+                };
+                tx.send(result).await.ok();
+            }
         }
     }
 
@@ -538,11 +545,26 @@ fn pump(
     });
 }
 
-/// TCP-соединение на `127.0.0.1:<port>` этого устройства ↔ поток irpc.
+/// TCP-соединение на `port` этого устройства ↔ поток irpc.
 async fn tunnel(port: u16, tx: mpsc::Sender<Vec<u8>>, rx: mpsc::Receiver<Vec<u8>>) {
-    if let Ok(stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+    if let Some(stream) = local(port).await {
         pipe(stream, tx, rx).await;
     }
+}
+
+/// Соединение на `127.0.0.1:<port>`, а нет там никого — на `[::1]`: dev-серверы на `localhost`
+/// слушают то один адрес, то другой (Vite на маке — только `::1`).
+async fn local(port: u16) -> Option<tokio::net::TcpStream> {
+    for ip in [
+        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
+        std::net::Ipv6Addr::LOCALHOST.into(),
+    ] {
+        let connect = tokio::net::TcpStream::connect((ip, port));
+        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(2), connect).await {
+            return Some(stream);
+        }
+    }
+    None
 }
 
 /// Байты TCP-соединения ↔ поток irpc, пока одна из сторон не закроется.

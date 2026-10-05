@@ -178,6 +178,13 @@ pub struct Peers {
     pub forgotten: Vec<(EndpointId, u64)>,
 }
 
+/// Принимает ли кто-нибудь соединения на `127.0.0.1:<port>` или `[::1]:<port>` устройства — для
+/// `ferry wait --port`.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PortOpen {
+    pub port: u16,
+}
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -259,6 +266,9 @@ pub enum DeviceProtocol {
     /// Только 0.1.9, теперь игнорируется.
     #[rpc(tx = oneshot::Sender<()>)]
     Peers(Peers),
+    /// С 0.1.11.
+    #[rpc(tx = oneshot::Sender<Reply<bool>>)]
+    PortOpen(PortOpen),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
