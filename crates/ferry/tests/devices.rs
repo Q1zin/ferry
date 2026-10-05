@@ -253,6 +253,17 @@ async fn cli_drives_devices_through_the_app() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Падения: такой программы нет — так и сказано, код 0.
+    let out = ferry(&outside, &["crashes", "win", "ferry-нет-такой-программы"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stdout).contains("падений у «ferry-нет-такой-программы» нет"));
+    let out = ferry(
+        &outside,
+        &["crashes", "win", "ferry-нет-такой-программы", "--last"],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+
     // Из репозитория без снимка на устройстве: --no-sync подсказывает --home, а --home —
     // в доме устройства и без снимка, как вне репозитория.
     let repo = root("ctl").join("proj");

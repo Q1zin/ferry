@@ -69,6 +69,18 @@ impl Device {
         self.client.ask(Kill { name: name.into() }).await
     }
 
+    /// Падения программ на устройстве: список или разбор самого свежего.
+    pub async fn crashes(&self, process: &str, last: bool) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.11",
+            "ferry crashes",
+        )?;
+        let process = process.into();
+        self.client.ask(Crashes { process, last }).await
+    }
+
     /// Слушает ли кто-нибудь `port` на устройстве.
     pub async fn port_open(&self, port: u16) -> Reply<bool> {
         need(

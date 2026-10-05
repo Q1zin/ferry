@@ -137,6 +137,12 @@ pub enum Request {
     Forget {
         device: String,
     },
+    /// Падения программ на устройстве.
+    Crashes {
+        device: String,
+        process: String,
+        last: bool,
+    },
     /// Слушает ли кто-нибудь `port` на устройстве.
     PortOpen {
         device: String,

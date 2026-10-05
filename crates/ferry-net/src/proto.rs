@@ -185,6 +185,14 @@ pub struct PortOpen {
     pub port: u16,
 }
 
+/// Падения программ на устройстве: список или (`last`) разбор самого свежего; `process` — часть
+/// имени, пусто — все.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Crashes {
+    pub process: String,
+    pub last: bool,
+}
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -269,6 +277,9 @@ pub enum DeviceProtocol {
     /// С 0.1.11.
     #[rpc(tx = oneshot::Sender<Reply<bool>>)]
     PortOpen(PortOpen),
+    /// С 0.1.11.
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Crashes(Crashes),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

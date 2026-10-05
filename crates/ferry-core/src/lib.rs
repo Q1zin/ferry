@@ -3,6 +3,7 @@
 //! тонкие оболочки над ней, связь устройств — в `ferry-net`.
 
 pub mod control;
+pub mod crashes;
 pub mod desk;
 pub mod device;
 pub mod doctor;

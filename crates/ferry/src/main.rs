@@ -52,6 +52,10 @@ ferry — разработка и тесты на нескольких устр�
                                     на связь
   ferry logs [<цели>] [-n <строк>]  лог приложения ferry на устройствах или (без целей) здесь:
                                     последние строки, по умолчанию 100
+  ferry crashes <устройство> [<программа>] [--last]
+                                    падения программ на устройстве, свежие сверху; --last —
+                                    разбор последнего: исключение, стек (macOS — отчёты .ips,
+                                    Windows — журнал «Приложение»)
   ferry trust [<хост>]              git с хоста на устройствах — через ключи этой машины
                                     (только чтение); без аргумента — доверенные хосты
 
@@ -108,6 +112,10 @@ fn main() {
         ["role", role] => devices::role(None, role),
         ["role", device, role] => devices::role(Some(device), role),
         ["forget", device] => devices::forget(device),
+        ["crashes", device] => devices::crashes(device, "", false),
+        ["crashes", device, "--last"] => devices::crashes(device, "", true),
+        ["crashes", device, process] => devices::crashes(device, process, false),
+        ["crashes", device, process, "--last"] => devices::crashes(device, process, true),
         ["info", spec] => devices::info(spec, false),
         ["info", spec, "--json"] => devices::info(spec, true),
         ["sync", spec] => devices::sync(spec),
