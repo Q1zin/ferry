@@ -13,7 +13,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Mode {
     Active,
     NoDesktop,
@@ -40,7 +41,7 @@ impl Mode {
         match self {
             Mode::Active => "работает",
             Mode::NoDesktop => "не трогать рабочий стол",
-            Mode::Paused => "отключён от хаба",
+            Mode::Paused => "отключён от других устройств",
         }
     }
 
