@@ -1,10 +1,19 @@
 use std::io;
 
+mod devices;
+
 use ferry_core::mode::{self, Mode};
 use ferry_core::{desk, hub, info, jobs, relay, screen};
 
 const USAGE: &str = "\
 ferry — разработка на нескольких машинах: этот компьютер — хаб, остальные — узлы
+
+Устройства (через приложение ferry на этой машине):
+  ferry devices                     это устройство и связанные: на связи ли, путь, роль, режим
+  ferry pair                        показать код: это устройство ждёт, что его добавят
+  ferry pair <код|ссылка>           связать с устройством, которое показало код
+  ferry role [<устройство>] <роль>  роль этого или связанного устройства:
+                                    both (узел и пульт), node (узел), console (пульт)
 
 На хабе:
   ferry add <узел> <user@адрес>     записать узел и проверить связь
@@ -80,6 +89,11 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
+        ["devices"] => devices::list(),
+        ["pair"] => devices::pair(None),
+        ["pair", code] => devices::pair(Some(code)),
+        ["role", role] => devices::role(None, role),
+        ["role", device, role] => devices::role(Some(device), role),
         ["add", name, target] => hub::add(name, target),
         ["ls"] => hub::ls(),
         ["info", host] => hub::info_command(host),
