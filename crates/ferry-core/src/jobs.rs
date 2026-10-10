@@ -21,6 +21,13 @@ use crate::exit_code;
 
 /// Запустить задачу; задача с тем же именем, если ещё работает, перезапускается.
 pub fn start(name: &str, cmd: &str) -> io::Result<i32> {
+    println!("{}", start_in(name, cmd, &std::env::current_dir()?, &[])?);
+    Ok(0)
+}
+
+/// Запустить задачу в каталоге `cwd` с добавкой к окружению. Надсмотрщик — этот же бинарник
+/// (`ferry` или приложение): он понимает `job-supervise <имя>`.
+pub fn start_in(name: &str, cmd: &str, cwd: &Path, env: &[(String, String)]) -> io::Result<String> {
     let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     if name.is_empty() || name.starts_with('-') || !name.chars().all(alias) {
         return Err(io::Error::other(format!(
@@ -29,29 +36,26 @@ pub fn start(name: &str, cmd: &str) -> io::Result<i32> {
     }
     let dir = dir(name)?;
     if running(&dir) {
-        kill(name)?;
+        stop_job(name)?;
     }
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("cmd"), cmd)?;
-    fs::write(
-        dir.join("cwd"),
-        std::env::current_dir()?.to_string_lossy().as_bytes(),
-    )?;
+    fs::write(dir.join("cwd"), cwd.to_string_lossy().as_bytes())?;
     fs::write(dir.join("started"), now().to_string())?;
     fs::File::create(dir.join("log"))?;
 
     let mut supervisor = Command::new(std::env::current_exe()?);
     supervisor
         .args(["job-supervise", name])
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     detach(&mut supervisor);
     let pid = supervisor.spawn()?.id();
     fs::write(dir.join("pid"), pid.to_string())?;
-    println!("ferry: задача {name} запущена");
-    Ok(0)
+    Ok(format!("ferry: задача {name} запущена"))
 }
 
 /// `ferry job-supervise <имя>`: запустить команду задачи, дождаться, записать код выхода.
@@ -83,8 +87,8 @@ pub fn supervise(name: &str) -> io::Result<i32> {
     Ok(code)
 }
 
-/// Задача узла — для `ferry jobs` и приложения хаба.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Задача узла — для `ferry jobs` и приложения.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Job {
     pub name: String,
     /// `running`, `exit:<код>`, `killed` или `lost` (надсмотрщик умер, не записав код).
@@ -197,10 +201,18 @@ pub fn log(name: &str, follow: bool) -> io::Result<i32> {
 }
 
 pub fn kill(name: &str) -> io::Result<i32> {
+    eprintln!("{}", stop_job(name)?);
+    Ok(0)
+}
+
+/// Остановить задачу; ответ — что вышло, для человека.
+pub fn stop_job(name: &str) -> io::Result<String> {
     let dir = existing(name)?;
     if !running(&dir) {
-        eprintln!("ferry: задача {name} уже не работает: {}", state(&dir));
-        return Ok(0);
+        return Ok(format!(
+            "ferry: задача {name} уже не работает: {}",
+            state(&dir)
+        ));
     }
     fs::write(dir.join("killed"), "")?;
     // Команда в своей группе (unix) или дереве (Windows); надсмотрщик запишет её код.
@@ -211,8 +223,7 @@ pub fn kill(name: &str) -> io::Result<i32> {
     let killed = pid.and_then(|p| p.parse().ok()).map(kill_tree);
     for _ in 0..50 {
         if !running(&dir) {
-            eprintln!("ferry: задача {name} остановлена");
-            return Ok(0);
+            return Ok(format!("ferry: задача {name} остановлена"));
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -233,11 +244,22 @@ pub fn kill_all() -> io::Result<usize> {
     let mut killed = 0;
     for entry in entries.flatten() {
         if running(&entry.path()) {
-            kill(&entry.file_name().to_string_lossy())?;
+            stop_job(&entry.file_name().to_string_lossy())?;
             killed += 1;
         }
     }
     Ok(killed)
+}
+
+/// Лог задачи и её состояние: работает ли, код выхода, подпись — для слежения за логом.
+pub fn log_file(name: &str) -> io::Result<PathBuf> {
+    Ok(existing(name)?.join("log"))
+}
+
+pub fn progress(name: &str) -> io::Result<(bool, Option<i32>, String)> {
+    let dir = existing(name)?;
+    let exit = read(&dir, "exit").and_then(|c| c.parse().ok());
+    Ok((running(&dir), exit, state(&dir)))
 }
 
 fn state(dir: &Path) -> String {
