@@ -1,40 +1,30 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { api } from '../api'
+import { api, type Snapshot } from '../api'
 
+defineProps<{ snap: Snapshot }>()
 const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 
-// null — ещё не прочитаны: не говорить «хостов нет» раньше времени.
-const hosts = ref<string[] | null>(null)
-const host = ref('')
-const version = ref('')
-const adding = ref(false)
+// null — ещё не прочитано: не показывать неверное состояние переключателя.
+const autostart = ref<boolean | null>(null)
 
-async function load() {
+onMounted(async () => {
   try {
-    ;[hosts.value, version.value] = await Promise.all([api.trusted(), api.version()])
+    autostart.value = await api.autostart()
+  } catch (e) {
+    emit('say', String(e), true)
+  }
+})
+
+async function toggle() {
+  const on = !autostart.value
+  try {
+    await api.setAutostart(on)
+    autostart.value = on
   } catch (e) {
     emit('say', String(e), true)
   }
 }
-
-async function add() {
-  const h = host.value.trim()
-  if (!h) return
-  adding.value = true
-  try {
-    await api.trust(h)
-    emit('say', `git с ${h} на узлах пойдёт через ключи этого хаба (только чтение)`)
-    host.value = ''
-    await load()
-  } catch (e) {
-    emit('say', String(e), true)
-  } finally {
-    adding.value = false
-  }
-}
-
-onMounted(load)
 </script>
 
 <template>
@@ -42,28 +32,23 @@ onMounted(load)
     <h1>Настройки</h1>
 
     <div class="card">
-      <h3>Приватные git-зависимости</h3>
-      <p class="muted">
-        Хосты, к которым git на узлах ходит через ключи этого хаба: ключ не покидает хаб, релей
-        пропускает только чтение.
+      <label class="row">
+        <input type="checkbox" :checked="!!autostart" :disabled="autostart === null" @change="toggle" />
+        Запускать ferry при входе в систему
+      </label>
+      <p class="muted small">
+        Без этого устройство не на связи, пока ferry не откроют вручную. Окно при этом не появляется — только
+        иконка в трее.
       </p>
-      <p v-if="!hosts"><span class="skeleton"></span></p>
-      <ul v-else-if="hosts.length">
-        <li v-for="h in hosts" :key="h"><code>{{ h }}</code></li>
-      </ul>
-      <p v-else class="muted">Доверенных хостов нет.</p>
-      <div class="row">
-        <input v-model="host" class="grow" placeholder="git.example.com" @keydown.enter="add" />
-        <button :disabled="adding || !host.trim()" :aria-busy="adding" @click="add">Доверить</button>
-      </div>
     </div>
 
     <div class="card">
       <h3>О ferry</h3>
-      <p>Версия {{ version || '…' }}. На узлах она должна совпадать — иначе узел предупредит в «Обзоре».</p>
-      <p class="muted">
-        Всё, что делает пульт, умеет и CLI: <code>ferry</code> без аргументов — список команд.
+      <p>Версия {{ snap.me.version }}. На связанных устройствах она должна совпадать.</p>
+      <p class="muted small">
+        Ключ этого устройства: <code>{{ snap.id }}</code>
       </p>
+      <p class="muted small">Всё, что делает приложение, умеет и CLI: <code>ferry</code> без аргументов — список команд.</p>
     </div>
   </section>
 </template>
@@ -87,12 +72,11 @@ onMounted(load)
   margin: 0;
 }
 
-ul {
-  margin: 0;
-  padding-left: 18px;
+.small {
+  font-size: 12px;
 }
 
-.grow {
-  flex: 1;
+code {
+  overflow-wrap: anywhere;
 }
 </style>
