@@ -1,184 +1,88 @@
-//! Бэкенд приложения хаба: команды Tauri — тонкие обёртки над `ferry-core`, та же логика, что
-//! у CLI. Команды ходят в узел по ssh и ждут его: `#[tauri::command(async)]` уносит их в пул
-//! потоков — без него синхронная команда идёт в главном потоке и окно замирает до ответа.
+//! Приложение ferry — одно на любом устройстве. В фоне — агент: связь со всеми связанными
+//! устройствами. В трее — режим этого устройства. Окно открывается по клику; закрытое окно
+//! не останавливает агента, выход — из меню трея.
 
-use base64::Engine;
-use ferry_core::{find, hub, info, nodes, relay};
-use serde::Serialize;
-use tauri::Manager;
+use ferry_net::{Agent, EndpointId, Mode, Options, PairingInfo, PeerView, Role, Snapshot};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 type Reply<T> = Result<T, String>;
 
-fn err(e: impl ToString) -> String {
+fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-#[derive(Serialize)]
-struct NodeRow {
-    name: String,
-    addr: String,
-    user: String,
-    paused: bool,
+fn device(id: Option<String>) -> Reply<Option<EndpointId>> {
+    id.map(|id| id.parse().map_err(|_| format!("не ключ устройства: {id}")))
+        .transpose()
 }
 
-/// Узлы из реестра — мгновенно, без ssh: статус каждого пульт спрашивает отдельно (`status`)
-/// и показывает по мере ответов.
-#[tauri::command(async)]
-fn nodes() -> Reply<Vec<NodeRow>> {
-    Ok(nodes::list()
-        .map_err(err)?
-        .into_iter()
-        .map(|node| NodeRow {
-            name: node.name,
-            addr: node.addr,
-            user: node.user,
-            paused: node.paused,
-        })
-        .collect())
+#[tauri::command]
+fn state(agent: State<Agent>) -> Snapshot {
+    agent.snapshot()
 }
 
-#[derive(Serialize)]
-struct StatusRow {
-    online: bool,
-    summary: String,
-    mode: Option<String>,
-    desk: bool,
-    latency_ms: Option<u32>,
+#[tauri::command]
+fn open_pairing(agent: State<Agent>) -> PairingInfo {
+    agent.open_pairing()
 }
 
-/// Статус одного узла: ssh с таймаутом, до ~5 с, если узел пропал.
-#[tauri::command(async)]
-fn status(host: String) -> StatusRow {
-    let status = hub::status(&host);
-    StatusRow {
-        online: status.online,
-        summary: status.summary(),
-        mode: status.mode.map(|m| m.label().into()),
-        desk: status.desk,
-        latency_ms: status.latency_ms,
+#[tauri::command]
+fn close_pairing(agent: State<Agent>) {
+    agent.close_pairing()
+}
+
+#[tauri::command]
+async fn pair(agent: State<'_, Agent>, code: String) -> Reply<PeerView> {
+    agent.pair(&code).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Роль этого устройства (`id` пуст) или связанного.
+#[tauri::command]
+async fn set_role(agent: State<'_, Agent>, id: Option<String>, role: Role) -> Reply<()> {
+    agent
+        .set_role(device(id)?, role)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn rename(agent: State<'_, Agent>, id: Option<String>, name: String) -> Reply<()> {
+    agent
+        .rename(device(id)?, &name)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_mode(agent: State<Agent>, mode: String) -> Reply<()> {
+    let mode = Mode::parse(&mode).ok_or_else(|| format!("режим {mode:?}"))?;
+    agent.set_mode(mode).map_err(err)
+}
+
+#[tauri::command]
+fn forget(agent: State<Agent>, id: String) -> Reply<()> {
+    agent.forget(device(Some(id))?.unwrap()).map_err(err)
+}
+
+#[tauri::command]
+fn autostart(app: AppHandle) -> Reply<bool> {
+    app.autolaunch().is_enabled().map_err(err)
+}
+
+/// Запуск при входе. Узлу он нужен всегда, поэтому включён сразу; выключил человек — помним.
+#[tauri::command]
+fn set_autostart(app: AppHandle, on: bool) -> Reply<()> {
+    let marker = ferry_core::ferry_home().map_err(err)?.join("no-autostart");
+    if on {
+        let _ = std::fs::remove_file(&marker);
+        app.autolaunch().enable().map_err(err)
+    } else {
+        std::fs::write(&marker, "").map_err(err)?;
+        app.autolaunch().disable().map_err(err)
     }
-}
-
-/// Свойства узла: пары «подпись — значение» и предупреждения.
-#[derive(Serialize)]
-struct Detail {
-    properties: Vec<(String, String)>,
-    warnings: Vec<String>,
-}
-
-#[tauri::command(async)]
-fn detail(host: String) -> Reply<Detail> {
-    let pairs = hub::info(&host).map_err(err)?;
-    Ok(Detail {
-        properties: info::describe(&pairs),
-        warnings: info::warnings(&pairs),
-    })
-}
-
-#[derive(Serialize)]
-struct JobRow {
-    name: String,
-    label: String,
-    ago: String,
-    running: bool,
-    cmd: String,
-}
-
-#[tauri::command(async)]
-fn jobs(host: String) -> Reply<Vec<JobRow>> {
-    let jobs = hub::jobs_list(&host).map_err(err)?;
-    Ok(jobs
-        .into_iter()
-        .map(|job| JobRow {
-            label: job.label(),
-            ago: job.ago(),
-            running: job.running(),
-            name: job.name,
-            cmd: job.cmd,
-        })
-        .collect())
-}
-
-#[tauri::command(async)]
-fn job_log(host: String, name: String) -> Reply<String> {
-    hub::job_log(&host, &name).map_err(err)
-}
-
-#[tauri::command(async)]
-fn start_job(host: String, name: String, cmd: String) -> Reply<String> {
-    hub::start(&host, &name, true, &cmd).map_err(err)
-}
-
-#[tauri::command(async)]
-fn kill_job(host: String, name: String) -> Reply<String> {
-    hub::kill(&host, &name).map_err(err)
-}
-
-/// Снимок экрана узла как data-URL — показать прямо в вебвью.
-#[tauri::command(async)]
-fn screenshot(host: String) -> Reply<String> {
-    let path = hub::screenshot(&host, None).map_err(err)?;
-    let bytes = std::fs::read(&path).map_err(err)?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(format!("data:image/png;base64,{b64}"))
-}
-
-#[tauri::command(async)]
-fn input(host: String, args: Vec<String>) -> Reply<String> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    hub::input(&host, &args).map_err(err)
-}
-
-#[tauri::command(async)]
-fn add_node(name: String, target: String) -> Reply<()> {
-    nodes::register(
-        &name,
-        target.split_once('@').map(|(u, _)| u).unwrap_or_default(),
-        target.split_once('@').map(|(_, a)| a).unwrap_or(&target),
-    )
-    .map_err(err)
-}
-
-#[tauri::command(async)]
-fn pause(host: String, paused: bool) -> Reply<()> {
-    nodes::set_paused(&host, paused).map_err(err)
-}
-
-#[tauri::command(async)]
-fn rename(host: String, new_name: String) -> Reply<()> {
-    nodes::rename(&host, &new_name).map_err(err)
-}
-
-#[tauri::command(async)]
-fn remove(host: String) -> Reply<()> {
-    nodes::remove(&host).map_err(err)
-}
-
-/// Найти узел по ключу хоста; вернуть новый адрес, если нашёлся.
-#[tauri::command(async)]
-fn find(host: String) -> Reply<Option<String>> {
-    let addr = nodes::get(&host).map_err(err)?.addr;
-    find::find(&host, &addr, true).map_err(err)
-}
-
-#[tauri::command(async)]
-fn restart(host: String) -> Reply<String> {
-    hub::restart(&host).map_err(err)
-}
-
-#[tauri::command(async)]
-fn power(host: String, action: String) -> Reply<String> {
-    hub::power(&host, &action).map_err(err)
-}
-
-#[tauri::command(async)]
-fn trusted() -> Reply<Vec<String>> {
-    relay::trusted().map_err(err)
-}
-
-#[tauri::command(async)]
-fn trust(host: String) -> Reply<()> {
-    relay::trust(Some(&host)).map(|_| ()).map_err(err)
 }
 
 #[tauri::command]
@@ -186,7 +90,6 @@ fn version() -> String {
     ferry_core::VERSION.into()
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Окно из конфига (1100×720) на маленьком экране уходит под панель задач: ужимаем до рабочей
 /// области монитора и ставим по центру.
 fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -206,79 +109,187 @@ fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
+fn show(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Иконки трея по режиму (`apps/ferry/scripts/icons.mjs`): коралл, фиолетовый, серое кольцо.
+fn tray_icon(mode: Mode) -> tauri::image::Image<'static> {
+    let bytes: &[u8] = match mode {
+        Mode::Active => include_bytes!("../../../../crates/ferry-core/assets/tray/active-32.png"),
+        Mode::NoDesktop => {
+            include_bytes!("../../../../crates/ferry-core/assets/tray/no-desktop-32.png")
+        }
+        Mode::Paused => include_bytes!("../../../../crates/ferry-core/assets/tray/paused-32.png"),
+    };
+    tauri::image::Image::from_bytes(bytes).expect("иконка трея — PNG из репозитория")
+}
+
+/// Трей: режим этого устройства — его выбирает человек за ним; открыть окно; выйти.
+struct Tray {
+    icon: TrayIcon,
+    modes: Vec<(Mode, CheckMenuItem<tauri::Wry>)>,
+    mode: std::sync::Mutex<Option<Mode>>,
+}
+
+impl Tray {
+    fn build(app: &AppHandle) -> tauri::Result<Tray> {
+        let modes = Mode::ALL
+            .into_iter()
+            .map(|mode| {
+                let id = format!("mode:{}", mode.name());
+                CheckMenuItem::with_id(app, id, label(mode), true, false, None::<&str>)
+                    .map(|item| (mode, item))
+            })
+            .collect::<tauri::Result<Vec<_>>>()?;
+        let open = MenuItem::with_id(app, "open", "Открыть ferry", true, None::<&str>)?;
+        let pair = MenuItem::with_id(app, "pair", "Связать устройство…", true, None::<&str>)?;
+        let quit = MenuItem::with_id(app, "quit", "Выйти из ferry", true, None::<&str>)?;
+        let separator = || PredefinedMenuItem::separator(app);
+        let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = Vec::new();
+        for (_, item) in &modes {
+            items.push(item);
+        }
+        let (s1, s2) = (separator()?, separator()?);
+        items.extend([
+            &s1 as &dyn tauri::menu::IsMenuItem<_>,
+            &open,
+            &pair,
+            &s2,
+            &quit,
+        ]);
+        let menu = Menu::with_items(app, &items)?;
+        let icon = TrayIconBuilder::with_id("ferry")
+            .icon(tray_icon(Mode::Active))
+            .menu(&menu)
+            .show_menu_on_left_click(true)
+            .on_menu_event(|app, event| match event.id().as_ref() {
+                "open" => show(app),
+                "pair" => {
+                    show(app);
+                    let _ = app.emit("open-pairing", ());
+                }
+                "quit" => app.exit(0),
+                id => {
+                    if let Some(mode) = id.strip_prefix("mode:").and_then(Mode::parse) {
+                        let _ = app.state::<Agent>().set_mode(mode);
+                    }
+                }
+            })
+            .build(app)?;
+        Ok(Tray {
+            icon,
+            modes,
+            mode: std::sync::Mutex::default(),
+        })
+    }
+
+    /// Отметка, иконка и подсказка — по текущему режиму и тому, сколько устройств на связи.
+    fn update(&self, snapshot: &Snapshot) {
+        let mode = snapshot.me.mode;
+        if self.mode.lock().unwrap().replace(mode) != Some(mode) {
+            for (m, item) in &self.modes {
+                let _ = item.set_checked(*m == mode);
+            }
+            let _ = self.icon.set_icon(Some(tray_icon(mode)));
+        }
+        let online = snapshot.peers.iter().filter(|p| p.online).count();
+        let tip = format!(
+            "ferry — {}: {}\nна связи {online} из {}",
+            snapshot.me.name,
+            label(mode),
+            snapshot.peers.len()
+        );
+        let _ = self.icon.set_tooltip(Some(tip));
+    }
+}
+
+fn label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Active => "Работает",
+        Mode::NoDesktop => "Не трогать рабочий стол",
+        Mode::Paused => "Отключён от других устройств",
+    }
+}
+
 pub fn run() {
+    // Лог в stderr: `RUST_LOG=ferry_net=debug` — подробности связи.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,ferry_net=info".into()),
+        )
+        .init();
     tauri::Builder::default()
+        // Второй запуск (ярлык, автозапуск) не поднимает второго агента — показывает окно.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show(app)
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .setup(|app| {
+            let dir = ferry_core::ferry_home()?;
+            let agent = tauri::async_runtime::block_on(Agent::start(Options::new(dir.clone())))?;
+            app.manage(agent.clone());
+            // CLI на этой машине (`ferry devices`, `ferry pair` …) ходит сюда.
+            tauri::async_runtime::spawn(ferry_net::control::serve(agent.clone(), dir.clone()));
+
+            // Живёт в трее, а не в доке.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            let tray = Tray::build(app.handle())?;
+            tray.update(&agent.snapshot());
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut changes = agent.subscribe();
+                while changes.changed().await.is_ok() {
+                    let snapshot = agent.snapshot();
+                    tray.update(&snapshot);
+                    let _ = handle.emit("state", snapshot);
+                }
+            });
+
+            if !dir.join("no-autostart").exists()
+                && !app.autolaunch().is_enabled().unwrap_or(true)
+                && let Err(e) = app.autolaunch().enable()
+            {
+                tracing::warn!("автозапуск не включился: {e}");
+            }
             if let Some(window) = app.get_webview_window("main") {
                 fit_to_screen(&window)?;
+                // При входе в систему (автозапуск) окно не нужно — только трей.
+                if !std::env::args().any(|a| a == "--hidden") {
+                    window.show()?;
+                }
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
-            nodes, status, detail, jobs, job_log, start_job, kill_job, screenshot, input, add_node,
-            pause, rename, remove, find, restart, power, trusted, trust, version
+            state,
+            open_pairing,
+            close_pairing,
+            pair,
+            set_role,
+            rename,
+            set_mode,
+            forget,
+            autostart,
+            set_autostart,
+            version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Команды пульта против настоящего узла: `FERRY_LIVE_NODE=<узел> cargo test -p ferry-app`.
-/// Без переменной пропускается — CI узла не имеет.
-#[cfg(test)]
-mod live {
-    use super::*;
-
-    #[test]
-    fn commands_talk_to_a_real_node() {
-        let Ok(host) = std::env::var("FERRY_LIVE_NODE") else {
-            return;
-        };
-        assert!(
-            nodes().unwrap().iter().any(|n| n.name == host),
-            "узла нет в реестре"
-        );
-        let row = status(host.clone());
-        assert!(row.online, "{host} не на связи: {}", row.summary);
-
-        let detail = detail(host.clone()).unwrap();
-        assert!(
-            detail
-                .properties
-                .iter()
-                .any(|(label, _)| label == "система"),
-            "{:?}",
-            detail.properties
-        );
-
-        let shot = screenshot(host.clone()).unwrap();
-        assert!(
-            shot.starts_with("data:image/png;base64,iVBOR"),
-            "снимок не PNG"
-        );
-
-        start_job(
-            host.clone(),
-            "hub-live".into(),
-            "echo hello-from-hub; sleep 20".into(),
-        )
-        .unwrap();
-        let listed = jobs(host.clone()).unwrap();
-        assert!(
-            listed.iter().any(|j| j.name == "hub-live" && j.running),
-            "задачи нет в списке"
-        );
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        assert!(
-            job_log(host.clone(), "hub-live".into())
-                .unwrap()
-                .contains("hello-from-hub")
-        );
-        assert!(
-            kill_job(host.clone(), "hub-live".into())
-                .unwrap()
-                .contains("остановлена")
-        );
-
-        assert_eq!(version(), ferry_core::VERSION);
-    }
 }
