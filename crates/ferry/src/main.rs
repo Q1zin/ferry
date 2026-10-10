@@ -151,7 +151,10 @@ fn main() {
         ["desk", cmd @ ..] if !cmd.is_empty() => desk::run(&cmd.join(" ")),
         ["screenshot", file] => screen::screenshot(file),
         ["record", seconds, fps, dir] => screen::record(seconds, fps, dir),
-        ["input", rest @ ..] => screen::input(rest),
+        ["input", rest @ ..] => screen::input(rest).map(|out| {
+            print!("{out}");
+            0
+        }),
         ["stop"] => desk::stop(),
         ["info"] => info::command(),
         ["version" | "--version"] => {

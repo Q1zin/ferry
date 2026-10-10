@@ -25,8 +25,9 @@ pub fn record(seconds: &str, fps: &str, dir: &str) -> io::Result<i32> {
     ))
 }
 
-/// `ferry input <действие> …` — окна и ввод на этой машине.
-pub fn input(args: &[&str]) -> io::Result<i32> {
+/// `ferry input <действие> …` — окна и ввод на этой машине. Для `windows` — таблица окон,
+/// для действий — пусто.
+pub fn input(args: &[&str]) -> io::Result<String> {
     let number = |s: &str| {
         s.parse::<i32>()
             .map_err(|_| io::Error::other(format!("ожидалось число, а не {s:?}")))
@@ -232,22 +233,22 @@ mod win {
     use super::Key;
     use std::io;
 
-    fn unsupported() -> io::Result<i32> {
+    fn unsupported() -> io::Result<String> {
         Err(io::Error::other("окна и ввод пока только на Windows-узлах"))
     }
-    pub fn windows() -> io::Result<i32> {
+    pub fn windows() -> io::Result<String> {
         unsupported()
     }
-    pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<i32> {
+    pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
         unsupported()
     }
-    pub fn scroll(_: i32) -> io::Result<i32> {
+    pub fn scroll(_: i32) -> io::Result<String> {
         unsupported()
     }
-    pub fn type_text(_: &str) -> io::Result<i32> {
+    pub fn type_text(_: &str) -> io::Result<String> {
         unsupported()
     }
-    pub fn keys(_: &[Vec<Key>]) -> io::Result<i32> {
+    pub fn keys(_: &[Vec<Key>]) -> io::Result<String> {
         unsupported()
     }
 }
@@ -373,7 +374,7 @@ mod win {
         }
     }
 
-    fn send(inputs: &[Input]) -> io::Result<i32> {
+    fn send(inputs: &[Input]) -> io::Result<String> {
         let sent = unsafe {
             SendInput(
                 inputs.len() as u32,
@@ -382,7 +383,7 @@ mod win {
             )
         };
         if sent as usize == inputs.len() {
-            return Ok(0);
+            return Ok(String::new());
         }
         Err(io::Error::other(format!(
             "SendInput принял {sent} из {}: экран заблокирован или ввод не пускают",
@@ -391,7 +392,7 @@ mod win {
     }
 
     /// Курсор — в точку снимка, затем нажатия кнопок (пусто — просто навести).
-    pub fn pointer(x: i32, y: i32, buttons: &[u32]) -> io::Result<i32> {
+    pub fn pointer(x: i32, y: i32, buttons: &[u32]) -> io::Result<String> {
         let (_, _, width, height) = desktop();
         // Абсолютные координаты SendInput — 0..65535 по всему рабочему столу.
         let scale = |v: i32, size: i32| (v * 65535 + (size - 1) / 2) / (size - 1).max(1);
@@ -406,12 +407,12 @@ mod win {
     }
 
     /// Колесо: больше нуля — вверх.
-    pub fn scroll(clicks: i32) -> io::Result<i32> {
+    pub fn scroll(clicks: i32) -> io::Result<String> {
         send(&[mouse(0, 0, (clicks * 120) as u32, MOUSE_WHEEL)])
     }
 
     /// Текст юникодом — не зависит от раскладки; перевод строки и таб — настоящими клавишами.
-    pub fn type_text(text: &str) -> io::Result<i32> {
+    pub fn type_text(text: &str) -> io::Result<String> {
         let mut inputs = Vec::new();
         for unit in text.encode_utf16() {
             match unit {
@@ -427,7 +428,7 @@ mod win {
     }
 
     /// Каждая комбинация: всё нажать по порядку, отпустить в обратном.
-    pub fn keys(combos: &[Vec<Key>]) -> io::Result<i32> {
+    pub fn keys(combos: &[Vec<Key>]) -> io::Result<String> {
         let mut inputs = Vec::new();
         for combo in combos {
             let flags = |extended: bool| if extended { KEY_EXTENDED } else { 0 };
@@ -443,7 +444,7 @@ mod win {
     }
 
     /// Видимые окна с заголовком — сверху вниз по z-порядку; `*` — окно с фокусом.
-    pub fn windows() -> io::Result<i32> {
+    pub fn windows() -> io::Result<String> {
         extern "system" fn collect(window: isize, list: isize) -> i32 {
             unsafe { (*(list as *mut Vec<isize>)).push(window) };
             1
@@ -454,8 +455,8 @@ mod win {
         let names = process_names();
         let focused = unsafe { GetForegroundWindow() };
 
-        println!(
-            "  {:<26} {:>11} {:>11}  заголовок",
+        let mut table = format!(
+            "  {:<26} {:>11} {:>11}  заголовок\n",
             "процесс (pid)", "x,y", "ширина×выс."
         );
         for window in found {
@@ -483,9 +484,9 @@ mod win {
             };
             let mark = if window == focused { '*' } else { ' ' };
             let title = String::from_utf16_lossy(&title[..len as usize]);
-            println!("{mark} {process:<26} {place:>11} {size:>11}  {title}");
+            table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {title}\n");
         }
-        Ok(0)
+        Ok(table)
     }
 
     /// pid → имя exe: один tasklist на всех.
