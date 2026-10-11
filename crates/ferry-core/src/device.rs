@@ -58,6 +58,52 @@ pub struct Status {
     pub version: String,
 }
 
+/// Где на устройстве выполнять команду: в домашнем каталоге или в том же месте проекта, что
+/// здесь (`~/ferry/<name>/<prefix>`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum Dir {
+    Home,
+    Project { name: String, prefix: String },
+}
+
+/// Ошибка с кодом выхода для CLI: [`crate::mode::REFUSED`] (75) — устройство отказало по режиму
+/// или роли, остальное — 1.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Fail {
+    pub code: i32,
+    pub message: String,
+}
+
+impl Fail {
+    pub fn new(message: impl std::fmt::Display) -> Fail {
+        Fail {
+            code: 1,
+            message: message.to_string(),
+        }
+    }
+
+    pub fn refused(message: impl std::fmt::Display) -> Fail {
+        Fail {
+            code: crate::mode::REFUSED,
+            message: message.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for Fail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Fail {}
+
+impl From<std::io::Error> for Fail {
+    fn from(e: std::io::Error) -> Fail {
+        Fail::new(e)
+    }
+}
+
 /// Что видно с этого устройства: оно само, связанные устройства, устройства рядом.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Snapshot {

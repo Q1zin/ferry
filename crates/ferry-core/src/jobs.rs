@@ -21,13 +21,23 @@ use crate::exit_code;
 
 /// Запустить задачу; задача с тем же именем, если ещё работает, перезапускается.
 pub fn start(name: &str, cmd: &str) -> io::Result<i32> {
-    println!("{}", start_in(name, cmd, &std::env::current_dir()?, &[])?);
+    let exe = std::env::current_exe()?;
+    println!(
+        "{}",
+        start_in(name, cmd, &std::env::current_dir()?, &[], &exe)?
+    );
     Ok(0)
 }
 
-/// Запустить задачу в каталоге `cwd` с добавкой к окружению. Надсмотрщик — этот же бинарник
-/// (`ferry` или приложение): он понимает `job-supervise <имя>`.
-pub fn start_in(name: &str, cmd: &str, cwd: &Path, env: &[(String, String)]) -> io::Result<String> {
+/// Запустить задачу в каталоге `cwd` с добавкой к окружению. `supervisor` — бинарник, который
+/// понимает `job-supervise <имя>`: `ferry` или приложение.
+pub fn start_in(
+    name: &str,
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    supervisor: &Path,
+) -> io::Result<String> {
     let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     if name.is_empty() || name.starts_with('-') || !name.chars().all(alias) {
         return Err(io::Error::other(format!(
@@ -45,7 +55,7 @@ pub fn start_in(name: &str, cmd: &str, cwd: &Path, env: &[(String, String)]) -> 
     fs::write(dir.join("started"), now().to_string())?;
     fs::File::create(dir.join("log"))?;
 
-    let mut supervisor = Command::new(std::env::current_exe()?);
+    let mut supervisor = Command::new(supervisor);
     supervisor
         .args(["job-supervise", name])
         .envs(env.iter().map(|(k, v)| (k, v)))
