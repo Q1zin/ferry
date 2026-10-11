@@ -25,6 +25,7 @@ ferry devices --json        # me и peers: name, online, status.role/mode/os/ver
 ferry run win-10 -- cargo test                      # ждёт конца, код — команды
 ferry run win-10 --desk -- bunx playwright test     # --desk: команде нужны окна
 ferry run win-10 --no-sync -- 'ls target'           # без снимка проекта
+ferry run win-10 --home -- 'ls ~/Downloads'         # из репозитория, но в доме устройства
 ```
 
 Долгое или то, что должно жить дальше (приложение, dev-сервер, сборка) — фоновой задачей:
@@ -32,6 +33,8 @@ ferry run win-10 --no-sync -- 'ls target'           # без снимка про
 ```sh
 ferry start win-10 app -- ./target/debug/app.exe --remote-debugging-port=9322
 ferry log win-10 app -f        # следить; выйдет с кодом задачи — так ждут сборку
+ferry wait win-10 --log app "ready"   # ждать строку в логе вместо sleep; печатает её (URL и т. п.)
+ferry wait win-10 --port 9322         # ждать открытый порт — потом ferry tunnel
 ferry jobs win-10 --json       # что работает
 ferry kill win-10 app          # гасит всё дерево процессов задачи
 ferry stop win-10              # снять все команды и задачи
@@ -62,6 +65,10 @@ ferry wait win-10 --window "Сохранить как"   # ждать окно �
 ferry wait win-10 --name "Готово" --timeout 60   # ждать элемент; печатает его место
 ferry type win-10 'текст'                # юникодом, раскладка не важна
 ferry key win-10 ctrl+s enter alt+f4
+ferry key win-10 space --for 2           # долгое нажатие
+ferry click win-10 300 200 --hold shift  # shift/ctrl/cmd+клик; у drag тоже есть --hold
+ferry drag win-10 100 200 400 200        # перетащить: выделение, ползунок, перенос
+ferry clip win-10 [текст]                # буфер обмена: прочитать или положить
 ferry rec win-10 6                       # 6 с кадрами → лист-обзор (анимации, мигание)
 ```
 
@@ -70,6 +77,7 @@ ferry rec win-10 6                       # 6 с кадрами → лист-об
 ## Если что-то не так
 
 - `ferry logs <устройство> [-n 300]` — лог приложения ferry на устройстве (связь, ошибки).
+- `ferry crashes <устройство> [<программа>] [--last]` — упало приложение под тестом: когда, и `--last` — исключение и стек последнего падения.
 - `ferry info <устройство> --json` — система, железо, диск; в `warnings` — мало места, экран заблокирован и т. п.
 - `ferry doctor <устройство>` — хватает ли инструментов и доступа к git-зависимостям для этого проекта.
 - Приватные git-зависимости (cargo, bun по ssh): один раз `ferry trust <хост>` на этой машине — устройства будут ходить в git её ключами.
