@@ -119,10 +119,14 @@ fn summary(ips: &str) -> String {
     let head: Value = serde_json::from_str(head).unwrap_or_default();
     let body: Value = serde_json::from_str(body).unwrap_or_default();
     let field = |v: &Value| v.as_str().unwrap_or_default().to_string();
+    // У программ без версии (node, сборки из target/) её просто нет.
+    let program = [field(&head["app_name"]), field(&head["app_version"])]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut text = format!(
-        "{} {} — {}, {}\n",
-        field(&head["app_name"]),
-        field(&head["app_version"]),
+        "{program} — {}, {}\n",
         field(&head["timestamp"]),
         field(&head["os_version"]),
     );
@@ -296,7 +300,7 @@ mod tests {
 
         // Бывают отчёты без потоков — только исключение.
         let bare = concat!(
-            r#"{"app_name":"logarithmica","bug_type":"309"}"#,
+            r#"{"app_name":"logarithmica","app_version":"","bug_type":"309"}"#,
             "\n",
             r#"{"exception":{"type":"EXC_BAD_ACCESS","signal":"SIGSEGV","subtype":"KERN_INVALID_ADDRESS at 0x0"},"reportNotes":["x"]}"#
         );
@@ -306,6 +310,10 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("поток"), "{text}");
+        assert!(
+            text.starts_with("logarithmica — "),
+            "без версии — без лишнего пробела: {text}"
+        );
         // Мусор вместо отчёта — не паника.
         summary("не json");
     }
