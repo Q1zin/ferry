@@ -42,7 +42,7 @@ async fn cli_talks_to_the_app_with_its_token() {
         role: Role::Node,
     };
     match call(unknown).await.unwrap() {
-        Response::Error(e) => assert!(e.contains("нет устройства"), "{e}"),
+        Response::Error(e) => assert!(e.message.contains("нет устройства"), "{e}"),
         other => panic!("{other:?}"),
     }
     match call(Request::OpenPairing).await.unwrap() {
@@ -55,7 +55,7 @@ async fn cli_talks_to_the_app_with_its_token() {
     let port = app.split_whitespace().next().unwrap();
     std::fs::write(dir.join("app"), format!("{port} 0000\n")).unwrap();
     match call(Request::State).await.unwrap() {
-        Response::Error(e) => assert!(e.contains("токен"), "{e}"),
+        Response::Error(e) => assert!(e.message.contains("токен"), "{e}"),
         other => panic!("{other:?}"),
     }
     let _ = std::fs::remove_dir_all(&dir);
