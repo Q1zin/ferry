@@ -20,8 +20,11 @@ use irpc::WithChannels;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
+use crate::device::Device;
 use crate::lan::Lan;
+use crate::node::Node;
 use crate::pair;
+use crate::proto::Fail;
 use crate::proto::{
     self, DeviceClient, DeviceMessage, DeviceProtocol, Rename, Role, SetRole, Status,
 };
@@ -35,6 +38,10 @@ pub struct Options {
     pub internet: bool,
     /// Поиск в локальной сети (mDNS).
     pub lan: bool,
+    /// Дом пользователя: проекты на этом устройстве — в `<home>/ferry/<имя>`.
+    pub home: PathBuf,
+    /// Бинарник с `job-supervise <имя>` — надсмотрщик фоновых задач: само приложение или `ferry`.
+    pub supervisor: PathBuf,
 }
 
 impl Options {
@@ -43,6 +50,8 @@ impl Options {
             dir,
             internet: true,
             lan: true,
+            home: ferry_core::home().unwrap_or_default(),
+            supervisor: std::env::current_exe().unwrap_or_default(),
         }
     }
 }
@@ -63,6 +72,10 @@ struct Inner {
     lan: Option<Lan>,
     pairing: Mutex<Option<pair::Window>>,
     changed: Arc<watch::Sender<u64>>,
+    /// Команды, которые это устройство выполняет для других.
+    node: Arc<Node>,
+    /// Открытые туннели: (устройство, порт).
+    tunnels: Mutex<BTreeMap<(String, u16), AbortHandle>>,
 }
 
 /// Что известно о связанном устройстве прямо сейчас.
@@ -137,12 +150,22 @@ impl Agent {
             version: ferry_core::VERSION.into(),
         };
         let peers: Vec<EndpointId> = store.peers.iter().map(|p| p.id).collect();
+        let me = watch::channel(me).0;
+        let node = Arc::new(Node {
+            dir: opts.dir.clone(),
+            home: opts.home,
+            supervisor: opts.supervisor,
+            me: me.subscribe(),
+            runs: Mutex::default(),
+        });
         let inner = Arc::new(Inner {
             dir: opts.dir,
             endpoint: endpoint.clone(),
             lookup,
             store: Mutex::new(store),
-            me: watch::channel(me).0,
+            me,
+            node,
+            tunnels: Mutex::default(),
             peers: Mutex::default(),
             lan,
             pairing: Mutex::default(),
@@ -324,6 +347,84 @@ impl Agent {
         }
         inner.notify();
         Ok(())
+    }
+
+    /// Связанное устройство на связи — по имени или началу ключа.
+    pub fn device(&self, who: &str) -> Result<Device, Fail> {
+        let snapshot = self.snapshot();
+        let peer = snapshot.find(who).map_err(Fail::new)?;
+        let id: EndpointId = peer.id.parse().map_err(Fail::new)?;
+        let client = self
+            .inner
+            .client(id)
+            .map_err(|e| Fail::new(format!("{e:#}")))?;
+        Ok(Device {
+            id,
+            name: peer.name.clone(),
+            client,
+            dir: self.inner.dir.clone(),
+        })
+    }
+
+    /// `127.0.0.1:<port>` здесь → тот же порт устройства (CDP, dev-сервер). Порт тот же с обеих
+    /// сторон: CDP отдаёт в `/json/version` ws-адрес со своим портом.
+    pub async fn open_tunnel(&self, who: &str, port: u16) -> Result<String, Fail> {
+        let device = self.device(who)?;
+        let key = (device.name.clone(), port);
+        if self.inner.tunnels.lock().unwrap().contains_key(&key) {
+            return Ok(format!(
+                "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{port}",
+                device.name
+            ));
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|_| {
+                Fail::new(format!(
+                    "порт {port} здесь занят — запусти на устройстве на другом порту"
+                ))
+            })?;
+        let agent = self.clone();
+        let name = device.name.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                // Устройство могло переподключиться — клиент берём свежий на каждое соединение.
+                let Ok(device) = agent.device(&name) else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    if let Ok((tx, rx)) = device.tunnel(port).await {
+                        crate::node::pipe(stream, tx, rx).await;
+                    }
+                });
+            }
+        });
+        self.inner
+            .tunnels
+            .lock()
+            .unwrap()
+            .insert(key, task.abort_handle());
+        Ok(format!("ferry: 127.0.0.1:{port} → {}:{port}", device.name))
+    }
+
+    pub fn close_tunnel(&self, who: &str, port: u16) -> Result<String, Fail> {
+        let mut tunnels = self.inner.tunnels.lock().unwrap();
+        let key = tunnels
+            .keys()
+            .find(|(name, p)| *p == port && (name == who || who.is_empty()))
+            .cloned();
+        match key.and_then(|key| tunnels.remove(&key).map(|task| (key, task))) {
+            Some(((name, port), task)) => {
+                task.abort();
+                Ok(format!("ferry: туннель {name}:{port} закрыт"))
+            }
+            None => Err(Fail::new(format!("туннеля {who}:{port} нет"))),
+        }
+    }
+
+    /// Открытые туннели: устройство и порт.
+    pub fn tunnels(&self) -> Vec<(String, u16)> {
+        self.inner.tunnels.lock().unwrap().keys().cloned().collect()
     }
 
     pub async fn shutdown(&self) {
@@ -583,6 +684,7 @@ impl Inner {
                     .and_then(|name| self.remote_change(|| self.rename(name)));
                 tx.send(result).await.ok();
             }
+            other => self.node.clone().handle(other).await,
         }
     }
 }

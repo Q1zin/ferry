@@ -4,12 +4,16 @@
 
 pub mod agent;
 pub mod control;
+pub mod device;
+pub mod files;
 pub mod lan;
+mod node;
 pub mod pair;
 pub mod proto;
 pub mod store;
 
 pub use agent::{Agent, Options};
-pub use ferry_core::device::{LanDevice, PairingInfo, PeerView, Role, Snapshot, Status};
+pub use device::Device;
+pub use ferry_core::device::{Dir, Fail, LanDevice, PairingInfo, PeerView, Role, Snapshot, Status};
 pub use ferry_core::mode::Mode;
 pub use iroh::EndpointId;
