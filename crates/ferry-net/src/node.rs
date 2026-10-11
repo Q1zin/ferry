@@ -366,7 +366,7 @@ impl Node {
             }
             DeviceMessage::PortOpen(WithChannels { inner, tx, .. }) => {
                 let result = match self.check(false) {
-                    Ok(()) => Ok(local(inner.port).await.is_some()),
+                    Ok(()) => Ok(knock(inner.port).await),
                     Err(fail) => Err(fail),
                 };
                 tx.send(result).await.ok();
@@ -562,19 +562,45 @@ async fn tunnel(port: u16, tx: mpsc::Sender<Vec<u8>>, rx: mpsc::Receiver<Vec<u8>
     }
 }
 
-/// Соединение на `127.0.0.1:<port>`, а нет там никого — на `[::1]`: dev-серверы на `localhost`
-/// слушают то один адрес, то другой (Vite на маке — только `::1`).
+/// Соединение на `port` этого устройства — на `127.0.0.1` или `[::1]`, кто ответит первым:
+/// dev-серверы на `localhost` слушают то один адрес, то другой (Vite на маке — только `::1`).
+/// Наперегонки, а не по очереди: отказ на закрытом порту Windows отдаёт только через ~2 с.
 async fn local(port: u16) -> Option<tokio::net::TcpStream> {
-    for ip in [
-        std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST),
-        std::net::Ipv6Addr::LOCALHOST.into(),
-    ] {
+    let connect = |ip: std::net::IpAddr| async move {
         let connect = tokio::net::TcpStream::connect((ip, port));
-        if let Ok(Ok(stream)) = tokio::time::timeout(Duration::from_secs(2), connect).await {
-            return Some(stream);
+        match tokio::time::timeout(Duration::from_secs(2), connect).await {
+            Ok(Ok(stream)) => Some(stream),
+            _ => None,
         }
+    };
+    let v4 = connect(std::net::Ipv4Addr::LOCALHOST.into());
+    let v6 = connect(std::net::Ipv6Addr::LOCALHOST.into());
+    tokio::pin!(v4, v6);
+    tokio::select! {
+        Some(stream) = &mut v4 => Some(stream),
+        Some(stream) = &mut v6 => Some(stream),
+        // Оба не ответили — select попадает сюда, когда обе ветки вернули None.
+        else => None,
     }
-    None
+}
+
+/// Слушает ли кто-нибудь `port`. Закрываем вежливо: дочитываем, что сервер успел прислать, —
+/// закрытие с непрочитанными данными шлёт RST, и сервер без обработчика ошибок падает.
+async fn knock(port: u16) -> bool {
+    let Some(mut stream) = local(port).await else {
+        return false;
+    };
+    let _ = stream.shutdown().await;
+    let mut buf = [0u8; 4096];
+    let drain = async {
+        while let Ok(n) = stream.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_millis(200), drain).await;
+    true
 }
 
 /// Байты TCP-соединения ↔ поток irpc, пока одна из сторон не закроется.
