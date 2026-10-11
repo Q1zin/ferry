@@ -1,67 +1,12 @@
-//! Агенты в одном процессе: без интернета и mDNS, адреса друг друга им дают напрямую.
+//! Агенты в одном процессе: связывание, события, роли, отказы, переподключение.
 
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+mod common;
 
+use std::time::Duration;
+
+use common::*;
 use ferry_net::proto::{self, DeviceClient};
-use ferry_net::{Agent, Mode, Options, Role, Snapshot};
-
-fn path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("ferry-net-{}-{name}", std::process::id()))
-}
-
-fn dir(name: &str) -> PathBuf {
-    let _ = std::fs::remove_dir_all(path(name));
-    path(name)
-}
-
-async fn agent(name: &str) -> Agent {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
-    let agent = Agent::start(Options {
-        dir: dir(name),
-        internet: false,
-        lan: false,
-    })
-    .await
-    .unwrap();
-    agent.rename(None, name).await.unwrap();
-    agent
-}
-
-/// Дождаться, пока снимок агента станет таким, как нужно.
-async fn until(agent: &Agent, what: &str, ok: impl Fn(&Snapshot) -> bool) -> Duration {
-    let start = Instant::now();
-    while !ok(&agent.snapshot()) {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "не дождались: {what}\n{:#?}",
-            agent.snapshot()
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    start.elapsed()
-}
-
-async fn paired(a: &str, b: &str) -> (Agent, Agent) {
-    let (a, b) = (agent(a).await, agent(b).await);
-    a.learn(b.addr());
-    b.learn(a.addr());
-    let ticket = b.open_pairing().ticket;
-    let peer = a.pair(&ticket).await.unwrap();
-    assert_eq!(peer.name, b.snapshot().me.name);
-    assert!(b.snapshot().pairing.is_none(), "окно связывания закрылось");
-    until(&a, "a видит b", |s| {
-        s.peers.iter().any(|p| p.online && p.status.is_some())
-    })
-    .await;
-    until(&b, "b видит a", |s| {
-        s.peers.iter().any(|p| p.online && p.status.is_some())
-    })
-    .await;
-    (a, b)
-}
+use ferry_net::{Agent, Mode, Role, Snapshot};
 
 #[tokio::test]
 async fn paired_devices_push_status_and_obey_each_other() {
@@ -100,13 +45,7 @@ async fn paired_devices_push_status_and_obey_each_other() {
     // Связь обеих сторон после перезапуска — из сохранённого списка.
     b.shutdown().await;
     until(&a, "b ушёл", |s| !s.peers[0].online).await;
-    let b2 = Agent::start(Options {
-        dir: path("win"),
-        internet: false,
-        lan: false,
-    })
-    .await
-    .unwrap();
+    let b2 = Agent::start(options("win")).await.unwrap();
     assert_eq!(b2.id(), b.id(), "ключ тот же");
     a.learn(b2.addr());
     b2.learn(a.addr());
