@@ -123,3 +123,41 @@ fn kill_stops_the_command_and_restart_replaces_it() {
     assert!(node.jobs().contains("остановлена"), "{}", node.jobs());
     assert!(!alive(&second), "команда пережила kill");
 }
+
+#[test]
+fn a_stranger_with_the_old_pid_is_not_the_job() {
+    // Надсмотрщика убили (так бывает при обновлении приложения), а его PID и PID команды
+    // достались другому процессу: задача не работает, и ни kill, ни перезапуск того не трогают.
+    let node = Node::new("stale");
+    node.ferry(&["job", "t", "exec sleep 30"]);
+    node.wait_until("child", |_| node.home.join(".ferry/jobs/t/child").exists());
+    for file in ["pid", "child"] {
+        let pid = node.file("t", file);
+        Command::new("kill")
+            .args(["-9", pid.trim()])
+            .status()
+            .unwrap();
+    }
+    let mut stranger = Command::new("sleep").arg("30").spawn().unwrap();
+    let job = node.home.join(".ferry/jobs/t");
+    for file in ["pid", "child"] {
+        fs::write(job.join(file), stranger.id().to_string()).unwrap();
+    }
+    node.wait_until("пропала", |jobs| jobs.contains("пропала"));
+    node.ferry(&["kill", "t"]);
+    assert!(alive(&stranger.id().to_string()), "kill убил чужой процесс");
+
+    // Задача старой версии — без блокировки: решает PID, но чужой процесс — не ferry.
+    fs::remove_file(job.join("lock")).unwrap();
+    assert!(node.jobs().contains("пропала"), "{}", node.jobs());
+    node.ferry(&["job", "t", "true"]);
+    assert!(
+        alive(&stranger.id().to_string()),
+        "перезапуск убил чужой процесс"
+    );
+    node.wait_until("новая отработала", |jobs| {
+        jobs.contains("код 0")
+    });
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+}

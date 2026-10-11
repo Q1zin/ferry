@@ -71,6 +71,9 @@ pub fn start_in(
 /// `ferry job-supervise <имя>`: запустить команду задачи, дождаться, записать код выхода.
 pub fn supervise(name: &str) -> io::Result<i32> {
     let dir = dir(name)?;
+    // Держать до конца: по ней [`running`] знает, что надсмотрщик жив.
+    let lock = fs::File::create(dir.join("lock"))?;
+    lock.lock()?;
     let cmd = fs::read_to_string(dir.join("cmd"))?;
     let cwd = fs::read_to_string(dir.join("cwd"))?;
     // Лог создан пустым при запуске, пишет только надсмотрщик — хватит обычной записи.
@@ -95,6 +98,7 @@ pub fn supervise(name: &str) -> io::Result<i32> {
         }
     };
     fs::write(dir.join("exit"), code.to_string())?;
+    drop(lock);
     Ok(code)
 }
 
@@ -299,35 +303,62 @@ fn label(code: &str) -> String {
     }
 }
 
+/// Работает ли задача. Надсмотрщик всю жизнь держит блокировку файла `lock`, и ОС снимает её
+/// с его смертью — так его не спутать с чужим процессом, которому достался тот же PID
+/// (надсмотрщика убили вместе с приложением при обновлении). Пока надсмотрщик жив, и PID
+/// команды не переходит другому: он держит её процесс.
 fn running(dir: &Path) -> bool {
     if dir.join("exit").exists() {
         return false;
     }
-    read(dir, "pid")
-        .and_then(|p| p.parse().ok())
-        .is_some_and(alive)
+    match fs::File::open(dir.join("lock")) {
+        Ok(lock) => match lock.try_lock() {
+            Ok(()) => false,
+            Err(fs::TryLockError::WouldBlock) => true,
+            Err(fs::TryLockError::Error(_)) => false,
+        },
+        // ponytail: блокировки нет у задач версий до 0.1.11 и у только что запущенной — тогда по
+        // PID, но только если это процесс ferry; чужой процесс с тем же PID задачей не считается.
+        Err(_) => read(dir, "pid")
+            .and_then(|p| p.parse().ok())
+            .is_some_and(ferry_process),
+    }
 }
 
+/// Есть ли процесс `pid` и это ли ferry (`ferry` или `ferry-app` — они и бывают надсмотрщиками).
+fn ferry_process(pid: u32) -> bool {
+    process_name(pid).is_some_and(|name| name == "ferry" || name == "ferry-app")
+}
+
+/// Имя программы процесса: без пути и `.exe`, в нижнем регистре.
 #[cfg(windows)]
-fn alive(pid: u32) -> bool {
+fn process_name(pid: u32) -> Option<String> {
     use std::os::windows::process::CommandExt;
     let out = Command::new("tasklist")
         .args(["/fi", &format!("PID eq {pid}"), "/fo", "csv", "/nh"])
         .creation_flags(crate::desk::CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .output();
-    out.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
+        .output()
+        .ok()?;
+    // `"ferry-app.exe","1234",…`; нет такого — строка-сообщение без кавычек.
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().find(|l| l.contains(&format!("\"{pid}\"")))?;
+    let name = line.split("\",\"").next()?.trim_start_matches('"');
+    Some(name.to_lowercase().trim_end_matches(".exe").to_string())
 }
 
 #[cfg(unix)]
-fn alive(pid: u32) -> bool {
-    Command::new("kill")
-        .args(["-0", &pid.to_string()])
+fn process_name(pid: u32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .ok()?;
+    let comm = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let name = comm.rsplit('/').next()?.to_lowercase();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Надсмотрщик — сам по себе: своя группа процессов, своя скрытая консоль на Windows.
