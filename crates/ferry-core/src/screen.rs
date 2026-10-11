@@ -656,13 +656,14 @@ mod mac {
 
     /// Событие мыши с флагами удерживаемых модификаторов — по ним приложения узнают cmd+клик.
     fn post_mouse(
+        src: &CGEventSource,
         kind: CGEventType,
         at: CGPoint,
         button: CGMouseButton,
         flags: CGEventFlags,
         clicks: i64,
     ) -> io::Result<()> {
-        let mouse = event(CGEvent::new_mouse_event(source()?, kind, at, button))?;
+        let mouse = event(CGEvent::new_mouse_event(src.clone(), kind, at, button))?;
         mouse.set_flags(flags);
         if clicks > 0 {
             mouse.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, clicks);
@@ -671,40 +672,74 @@ mod mac {
         Ok(())
     }
 
-    /// Нажать клавиши комбинации `hold` (пусто — ничего), сделать `act` с их флагами, отпустить
-    /// — отпускаем в любом случае, иначе модификатор залипнет.
-    fn holding(hold: &str, act: impl FnOnce(CGEventFlags) -> io::Result<()>) -> io::Result<String> {
+    /// Нажать клавиши комбинации `hold` (пусто — ничего), сделать `act` с их флагами, отпустить.
+    /// Источник событий — один на всё действие: флаги события мыши macOS берёт из состояния его
+    /// источника, и с источником, не видевшим нажатия shift, клик выходит без shift.
+    fn holding(
+        hold: &str,
+        act: impl FnOnce(&CGEventSource, CGEventFlags) -> io::Result<()>,
+    ) -> io::Result<String> {
         let keys = match hold {
             "" => Vec::new(),
             _ => combo(hold)?,
         };
         trusted()?;
+        let src = source()?;
+        press(&src, &keys, |flags| act(&src, flags)).map(|()| String::new())
+    }
+
+    /// Сколько ждать, пока система применит нажатый модификатор: она делает это не сразу, и
+    /// клик, отправленный следом, приходил ещё без shift (проверено на macOS 27).
+    const SETTLE: Duration = Duration::from_millis(100);
+
+    /// Нажать `keys` по порядку, сделать `act` с их флагами, отпустить в обратном порядке.
+    /// Нажатое отпускаем в любом случае — иначе клавиша залипнет.
+    fn press(
+        src: &CGEventSource,
+        keys: &[(u16, CGEventFlags)],
+        act: impl FnOnce(CGEventFlags) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let modifiers = keys.iter().any(|k| !k.1.is_empty());
         let mut flags = CGEventFlags::CGEventFlagNull;
         let mut pressed = Ok(());
         let mut down = 0;
-        for &(code, flag) in &keys {
-            flags |= flag;
-            pressed = key(code, true, flags);
+        for &k in keys {
+            flags |= k.1;
+            pressed = key(src, k, true, flags);
             if pressed.is_err() {
+                flags.remove(k.1);
                 break;
             }
             down += 1;
         }
-        let acted = pressed.and_then(|()| act(flags));
-        let mut released = Ok(());
-        for &(code, flag) in keys[..down].iter().rev() {
-            flags.remove(flag);
-            released = released.and(key(code, false, flags));
+        if modifiers && down > 0 {
+            std::thread::sleep(SETTLE);
         }
-        acted.and(released).map(|()| String::new())
+        let acted = pressed.and_then(|()| act(flags));
+        if modifiers && down > 0 {
+            std::thread::sleep(SETTLE);
+        }
+        let mut released = Ok(());
+        for &k in keys[..down].iter().rev() {
+            flags.remove(k.1);
+            released = released.and(key(src, k, false, flags));
+        }
+        acted.and(released)
     }
 
     /// Курсор — в точку снимка, затем нажатия кнопок (коды — как у Windows: `MOUSE_*`); `hold`
     /// держится всё это время.
     pub fn pointer(x: i32, y: i32, buttons: &[u32], hold: &str) -> io::Result<String> {
         let at = point(x, y);
-        holding(hold, |flags| {
-            post_mouse(CGEventType::MouseMoved, at, CGMouseButton::Left, flags, 0)?;
+        holding(hold, |src, flags| {
+            post_mouse(
+                src,
+                CGEventType::MouseMoved,
+                at,
+                CGMouseButton::Left,
+                flags,
+                0,
+            )?;
             // Двойной клик — второе нажатие с отметкой «второй по счёту».
             let mut presses = 0;
             for &b in buttons {
@@ -717,7 +752,7 @@ mod mac {
                 if b == super::MOUSE_LEFT_DOWN || b == super::MOUSE_RIGHT_DOWN {
                     presses += 1;
                 }
-                post_mouse(kind, at, button, flags, presses)?;
+                post_mouse(src, kind, at, button, flags, presses)?;
             }
             Ok(())
         })
@@ -726,28 +761,29 @@ mod mac {
     /// Нажать левую кнопку в `from`, провести шагами до `to`, отпустить. Кнопку отпускаем, даже
     /// если по дороге событие не создалось.
     pub fn drag(from: (i32, i32), to: (i32, i32), hold: &str) -> io::Result<String> {
-        holding(hold, |flags| {
+        holding(hold, |src, flags| {
             let left = CGMouseButton::Left;
             let start = point(from.0, from.1);
-            let moved = post_mouse(CGEventType::MouseMoved, start, left, flags, 0)
-                .and_then(|()| post_mouse(CGEventType::LeftMouseDown, start, left, flags, 1))
+            let moved = post_mouse(src, CGEventType::MouseMoved, start, left, flags, 0)
+                .and_then(|()| post_mouse(src, CGEventType::LeftMouseDown, start, left, flags, 1))
                 .and_then(|()| {
                     for step in 1..=super::DRAG_STEPS {
                         std::thread::sleep(super::DRAG_PAUSE);
                         let (x, y) = super::along(from, to, step);
-                        post_mouse(CGEventType::LeftMouseDragged, point(x, y), left, flags, 1)?;
+                        let at = point(x, y);
+                        post_mouse(src, CGEventType::LeftMouseDragged, at, left, flags, 1)?;
                     }
                     Ok(())
                 });
             let end = point(to.0, to.1);
-            let released = post_mouse(CGEventType::LeftMouseUp, end, left, flags, 1);
+            let released = post_mouse(src, CGEventType::LeftMouseUp, end, left, flags, 1);
             moved.and(released)
         })
     }
 
     /// Держать комбинацию `time` и отпустить.
     pub fn hold_key(combo: &str, time: Duration) -> io::Result<String> {
-        holding(combo, |_| {
+        holding(combo, |_, _| {
             std::thread::sleep(time);
             Ok(())
         })
@@ -790,8 +826,19 @@ mod mac {
         Ok(String::new())
     }
 
-    fn key(code: u16, down: bool, flags: CGEventFlags) -> io::Result<()> {
-        let press = event(CGEvent::new_keyboard_event(source()?, code, down))?;
+    /// Клавиша; `flags` — модификаторы, зажатые после этого события. Модификатор (cmd, shift…)
+    /// — событием FlagsChanged, как его шлёт сама клавиатура: после KeyDown/KeyUp он оставался
+    /// зажатым в системе.
+    fn key(
+        src: &CGEventSource,
+        (code, flag): (u16, CGEventFlags),
+        down: bool,
+        flags: CGEventFlags,
+    ) -> io::Result<()> {
+        let press = event(CGEvent::new_keyboard_event(src.clone(), code, down))?;
+        if !flag.is_empty() {
+            press.set_type(CGEventType::FlagsChanged);
+        }
         press.set_flags(flags);
         press.post(CGEventTapLocation::HID);
         Ok(())
@@ -800,12 +847,13 @@ mod mac {
     /// Текст юникодом — раскладка не важна; перевод строки и таб — настоящими клавишами.
     pub fn type_text(text: &str) -> io::Result<String> {
         trusted()?;
+        let src = source()?;
         let none = CGEventFlags::CGEventFlagNull;
         let mut run = String::new();
         let flush = |run: &mut String| -> io::Result<()> {
             if !run.is_empty() {
                 for down in [true, false] {
-                    let press = event(CGEvent::new_keyboard_event(source()?, 0, down))?;
+                    let press = event(CGEvent::new_keyboard_event(src.clone(), 0, down))?;
                     press.set_string(run);
                     press.post(CGEventTapLocation::HID);
                 }
@@ -822,8 +870,8 @@ mod mac {
             match special {
                 Some(code) => {
                     flush(&mut run)?;
-                    key(code, true, none)?;
-                    key(code, false, none)?;
+                    key(&src, (code, none), true, none)?;
+                    key(&src, (code, none), false, none)?;
                 }
                 // Одно событие несёт до 20 знаков UTF-16.
                 None => {
@@ -846,16 +894,9 @@ mod mac {
             .map(|c| combo(c))
             .collect::<io::Result<Vec<_>>>()?;
         trusted()?;
+        let src = source()?;
         for keys in combos {
-            let mut flags = CGEventFlags::CGEventFlagNull;
-            for &(code, flag) in &keys {
-                flags |= flag;
-                key(code, true, flags)?;
-            }
-            for &(code, flag) in keys.iter().rev() {
-                flags.remove(flag);
-                key(code, false, flags)?;
-            }
+            press(&src, &keys, |_| Ok(()))?;
         }
         Ok(String::new())
     }
