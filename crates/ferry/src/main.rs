@@ -74,6 +74,11 @@ ferry — разработка и тесты на нескольких устр�
   ferry click <устройство> --name <имя|#id> [right|double] [--hold <комбинация>]
                                     клик в центр элемента с этим именем (или #id) в окне с фокусом;
                                     --hold shift — держать клавиши, пока жмём (shift/cmd+клик)
+  ferry click <устройство> --text <текст> [right|double] [--hold <комбинация>]
+                                    клик в центр текста на экране (распознавание) в окне с фокусом —
+                                    для canvas, WebGL, игр без элементов
+  ferry text <устройство> [<окно>]  текст окна с фокусом (или по процессу, части заголовка),
+                                    распознанный с экрана: «текст» и место
   ferry move <устройство> <x> <y>   навести курсор (или --name <имя>)
   ferry drag <устройство> <x1> <y1> <x2> <y2> [--hold <комбинация>]
                                     перетащить левой кнопкой: выделение, ползунки, перенос
@@ -84,10 +89,10 @@ ferry — разработка и тесты на нескольких устр�
   ferry key <устройство> <комбинация> --for <секунд>
                                     держать и отпустить (долгое нажатие, до 60 с)
   ferry clip <устройство> [<текст>] буфер обмена: без текста — прочитать, с текстом — положить
-  ferry wait <устройство> --window <окно> | --name <имя|#id> | --port <порт>
+  ferry wait <устройство> --window <окно> | --name <имя|#id> | --text <текст> | --port <порт>
                     | --log <задача> <текст> [--gone] [--timeout <секунд>]
-                                    ждать, пока окно (процесс или часть заголовка), элемент
-                                    окна с фокусом или порт устройства появится (с --gone —
+                                    ждать, пока окно (процесс или часть заголовка), элемент или
+                                    текст в окне с фокусом, порт устройства появится (с --gone —
                                     исчезнет), либо текст — в логе задачи; по умолчанию 30 с;
                                     дождался — печатает место или строку лога, нет — код 1
   ferry rec <устройство> <секунды> [кадр/с]
@@ -148,6 +153,9 @@ fn main() {
         ["windows", device] => devices::input(device, owned(&["windows"])),
         ["focus", device, window @ ..] if !window.is_empty() => {
             devices::input(device, owned(&[&["focus"][..], window].concat()))
+        }
+        ["text", device, window @ ..] => {
+            devices::input(device, owned(&[&["text"][..], window].concat()))
         }
         ["ui", device, window @ ..] => {
             devices::input(device, owned(&[&["ui"][..], window].concat()))
@@ -291,6 +299,10 @@ fn wait(device: &str, mut rest: &[&str]) -> io::Result<i32> {
             }
             ("--name", [name, tail @ ..]) => {
                 what = Some(devices::Wait::Name(name));
+                rest = tail;
+            }
+            ("--text", [text, tail @ ..]) => {
+                what = Some(devices::Wait::Text(text));
                 rest = tail;
             }
             ("--port", [port, tail @ ..]) => {

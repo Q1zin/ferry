@@ -431,6 +431,8 @@ fn input_since(args: &[String], os: Option<&str>) -> Option<(&'static str, &'sta
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let elements = first == "ui" || first == "probe" || has("--name");
     Some(match first {
+        "text" | "probe-text" => ("0.1.13", "текст на экране"),
+        _ if has("--text") => ("0.1.13", "текст на экране"),
         "drag" => ("0.1.11", "ferry drag"),
         "clip" => ("0.1.11", "ferry clip"),
         "click" | "move" if has("--hold") => ("0.1.11", "--hold"),
@@ -486,6 +488,9 @@ mod tests {
         );
         assert_eq!(since(&["key", "a", "--for", "1"], win), Some("0.1.11"));
         assert_eq!(since(&["key", "ctrl+s"], win), None);
+        assert_eq!(since(&["text"], mac), Some("0.1.13"));
+        assert_eq!(since(&["probe-text", "Готово"], win), Some("0.1.13"));
+        assert_eq!(since(&["click", "--text", "Готово"], win), Some("0.1.13"));
     }
 
     #[test]
