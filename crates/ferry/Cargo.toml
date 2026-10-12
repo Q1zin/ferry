@@ -6,3 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 ferry-core = { path = "../ferry-core" }
+
+[dev-dependencies]
+ferry-net = { path = "../ferry-net" }
+tokio = { version = "1.53", features = ["full"] }
