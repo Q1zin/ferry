@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22.1"
 ferry-core = { path = "../ferry-core" }
 serde_json = "1"
 

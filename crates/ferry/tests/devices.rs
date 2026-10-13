@@ -325,6 +325,53 @@ async fn cli_drives_devices_through_the_app() {
     );
     assert!(!root("win").join("ferry/proj").exists(), "снимок не клали");
 
+    // MCP: те же команды через `ferry mcp` — JSON-RPC строками, ответ по строке на запрос.
+    let requests = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ferry","arguments":{"args":["devices","--json"]}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ferry","arguments":{"args":["run","win","--","echo через mcp; exit 3"]}}}"#,
+    ];
+    let mut input = requests.join("\n");
+    input.push('\n');
+    let replies = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut mcp = Command::new(FERRY)
+            .arg("mcp")
+            .env("HOME", root("ctl"))
+            .current_dir(root("ctl"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        mcp.stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        String::from_utf8(mcp.wait_with_output().unwrap().stdout).unwrap()
+    })
+    .await
+    .unwrap();
+    let replies: Vec<serde_json::Value> = replies
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 3, "на уведомление не отвечают: {replies:?}");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "ferry");
+    let listed = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        listed.contains("\"win\"") && listed.contains("(код 0)"),
+        "{listed}"
+    );
+    let ran = &replies[2]["result"];
+    assert_eq!(ran["isError"], true);
+    let said = ran["content"][0]["text"].as_str().unwrap();
+    assert!(
+        said.contains("через mcp") && said.ends_with("(код 3)"),
+        "{said}"
+    );
+
     // Нет такого устройства — понятная ошибка.
     let out = ferry(&outside, &["run", "nope", "--", "true"]).await;
     assert_eq!(out.status.code(), Some(1));

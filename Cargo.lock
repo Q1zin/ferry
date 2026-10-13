@@ -1420,6 +1420,7 @@ dependencies = [
 name = "ferry"
 version = "0.1.14"
 dependencies = [
+ "base64 0.22.1",
  "ferry-core",
  "ferry-net",
  "serde_json",
