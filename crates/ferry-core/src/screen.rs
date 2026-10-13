@@ -757,6 +757,17 @@ mod mac {
         Ok(())
     }
 
+    /// Своё окно через Accessibility не трогаем: такой вызов macOS выполняет прямо в нашем
+    /// потоке, а AppKit пускает только главный — приложение падало на `focus` своего окна.
+    fn foreign(pid: i64) -> io::Result<()> {
+        if pid == i64::from(std::process::id()) {
+            return Err(io::Error::other(
+                "это окно самого ferry: ui, --name и focus с ним не работают — открой его из трея",
+            ));
+        }
+        Ok(())
+    }
+
     /// Ключ `CGSSessionScreenIsLocked` в словаре сессии есть, только пока экран заблокирован.
     pub fn locked() -> bool {
         let session = unsafe { CGSessionCopyCurrentDictionary() };
@@ -1292,6 +1303,7 @@ mod mac {
                 .ok_or_else(|| io::Error::other("на экране нет окон"))?,
             _ => super::find_window(&windows, filter)?,
         };
+        foreign(found.pid)?;
         let app = unsafe {
             CFType::wrap_under_create_rule(AXUIElementCreateApplication(found.pid as i32))
         };
@@ -1504,6 +1516,7 @@ mod mac {
     /// сделать приложение активным — окно с другого рабочего стола macOS покажет, перейдя туда.
     /// Готово, когда впереди окно этого приложения.
     pub fn focus(window: &super::Window) -> io::Result<()> {
+        foreign(window.pid)?;
         trusted()?;
         let app = unsafe {
             CFType::wrap_under_create_rule(AXUIElementCreateApplication(window.pid as i32))
@@ -2303,6 +2316,22 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    /// Своё окно — отказ сразу, без Accessibility (иначе — падение AppKit не на главном потоке).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn own_window_is_refused_before_accessibility() {
+        let own = Window {
+            id: 1,
+            process: "ferry".into(),
+            pid: i64::from(std::process::id()),
+            title: "ferry".into(),
+            rect: Some((0, 0, 100, 100)),
+            focused: true,
+        };
+        let err = mac::focus(&own).unwrap_err().to_string();
+        assert!(err.contains("самого ferry"), "{err}");
+    }
+
     #[test]
     fn parses_mac_key_combos() {
         use core_graphics::event::CGEventFlags as F;
