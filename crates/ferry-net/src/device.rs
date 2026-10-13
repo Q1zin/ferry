@@ -438,6 +438,7 @@ fn input_since(args: &[String], os: Option<&str>) -> Option<(&'static str, &'sta
         "click" | "move" if has("--hold") => ("0.1.11", "--hold"),
         "key" if has("--for") => ("0.1.11", "key --for"),
         _ if elements && os == Some("macos") => ("0.1.10", "элементы окон на маке"),
+        "focus" if os == Some("macos") => ("0.1.14", "ferry focus на маке"),
         "focus" => ("0.1.9", "ferry focus"),
         "probe" | "probe-window" => ("0.1.8", "ferry wait"),
         "window" => ("0.1.6", "ferry shot --window"),
@@ -478,6 +479,7 @@ mod tests {
         assert_eq!(since(&["probe", "Ок"], mac), Some("0.1.10"));
         assert_eq!(since(&["probe-window", "app"], mac), Some("0.1.8"));
         assert_eq!(since(&["focus", "app"], win), Some("0.1.9"));
+        assert_eq!(since(&["focus", "app"], mac), Some("0.1.14"));
         assert_eq!(since(&["window", "app"], win), Some("0.1.6"));
         assert_eq!(since(&["click", "1", "2"], mac), None);
         assert_eq!(since(&["drag", "1", "2", "3", "4"], win), Some("0.1.11"));
