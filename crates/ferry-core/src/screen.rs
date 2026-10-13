@@ -96,6 +96,12 @@ pub fn access() -> (bool, bool) {
     mac::access()
 }
 
+/// Заблокирован ли экран мака: тогда ввод уходит на экран входа — в поле пароля.
+#[cfg(target_os = "macos")]
+pub fn locked() -> bool {
+    mac::locked()
+}
+
 /// Попросить доступ: системный запрос (если macOS ещё не спрашивала) и нужный раздел настроек.
 /// `screen` — запись экрана, `input` — «Универсальный доступ».
 #[cfg(target_os = "macos")]
@@ -699,6 +705,7 @@ mod mac {
         fn AXValueGetTypeID() -> CFTypeID;
         fn AXValueGetType(value: CFTypeRef) -> u32;
         fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut std::ffi::c_void) -> bool;
+        fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
     }
 
     pub fn access() -> (bool, bool) {
@@ -732,13 +739,39 @@ mod mac {
             CFString::new("AXTrustedCheckOptionPrompt"),
             CFBoolean::true_value(),
         )]);
-        if unsafe { AXIsProcessTrustedWithOptions(prompt.as_concrete_TypeRef()) } {
-            return Ok(());
+        if !unsafe { AXIsProcessTrustedWithOptions(prompt.as_concrete_TypeRef()) } {
+            return Err(io::Error::other(
+                "ввод на этом маке не пускают: «Системные настройки» → «Конфиденциальность и \
+                 безопасность» → «Универсальный доступ» — включи ferry и повтори",
+            ));
         }
-        Err(io::Error::other(
-            "ввод на этом маке не пускают: «Системные настройки» → «Конфиденциальность и \
-             безопасность» → «Универсальный доступ» — включи ferry и повтори",
-        ))
+        if locked() {
+            return Err(io::Error::other(
+                "экран мака заблокирован — ввод ушёл бы на экран входа, в поле пароля; \
+                 разблокируй мак и повтори",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Ключ `CGSSessionScreenIsLocked` в словаре сессии есть, только пока экран заблокирован.
+    pub fn locked() -> bool {
+        let session = unsafe { CGSessionCopyCurrentDictionary() };
+        if session.is_null() {
+            return false;
+        }
+        let session: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_create_rule(session) };
+        session
+            .find(CFString::new("CGSSessionScreenIsLocked"))
+            .and_then(|v| {
+                v.downcast::<CFBoolean>().map(bool::from).or_else(|| {
+                    v.downcast::<CFNumber>()
+                        .and_then(|n| n.to_i64())
+                        .map(|n| n != 0)
+                })
+            })
+            .unwrap_or(false)
     }
 
     pub fn pixels_per_point() -> f64 {
