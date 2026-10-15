@@ -1,6 +1,7 @@
 //! Сервер локального управления ([`ferry_core::control`]): CLI на этой машине → агент.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ferry_core::control::{Envelope, Request, Response};
@@ -161,9 +162,16 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
             name,
             follow,
         } => {
-            return Ok(Answer::Stream(
-                agent.device(&device)?.log(&name, follow).await?,
-            ));
+            let rx = agent.device(&device)?.log(&name, follow).await?;
+            if !follow {
+                return Ok(Answer::Stream(rx));
+            }
+            let (agent, who) = (agent.clone(), device.clone());
+            let again = move || {
+                let (agent, device, name) = (agent.clone(), device.clone(), name.clone());
+                async move { agent.device(&device)?.log(&name, true).await }
+            };
+            return Ok(Answer::Stream(resume(who, rx, again)));
         }
         Request::Start {
             device,
@@ -288,6 +296,87 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
 
 /// Вывод команды — строками, пока не придёт код выхода или CLI не уйдёт. Ушёл — приёмник
 /// бросается, и устройство останавливает команду.
+/// Сколько ждать, пока устройство вернётся, прежде чем бросить `log -f`.
+const COMEBACK: Duration = Duration::from_secs(15 * 60);
+/// Как часто проверять, вернулось ли.
+const RETRY: Duration = Duration::from_secs(3);
+
+/// `log -f`, который переживает обрыв связи (перезагрузка, сон, смена сети): ждёт, пока
+/// устройство вернётся, и продолжает с того места, где оборвался. `again` открывает лог заново —
+/// с начала, уже отданное пропускается.
+fn resume<F, Fut>(
+    device: String,
+    mut rx: mpsc::Receiver<Output>,
+    mut again: F,
+) -> mpsc::Receiver<Output>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<mpsc::Receiver<Output>, Fail>> + Send,
+{
+    let (tx, out) = mpsc::channel(64);
+    tokio::spawn(async move {
+        let note = |text: String| Output::Err(format!("ferry: {text}\n").into_bytes());
+        let mut sent = 0;
+        loop {
+            let mut skip = sent;
+            loop {
+                let next = tokio::select! {
+                    next = rx.recv() => next,
+                    _ = tx.closed() => return,
+                };
+                let output = match next {
+                    Ok(Some(Output::Out(mut data))) => {
+                        let old = skip.min(data.len());
+                        skip -= old;
+                        data.drain(..old);
+                        if data.is_empty() {
+                            continue;
+                        }
+                        sent += data.len();
+                        Output::Out(data)
+                    }
+                    Ok(Some(output)) => output,
+                    Ok(None) | Err(_) => break,
+                };
+                let last = matches!(output, Output::Exit(_) | Output::Fail(_));
+                if tx.send(output).await.is_err() || last {
+                    return;
+                }
+            }
+            let lost = note(format!("связь с {device} оборвалась — жду, пока вернётся"));
+            if tx.send(lost).await.is_err() {
+                return;
+            }
+            let since = Instant::now();
+            rx = loop {
+                let attempt = tokio::select! {
+                    _ = tx.closed() => return,
+                    attempt = async {
+                        tokio::time::sleep(RETRY).await;
+                        tokio::time::timeout(RETRY * 10, again()).await
+                    } => attempt,
+                };
+                if let Ok(Ok(rx)) = attempt {
+                    break rx;
+                }
+                if since.elapsed() > COMEBACK {
+                    let fail = format!("{device} не вернулось за {} мин", COMEBACK.as_secs() / 60);
+                    tx.send(Output::Fail(Fail::new(fail))).await.ok();
+                    return;
+                }
+            };
+            if tx
+                .send(note(format!("{device} снова на связи — продолжаю")))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    out
+}
+
 async fn stream(mut rx: mpsc::Receiver<Output>, out: &mut Lines, gone: impl Future<Output = ()>) {
     tokio::pin!(gone);
     loop {
@@ -311,3 +400,51 @@ async fn stream(mut rx: mpsc::Receiver<Output>, out: &mut Lines, gone: impl Futu
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn log_follow_resumes_after_the_device_comes_back() {
+        let (tx, first) = mpsc::channel(4);
+        tx.send(Output::Out(b"step 1\nst".to_vec())).await.unwrap();
+        drop(tx);
+        let mut tries = 0;
+        let again = move || {
+            tries += 1;
+            let tries = tries;
+            async move {
+                if tries == 1 {
+                    return Err(Fail::new("ещё не на связи"));
+                }
+                // Лог читается заново с начала, а задача успела дописать.
+                let (tx, rx) = mpsc::channel(4);
+                tx.send(Output::Out(b"step".to_vec())).await.unwrap();
+                tx.send(Output::Out(b" 1\nstep 2\n".to_vec()))
+                    .await
+                    .unwrap();
+                tx.send(Output::Exit(0)).await.unwrap();
+                Ok(rx)
+            }
+        };
+        let mut rx = resume("win".into(), first, again);
+        let mut out = Vec::new();
+        let mut notes = String::new();
+        while let Ok(Some(output)) = rx.recv().await {
+            match output {
+                Output::Out(data) => out.extend(data),
+                Output::Err(data) => notes += &String::from_utf8_lossy(&data),
+                Output::Exit(code) => {
+                    assert_eq!(code, 0);
+                    break;
+                }
+                Output::Fail(fail) => panic!("{fail:?}"),
+            }
+        }
+        assert_eq!(String::from_utf8(out).unwrap(), "step 1\nstep 2\n");
+        assert_eq!(
+            notes,
+            "ferry: связь с win оборвалась — жду, пока вернётся\nferry: win снова на связи — продолжаю\n"
+        );
+    }
+}
