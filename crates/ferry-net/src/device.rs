@@ -69,6 +69,28 @@ impl Device {
         self.client.ask(Kill { name: name.into() }).await
     }
 
+    /// Бронь рабочего стола устройства для сессии `session`.
+    pub async fn desk(&self, session: &str, action: DeskAction) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.16",
+            "бронь рабочего стола",
+        )?;
+        let session = session.into();
+        self.client.ask(Desk { session, action }).await
+    }
+
+    /// Перед действием с окнами — занять стол за `session` (или продлить). Устройство старее
+    /// брони не знает — пускаем как раньше.
+    pub async fn hold(&self, session: &str) -> Reply<()> {
+        if need(&self.name, self.version.as_deref(), "0.1.16", "").is_err() {
+            return Ok(());
+        }
+        let secs = crate::desk::HOLD.as_secs() as u32;
+        self.desk(session, DeskAction::Hold(secs)).await.map(drop)
+    }
+
     /// Падения программ на устройстве: список или разбор самого свежего.
     pub async fn crashes(&self, process: &str, last: bool) -> Reply<String> {
         need(

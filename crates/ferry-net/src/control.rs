@@ -10,7 +10,7 @@ use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedWriteHalf;
 
 use crate::Agent;
-use crate::proto::{Fail, Output};
+use crate::proto::{DeskAction, Fail, Output};
 
 /// Слушать 127.0.0.1 и записать порт и токен в `<dir>/app` (только для владельца).
 pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
@@ -32,8 +32,8 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
             if read.read_line(&mut line).await.is_err() {
                 return;
             }
-            let request = match serde_json::from_str::<Envelope>(&line) {
-                Ok(envelope) if envelope.token == token => envelope.request,
+            let (request, session) = match serde_json::from_str::<Envelope>(&line) {
+                Ok(envelope) if envelope.token == token => (envelope.request, envelope.session),
                 Ok(_) => return out.error(Fail::new("неверный токен")).await,
                 // Чаще всего CLI новее приложения и просит то, чего оно ещё не знает.
                 Err(e) => {
@@ -49,7 +49,7 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
                 let mut byte = [0u8; 1];
                 let _ = read.read(&mut byte).await;
             };
-            handle(&agent, request, &mut out, gone).await;
+            handle(&agent, request, &session, &mut out, gone).await;
         });
     }
 }
@@ -76,8 +76,14 @@ enum Answer {
     Stream(mpsc::Receiver<Output>),
 }
 
-async fn handle(agent: &Agent, request: Request, out: &mut Lines, gone: impl Future<Output = ()>) {
-    match answer(agent, request).await {
+async fn handle(
+    agent: &Agent,
+    request: Request,
+    session: &str,
+    out: &mut Lines,
+    gone: impl Future<Output = ()>,
+) {
+    match answer(agent, request, session).await {
         Ok(Answer::Once(response)) => {
             out.send(&response).await;
         }
@@ -86,7 +92,23 @@ async fn handle(agent: &Agent, request: Request, out: &mut Lines, gone: impl Fut
     }
 }
 
-async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
+/// Ввод, который меняет что-то на рабочем столе устройства: под ним — бронь. Окна, элементы,
+/// текст на экране и чтение буфера только смотрят.
+fn acts(args: &[String]) -> bool {
+    let first = args.first().map_or("", String::as_str);
+    let reads = [
+        "windows",
+        "window",
+        "ui",
+        "text",
+        "probe",
+        "probe-window",
+        "probe-text",
+    ];
+    !(reads.contains(&first) || args == ["clip"])
+}
+
+async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer, Fail> {
     let response = match request {
         Request::State => Response::State(agent.snapshot()),
         Request::OpenPairing => Response::Pairing(agent.open_pairing()),
@@ -128,9 +150,11 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             dir,
             desk,
         } => {
-            return Ok(Answer::Stream(
-                agent.device(&device)?.run(&cmd, dir, desk).await?,
-            ));
+            let device = agent.device(&device)?;
+            if desk {
+                device.hold(session).await?;
+            }
+            return Ok(Answer::Stream(device.run(&cmd, dir, desk).await?));
         }
         Request::Log {
             device,
@@ -146,7 +170,12 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             name,
             cmd,
             dir,
-        } => Response::Message(agent.device(&device)?.start(&name, &cmd, dir).await?),
+        } => {
+            // Задача может открыть окна — она тоже под бронью.
+            let device = agent.device(&device)?;
+            device.hold(session).await?;
+            Response::Message(device.start(&name, &cmd, dir).await?)
+        }
         Request::Jobs { device } => Response::Jobs(agent.device(&device)?.jobs().await?),
         Request::Kill { device, name } => {
             Response::Message(agent.device(&device)?.kill(&name).await?)
@@ -164,7 +193,24 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             Response::Done
         }
         Request::Input { device, args } => {
-            Response::Message(agent.device(&device)?.input(args).await?)
+            let device = agent.device(&device)?;
+            if acts(&args) {
+                device.hold(session).await?;
+            }
+            Response::Message(device.input(args).await?)
+        }
+        Request::Desk {
+            device,
+            action,
+            minutes,
+        } => {
+            let action = match action.as_str() {
+                "take" => DeskAction::Hold(minutes.saturating_mul(60)),
+                "free" => DeskAction::Free,
+                "force" => DeskAction::ForceFree,
+                _ => DeskAction::Show,
+            };
+            Response::Message(agent.device(&device)?.desk(session, action).await?)
         }
         Request::Rec {
             device,
@@ -264,3 +310,4 @@ async fn stream(mut rx: mpsc::Receiver<Output>, out: &mut Lines, gone: impl Futu
         }
     }
 }
+

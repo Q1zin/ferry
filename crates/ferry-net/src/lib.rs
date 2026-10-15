@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod control;
+pub mod desk;
 pub mod device;
 pub mod files;
 pub mod lan;
