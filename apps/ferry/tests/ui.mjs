@@ -8,6 +8,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { dirname, extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { Resvg } from '@resvg/resvg-js'
 import { chromium } from 'playwright-core'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -30,8 +31,30 @@ const snapshot = {
   lan: [{ id: NEW, name: 'office-pc', pairing: true }],
   pairing: null,
 }
+// Экран устройства 1366×768 с меткой: по ней видно, что снимок показан.
+const screen = new Resvg(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="1366" height="768">
+    <rect width="1366" height="768" fill="#1d4f91"/><rect x="221" y="125" width="474" height="531" fill="#fff"/></svg>`,
+).render().asPng()
+
 const fixtures = {
   state: snapshot,
+  detail: {
+    properties: [
+      ['система', 'Майкрософт Windows 10 Корпоративная LTSC (17763)'],
+      ['процессор', 'Intel(R) Pentium(R) CPU B960 @ 2.20GHz, потоков: 2'],
+      ['диск', 'свободно 6,5 из 118,7 ГБ'],
+    ],
+    warnings: ['на диске 6 ГБ — для сборки с CEF мало'],
+  },
+  screenshot: `data:image/png;base64,${Buffer.from(screen).toString('base64')}`,
+  input: '',
+  jobs: [
+    { name: 'app', label: 'работает', ago: '2 мин назад', running: true, cmd: './logarithmica.exe --remote-debugging-port=9322' },
+    { name: 'build', label: 'завершилась, код 0', ago: '9 мин назад', running: false, cmd: 'cargo build' },
+  ],
+  job_log: 'Compiling ferry v0.1.0\nFinished in 41s\n',
+  start_job: 'ferry: задача tests запущена',
   open_pairing: { code: '4821-0937', ticket: `ferry:${snapshot.id}:4821-0937`, seconds_left: 600 },
   pair: { id: NEW, name: 'office-pc', online: true, status: { ...win, name: 'office-pc' }, direct: true, rtt_ms: 3 },
   autostart: true,
@@ -112,13 +135,55 @@ try {
     await page.getByRole('button', { name: 'пульт', exact: true }).click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'set_role'))
     assert.deepEqual((await calls()).find(([c]) => c === 'set_role'), ['set_role', { id: WIN, role: 'console' }])
+    // Свойства — сами, как только устройство на связи.
+    await page.getByText('Pentium').waitFor()
+    await page.getByText('на диске 6 ГБ — для сборки с CEF мало').waitFor()
     await fits('чужое устройство')
     await shot('peer')
 
-    // Устройство не на связи: управлять нечем, но видно почему.
+    // «Экран»: клик по снимку уходит на устройство в пикселях его экрана.
+    await page.getByRole('button', { name: 'Экран', exact: true }).click()
+    const img = page.locator('.frame img')
+    await img.waitFor()
+    await page.waitForFunction(() => document.querySelector('.frame img')?.naturalWidth > 0)
+    const box = await img.boundingBox()
+    await calls()
+    const [cx, cy] = [Math.round(box.x + box.width * 0.5), Math.round(box.y + box.height * 0.25)]
+    const want = [Math.round(((cx - box.x) * 1366) / box.width), Math.round(((cy - box.y) * 768) / box.height)]
+    await page.mouse.click(cx, cy)
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'input'))
+    const [, click] = (await calls()).find(([c]) => c === 'input')
+    assert.equal(click.id, WIN)
+    assert.equal(click.args[0], 'click')
+    assert.ok(Math.abs(click.args[1] - want[0]) <= 1 && Math.abs(click.args[2] - want[1]) <= 1, `клик ${click.args}, ждали ${want}`)
+    await page.getByPlaceholder('Ввести текст на устройстве').fill('Привет')
+    await page.getByRole('button', { name: 'Ввести' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c, a]) => c === 'input' && a.args[0] === 'type'))
+    await fits('экран')
+    await shot('screen')
+
+    // «Задачи»: список, лог, запуск.
+    await page.getByRole('button', { name: 'Задачи', exact: true }).click()
+    await page.getByText('logarithmica.exe').waitFor()
+    await page.getByRole('listitem').filter({ hasText: 'cargo build' }).getByRole('button', { name: 'Лог' }).click()
+    await page.getByText('Finished in 41s').waitFor()
+    await page.getByPlaceholder('имя: app').fill('tests')
+    await page.getByPlaceholder('команда').fill('bun test')
+    await calls()
+    await page.getByRole('button', { name: 'Запустить' }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'start_job'))
+    assert.deepEqual((await calls()).find(([c]) => c === 'start_job'), ['start_job', { id: WIN, name: 'tests', cmd: 'bun test' }])
+    await fits('задачи')
+    await shot('jobs')
+    await page.getByRole('button', { name: 'Обзор', exact: true }).click()
+
+    // Устройство не на связи: управлять нечем, но видно почему — и на вкладках тоже.
     await page.locator('nav .node-link', { hasText: 'win-11' }).click()
     await page.getByText('Не на связи: выключено').waitFor()
     assert.ok(await page.getByRole('button', { name: 'узел', exact: true }).isDisabled())
+    await page.getByRole('button', { name: 'Экран', exact: true }).click()
+    await page.getByText('Устройство не на связи.').waitFor()
+    await page.getByRole('button', { name: 'Обзор', exact: true }).click()
 
     // Это устройство: режим выбирают здесь.
     await page.locator('nav .node-link', { hasText: 'macbook' }).click()
@@ -149,9 +214,9 @@ try {
 
     // Настройки: автозапуск.
     await page.getByRole('button', { name: 'Настройки' }).click()
-    const box = page.getByRole('checkbox')
+    const autostart = page.getByRole('checkbox')
     await page.waitForFunction(() => document.querySelector('input[type=checkbox]')?.checked)
-    await box.click()
+    await autostart.click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'set_autostart'))
     assert.deepEqual((await calls()).find(([c]) => c === 'set_autostart'), ['set_autostart', { on: false }])
     await fits('настройки')

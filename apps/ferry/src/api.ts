@@ -27,6 +27,13 @@ export type LanDevice = { id: string; name: string; pairing: boolean }
 
 export type PairingInfo = { code: string; ticket: string; seconds_left: number }
 
+/// Устройство на странице: это (`id` пуст) или связанное.
+export type DeviceRef = { id: string | null; name: string; online: boolean; status: Status | null }
+
+export type Detail = { properties: [string, string][]; warnings: string[] }
+
+export type JobRow = { name: string; label: string; ago: string; running: boolean; cmd: string }
+
 export type Snapshot = {
   id: string
   me: Status
@@ -47,6 +54,27 @@ export const api = {
   autostart: () => invoke<boolean>('autostart'),
   setAutostart: (on: boolean) => invoke<void>('set_autostart', { on }),
   version: () => invoke<string>('version'),
+  detail: (id: string) => invoke<Detail>('detail', { id }),
+  screenshot: (id: string) => invoke<string>('screenshot', { id }),
+  input: (id: string, args: string[]) => invoke<string>('input', { id, args }),
+  jobs: (id: string) => invoke<JobRow[]>('jobs', { id }),
+  jobLog: (id: string, name: string) => invoke<string>('job_log', { id, name }),
+  startJob: (id: string, name: string, cmd: string) => invoke<string>('start_job', { id, name, cmd }),
+  killJob: (id: string, name: string) => invoke<string>('kill_job', { id, name }),
+  power: (id: string, action: string) => invoke<string>('power', { id, action }),
+}
+
+/// Почему с устройством сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий
+/// стол. Те же правила, что проверяет само устройство.
+export function blocked(d: DeviceRef, desk = false): string {
+  const s = d.status
+  if (!d.online || !s) return 'Устройство не на связи.'
+  if (s.mode === 'paused') return 'Человек за устройством отключил его от других — пока режим не вернут, команды не пройдут.'
+  if (s.role === 'console') return 'Это пульт: команды не принимает. Роль меняется во вкладке «Обзор».'
+  if (desk && s.mode === 'no-desktop') {
+    return 'На устройстве режим «не трогать рабочий стол»: экран и ввод недоступны.'
+  }
+  return ''
 }
 
 export const onState = (cb: (s: Snapshot) => void): Promise<UnlistenFn> =>
