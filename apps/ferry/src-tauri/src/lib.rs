@@ -85,6 +85,112 @@ fn set_autostart(app: AppHandle, on: bool) -> Reply<()> {
     }
 }
 
+/// Связанное устройство на связи — по ключу.
+fn on_line(agent: &Agent, id: &str) -> Reply<ferry_net::Device> {
+    agent.device(id).map_err(err)
+}
+
+/// Свойства устройства: пары «подпись — значение» и предупреждения.
+#[derive(serde::Serialize)]
+struct Detail {
+    properties: Vec<(String, String)>,
+    warnings: Vec<String>,
+}
+
+#[tauri::command]
+async fn detail(agent: State<'_, Agent>, id: String) -> Reply<Detail> {
+    let pairs = on_line(&agent, &id)?.info().await.map_err(err)?;
+    Ok(Detail {
+        properties: ferry_core::info::describe(&pairs),
+        warnings: ferry_core::info::warnings(&pairs),
+    })
+}
+
+/// Снимок экрана устройства как data-URL — показать прямо в окне.
+#[tauri::command]
+async fn screenshot(agent: State<'_, Agent>, id: String) -> Reply<String> {
+    use base64::Engine;
+    let file =
+        ferry_net::files::temp(&ferry_core::ferry_home().map_err(err)?, "png").map_err(err)?;
+    on_line(&agent, &id)?.shot(&file).await.map_err(err)?;
+    let bytes = std::fs::read(&file).map_err(err);
+    let _ = std::fs::remove_file(&file);
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes?)
+    ))
+}
+
+#[tauri::command]
+async fn input(agent: State<'_, Agent>, id: String, args: Vec<String>) -> Reply<String> {
+    on_line(&agent, &id)?.input(args).await.map_err(err)
+}
+
+#[derive(serde::Serialize)]
+struct JobRow {
+    name: String,
+    label: String,
+    ago: String,
+    running: bool,
+    cmd: String,
+}
+
+#[tauri::command]
+async fn jobs(agent: State<'_, Agent>, id: String) -> Reply<Vec<JobRow>> {
+    let jobs = on_line(&agent, &id)?.jobs().await.map_err(err)?;
+    Ok(jobs
+        .into_iter()
+        .map(|job| JobRow {
+            label: job.label(),
+            ago: job.ago(),
+            running: job.running(),
+            name: job.name,
+            cmd: job.cmd,
+        })
+        .collect())
+}
+
+/// Лог задачи целиком (без слежения).
+#[tauri::command]
+async fn job_log(agent: State<'_, Agent>, id: String, name: String) -> Reply<String> {
+    let mut rx = on_line(&agent, &id)?.log(&name, false).await.map_err(err)?;
+    let mut log = Vec::new();
+    while let Ok(Some(output)) = rx.recv().await {
+        match output {
+            ferry_net::proto::Output::Out(data) | ferry_net::proto::Output::Err(data) => {
+                log.extend(data)
+            }
+            ferry_net::proto::Output::Exit(_) => break,
+            ferry_net::proto::Output::Fail(fail) => return Err(fail.message),
+        }
+    }
+    Ok(String::from_utf8_lossy(&log).into_owned())
+}
+
+/// Задача из окна — в доме устройства: проекта у окна нет.
+#[tauri::command]
+async fn start_job(
+    agent: State<'_, Agent>,
+    id: String,
+    name: String,
+    cmd: String,
+) -> Reply<String> {
+    on_line(&agent, &id)?
+        .start(&name, &cmd, ferry_net::Dir::Home)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn kill_job(agent: State<'_, Agent>, id: String, name: String) -> Reply<String> {
+    on_line(&agent, &id)?.kill(&name).await.map_err(err)
+}
+
+#[tauri::command]
+async fn power(agent: State<'_, Agent>, id: String, action: String) -> Reply<String> {
+    on_line(&agent, &id)?.power(&action).await.map_err(err)
+}
+
 #[tauri::command]
 fn version() -> String {
     ferry_core::VERSION.into()
@@ -288,6 +394,14 @@ pub fn run() {
             forget,
             autostart,
             set_autostart,
+            detail,
+            screenshot,
+            input,
+            jobs,
+            job_log,
+            start_job,
+            kill_job,
+            power,
             version
         ])
         .run(tauri::generate_context!())
