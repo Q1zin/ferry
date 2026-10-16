@@ -193,7 +193,9 @@ pub struct DeviceClient(pub(crate) Client<DeviceProtocol>);
 
 /// Связь оборвалась посреди запроса.
 pub(crate) fn lost(e: impl std::fmt::Display) -> Fail {
-    Fail::new(format!("связь с устройством оборвалась: {e}"))
+    Fail::new(format!(
+        "связь с устройством оборвалась — повтори, когда оно снова на связи ({e})"
+    ))
 }
 
 impl DeviceClient {

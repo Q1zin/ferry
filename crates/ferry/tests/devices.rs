@@ -22,6 +22,7 @@ async fn agent(name: &str) -> Agent {
         internet: false,
         lan: false,
         home: home.clone(),
+        port: None,
         ..Options::new(home.join(".ferry"))
     };
     let agent = Agent::start(options).await.unwrap();

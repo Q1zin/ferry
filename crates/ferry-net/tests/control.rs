@@ -13,6 +13,7 @@ async fn cli_talks_to_the_app_with_its_token() {
         internet: false,
         lan: false,
         home: dir.join("home"),
+        port: None,
         ..Options::new(dir.clone())
     })
     .await

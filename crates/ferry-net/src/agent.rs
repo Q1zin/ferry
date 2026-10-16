@@ -42,7 +42,12 @@ pub struct Options {
     pub home: PathBuf,
     /// Бинарник с `job-supervise <имя>` — надсмотрщик фоновых задач: само приложение или `ferry`.
     pub supervisor: PathBuf,
+    /// UDP-порт для соединений; `None` — любой свободный.
+    pub port: Option<u16>,
 }
+
+/// Порт ferry по умолчанию.
+pub const PORT: u16 = 47760;
 
 impl Options {
     pub fn new(dir: PathBuf) -> Options {
@@ -52,6 +57,7 @@ impl Options {
             lan: true,
             home: ferry_core::home().unwrap_or_default(),
             supervisor: std::env::current_exe().unwrap_or_default(),
+            port: Some(PORT),
         }
     }
 }
@@ -87,6 +93,9 @@ struct Live {
     direct: Option<bool>,
     rtt_ms: Option<u32>,
     task: Option<AbortHandle>,
+    /// Когда установлено соединение, через которое идут команды, и оно само.
+    since: Option<std::time::Instant>,
+    conn: Option<Connection>,
 }
 
 /// DNS — через HTTPS (Cloudflare, Google). VPN на любой из сторон бывает, и с ним обычный DNS
@@ -108,23 +117,37 @@ impl Agent {
         let key = store::key(&opts.dir)?;
         let store = Store::load(&opts.dir)?;
         let lookup = MemoryLookup::new();
-        let builder = if opts.internet {
-            Endpoint::builder(presets::N0).dns_resolver(resolver())
-        } else {
-            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
+        let builder = |port: Option<u16>| -> Result<iroh::endpoint::Builder> {
+            let mut builder = if opts.internet {
+                Endpoint::builder(presets::N0).dns_resolver(resolver())
+            } else {
+                Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled)
+            };
+            if let Some(port) = port {
+                builder = builder.bind_addr(("0.0.0.0", port))?;
+            }
+            // Пропавшее устройство (выключили, ушло из сети) видно через 12 с, а не через 30 по
+            // умолчанию: iroh шлёт heartbeat раз в 5 с, один пропуск переживём.
+            let transport = QuicTransportConfig::builder()
+                .max_idle_timeout(Some(Duration::from_secs(12).try_into()?))
+                .build();
+            Ok(builder
+                .transport_config(transport)
+                .secret_key(key.clone())
+                .alpns(vec![proto::ALPN.to_vec(), pair::ALPN.to_vec()])
+                .address_lookup(lookup.clone()))
         };
-        // Пропавшее устройство (выключили, ушло из сети) видно через 12 с, а не через 30 по
-        // умолчанию: iroh шлёт heartbeat раз в 5 с, один пропуск переживём.
-        let transport = QuicTransportConfig::builder()
-            .max_idle_timeout(Some(Duration::from_secs(12).try_into()?))
-            .build();
-        let endpoint = builder
-            .transport_config(transport)
-            .secret_key(key)
-            .alpns(vec![proto::ALPN.to_vec(), pair::ALPN.to_vec()])
-            .address_lookup(lookup.clone())
-            .bind()
-            .await?;
+        // Постоянный порт: перезапущенное устройство оказывается на том же адресе, и другие
+        // сразу снова до него достают — iroh шлёт на путь, который уже знает. Порт занят (второй
+        // экземпляр) — любой свободный.
+        let endpoint = match builder(opts.port)?.bind().await {
+            Ok(endpoint) => endpoint,
+            Err(e) if opts.port.is_some() => {
+                tracing::warn!("порт {:?} занят ({e}) — беру любой", opts.port);
+                builder(None)?.bind().await?
+            }
+            Err(e) => return Err(e.into()),
+        };
 
         let changed = Arc::new(watch::channel(0u64).0);
         let lan = if opts.lan {
@@ -554,6 +577,36 @@ impl Inner {
         live.task = Some(task.abort_handle());
     }
 
+    /// Устройство заново подключилось к нам — значит, оно перезапускалось или меняло сеть, и
+    /// наше соединение к нему, скорее всего, мёртвое: без этого оно числилось бы живым до
+    /// таймаута (12 с), и команды в это время падали бы. Свежее (моложе 5 с) не трогаем — так
+    /// встречные переподключения не ходят по кругу.
+    fn refresh(self: Arc<Self>, id: EndpointId) {
+        {
+            let mut peers = self.peers.lock().unwrap();
+            let Some(live) = peers.get_mut(&id) else {
+                return;
+            };
+            if live
+                .since
+                .is_none_or(|since| since.elapsed() < Duration::from_secs(5))
+            {
+                return;
+            }
+            if let Some(task) = live.task.take() {
+                task.abort();
+            }
+            // Запросы, ушедшие в старое соединение, падают сразу, а не ждут таймаута.
+            if let Some(conn) = live.conn.take() {
+                conn.close(0u32.into(), b"replaced");
+            }
+            live.client = None;
+            live.since = None;
+        }
+        self.notify();
+        self.keep(id);
+    }
+
     async fn watch_peer(&self, id: EndpointId) -> Result<()> {
         let conn = tokio::time::timeout(
             Duration::from_secs(20),
@@ -598,6 +651,8 @@ impl Inner {
             live.status = Some(status);
             if client.is_some() {
                 live.client = client;
+                live.since = Some(std::time::Instant::now());
+                live.conn = Some(conn.clone());
             }
         }
         self.on_path(id, conn);
@@ -634,6 +689,8 @@ impl Inner {
             }
             live.direct = None;
             live.rtt_ms = None;
+            live.since = None;
+            live.conn = None;
         }
         self.notify();
     }
@@ -705,6 +762,7 @@ impl ProtocolHandler for DeviceHandler {
             conn.close(1u32.into(), b"not paired");
             return Ok(());
         }
+        self.0.clone().refresh(conn.remote_id());
         while let Some(msg) = irpc_iroh::read_request::<DeviceProtocol>(&conn).await? {
             tokio::spawn(self.0.clone().handle(msg));
         }
