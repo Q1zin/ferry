@@ -128,7 +128,11 @@ fn key(name: &str) -> Option<Key> {
 pub(crate) fn powershell(name: &str, script: &str) -> io::Result<Command> {
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, script)?;
+    use std::os::windows::process::CommandExt;
     let mut command = Command::new("powershell");
+    // Без своего окна консоли: из приложения (GUI-процесс) оно открылось бы поверх рабочего
+    // стола — и попало бы в собственный снимок.
+    command.creation_flags(crate::desk::CREATE_NO_WINDOW);
     command
         .args([
             "-NoProfile",
