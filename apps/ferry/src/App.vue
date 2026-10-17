@@ -64,6 +64,8 @@ onMounted(async () => {
   }
   perms.value = await api.permissions().catch(() => null)
   if (missing.value) view.value = { kind: 'permissions' }
+  // «Связать устройство…» из трея, когда окна ещё не было (main_window в src-tauri).
+  if ('FERRY_PAIRING' in window) view.value = { kind: 'pairing' }
   // Нет сети или релиза — просто не показываем.
   api.checkUpdate().then(
     (v) => (update.value = v),

@@ -32,3 +32,7 @@ tokio = { version = "1", features = ["time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry", "NSArray"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPanel", "NSWindow", "NSResponder", "NSView", "NSColor", "NSBox", "NSTextField", "NSControl", "NSFont", "NSScreen", "NSGraphics", "NSText"] }

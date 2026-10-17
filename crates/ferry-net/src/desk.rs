@@ -20,10 +20,24 @@ struct Holder {
     until: Instant,
 }
 
+impl Holder {
+    fn who(&self, name: impl Fn(EndpointId) -> String) -> String {
+        match self.session.as_str() {
+            "" => name(self.from),
+            session => format!("{} ({session})", name(self.from)),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Lease(Option<Holder>);
 
 impl Lease {
+    /// Кто держит стол сейчас.
+    pub fn holder(&self, now: Instant, name: impl Fn(EndpointId) -> String) -> Option<String> {
+        self.0.as_ref().filter(|h| h.until > now).map(|h| h.who(name))
+    }
+
     /// Применить действие `session` с устройства `from`. Ответ — для человека; отказ — если стол
     /// держит другой. `name` — как назвать устройство в ответе.
     pub fn apply(
@@ -38,10 +52,7 @@ impl Lease {
             self.0 = None;
         }
         let mine = |h: &Holder| h.from == from && h.session == session;
-        let who = |h: &Holder| match h.session.as_str() {
-            "" => name(h.from),
-            session => format!("{} ({session})", name(h.from)),
-        };
+        let who = |h: &Holder| h.who(&name);
         let left = |h: &Holder| h.until.saturating_duration_since(now).as_secs();
         match (action, &self.0) {
             (DeskAction::Show, None) => Ok("свободен".into()),
@@ -101,6 +112,8 @@ mod tests {
             Ok("свободен".into())
         );
         assert!(lease.apply(mac, "claude:1", hold, t0, name).is_ok());
+        assert_eq!(lease.holder(t0, name).as_deref(), Some("mac (claude:1)"));
+        assert_eq!(lease.holder(t0 + Duration::from_secs(180), name), None);
         // Та же сессия — продлевает; другая сессия того же мака и другое устройство — отказ.
         assert!(
             lease
