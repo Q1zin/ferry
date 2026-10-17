@@ -10,6 +10,7 @@ pub mod lan;
 mod node;
 pub mod pair;
 pub mod proto;
+mod relay;
 pub mod store;
 
 pub use agent::{Agent, Options};

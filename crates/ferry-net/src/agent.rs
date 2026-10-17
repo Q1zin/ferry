@@ -174,7 +174,9 @@ impl Agent {
         };
         let peers: Vec<EndpointId> = store.peers.iter().map(|p| p.id).collect();
         let me = watch::channel(me).0;
+        let relay = Arc::new(crate::relay::Local::default());
         let node = Arc::new(Node {
+            relay: relay.clone(),
             dir: opts.dir.clone(),
             home: opts.home,
             supervisor: opts.supervisor,
@@ -198,6 +200,9 @@ impl Agent {
             .accept(proto::ALPN, DeviceHandler(inner.clone()))
             .accept(pair::ALPN, PairHandler(inner.clone()))
             .spawn();
+        // Вход релея git: сессия `ferry ssh` уходит к устройству, запустившему команду.
+        let clients = inner.clone();
+        tokio::spawn(relay.serve(move |id| clients.client(id).ok()));
         inner.announce();
         for id in peers {
             inner.clone().keep(id);
@@ -712,7 +717,7 @@ impl Inner {
         }
     }
 
-    async fn handle(self: Arc<Self>, msg: DeviceMessage) {
+    async fn handle(self: Arc<Self>, msg: DeviceMessage, from: EndpointId) {
         match msg {
             DeviceMessage::Watch(WithChannels { tx, .. }) => {
                 let mut rx = self.me.subscribe();
@@ -741,7 +746,7 @@ impl Inner {
                     .and_then(|name| self.remote_change(|| self.rename(name)));
                 tx.send(result).await.ok();
             }
-            other => self.node.clone().handle(other).await,
+            other => self.node.clone().handle(other, from).await,
         }
     }
 }
@@ -762,9 +767,10 @@ impl ProtocolHandler for DeviceHandler {
             conn.close(1u32.into(), b"not paired");
             return Ok(());
         }
-        self.0.clone().refresh(conn.remote_id());
+        let from = conn.remote_id();
+        self.0.clone().refresh(from);
         while let Some(msg) = irpc_iroh::read_request::<DeviceProtocol>(&conn).await? {
-            tokio::spawn(self.0.clone().handle(msg));
+            tokio::spawn(self.0.clone().handle(msg, from));
         }
         Ok(())
     }
