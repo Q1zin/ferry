@@ -152,10 +152,12 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
             desk,
         } => {
             let device = agent.device(&device)?;
-            if desk {
-                device.hold(session).await?;
+            if !desk {
+                return Ok(Answer::Stream(device.run(&cmd, dir, false).await?));
             }
-            return Ok(Answer::Stream(device.run(&cmd, dir, desk).await?));
+            device.hold(session).await?;
+            let rx = device.run(&cmd, dir, true).await?;
+            return Ok(Answer::Stream(holding(device, session.into(), rx)));
         }
         Request::Log {
             device,
@@ -296,6 +298,40 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
 
 /// Вывод команды — строками, пока не придёт код выхода или CLI не уйдёт. Ушёл — приёмник
 /// бросается, и устройство останавливает команду.
+/// Пока идёт `run --desk`, бронь продлевается: окна команды (GUI-тесты) — тоже стол, хоть ввода
+/// отсюда и нет.
+fn holding(
+    device: crate::Device,
+    session: String,
+    mut rx: mpsc::Receiver<Output>,
+) -> mpsc::Receiver<Output> {
+    let (tx, out) = mpsc::channel(64);
+    // Отдельной задачей: `recv` удалённого потока нельзя прерывать посреди сообщения.
+    let renew = tokio::spawn(async move {
+        let mut every = tokio::time::interval(crate::desk::HOLD / 3);
+        every.tick().await;
+        loop {
+            every.tick().await;
+            let _ = device.hold(&session).await;
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            let next = tokio::select! {
+                next = rx.recv() => next,
+                _ = tx.closed() => break,
+            };
+            // Обрыв — дальше как без продления: `stream` скажет, что связь оборвалась.
+            let Ok(Some(output)) = next else { break };
+            if tx.send(output).await.is_err() {
+                break;
+            }
+        }
+        renew.abort();
+    });
+    out
+}
+
 /// Сколько ждать, пока устройство вернётся, прежде чем бросить `log -f`.
 const COMEBACK: Duration = Duration::from_secs(15 * 60);
 /// Как часто проверять, вернулось ли.
