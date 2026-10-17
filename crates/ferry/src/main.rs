@@ -3,7 +3,7 @@ use std::io;
 mod devices;
 
 use ferry_core::mode::{self, Mode};
-use ferry_core::{desk, hub, info, jobs, relay, screen};
+use ferry_core::{info, jobs, relay};
 
 const USAGE: &str = "\
 ferry — разработка и тесты на нескольких устройствах: на каждом — приложение ferry, команды
@@ -25,6 +25,8 @@ ferry — разработка и тесты на нескольких устр�
                                     снимок проекта, затем команда в том же подкаталоге
                                     проекта на устройстве; --desk — с окнами (GUI, тесты)
   ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
+  ferry doctor <цели>               готово ли устройство собирать этот проект: инструменты,
+                                    доступ к git-зависимостям, файлы проекта
   ferry start <цели> <имя> [--no-sync] [--] <команда>
                                     фоновая задача (приложение, dev-сервер, сборка): живёт
                                     после вызова, пишет лог; то же имя ещё раз — перезапуск
@@ -42,6 +44,8 @@ ferry — разработка и тесты на нескольких устр�
   ferry info <цели>                 свойства: система, железо, питание, экран, ferry
   ferry power <цели> reboot|sleep|shutdown|cancel
                                     питание (Windows); reboot и shutdown — через 10 с
+  ferry trust [<хост>]              git с хоста на устройствах — через ключи этой машины
+                                    (только чтение); без аргумента — доверенные хосты
 
 Экран устройства (координаты — пиксели снимка ferry shot):
   ferry shot <цели> [файл.png]      снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png)
@@ -56,21 +60,15 @@ ferry — разработка и тесты на нескольких устр�
                                     запись кадрами (5 в секунду) → ~/.ferry/recs/…;
                                     печатает лист-обзор, с ffmpeg здесь — ещё и mp4
 
-Старый путь — узлы по ssh (уйдёт, когда все переедут на приложение):
-  ferry add <узел> <user@адрес> | ls | find <узел> | pause | resume <узел>
-  ferry rename <узел> <имя> | remove <узел> | doctor <узел> | update <узел> <ferry.exe>
-  ferry restart <узел> | mode <узел> | trust [<хост>]
-
 На самой машине:
-  ferry daemon | desk <команда>     демон рабочего стола и команда через него (старый путь)
-  ferry screenshot <файл.png> | record <секунды> <кадр/с> <каталог>
-  ferry input windows | move | click | scroll | type | key …
-  ferry jobs | log <имя> [-f] | kill <имя> | stop | info
+  ferry info                        свойства этой машины (ключ=значение)
   ferry mode [active|no-desktop|paused]
                                     режим: работать, не трогать рабочий стол, отключиться
+  ferry jobs | log <имя> [-f] | kill <имя>
+                                    фоновые задачи этой машины
 
-Служебные: ferry relay — релей git на хабе; на узле — ferry ssh (ssh для git),
-ferry job <имя> <команда> (запуск задачи), ferry job-supervise <имя> (надсмотрщик задачи).
+Служебные: ferry ssh — ssh для git на устройстве (релей), ferry job <имя> <команда> (запуск
+задачи), ferry job-supervise <имя> (надсмотрщик задачи).
 ";
 
 fn main() {
@@ -82,16 +80,9 @@ fn main() {
         ["pair", code] => devices::pair(Some(code)),
         ["role", role] => devices::role(None, role),
         ["role", device, role] => devices::role(Some(device), role),
-        ["add", name, target] => hub::add(name, target),
-        ["ls"] => hub::ls(),
-        ["find", host] => hub::find(host),
-        ["pause", host] => hub::pause(host, true),
-        ["resume", host] => hub::pause(host, false),
-        ["rename", old, new] => hub::rename(old, new),
-        ["remove", host] => hub::remove(host),
-        ["doctor", host] => hub::doctor(host),
         ["info", spec] => devices::info(spec),
         ["sync", spec] => devices::sync(spec),
+        ["doctor", spec] => devices::doctor(spec),
         ["run", spec, rest @ ..] => run(spec, rest),
         ["pull", device] => devices::pull(device),
         ["put", spec, paths @ ..] if !paths.is_empty() => devices::put(spec, paths),
@@ -125,22 +116,9 @@ fn main() {
         ["rec", device, seconds] => devices::rec(device, seconds, "5"),
         ["rec", device, seconds, fps] => devices::rec(device, seconds, fps),
         ["power", spec, action] => devices::power(spec, action),
-        ["update", host, file] => hub::update(host, file),
-        ["restart", host] => said(hub::restart(host)),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
-        ["relay"] => relay::serve(),
         ["ssh", args @ ..] => relay::ssh(args),
-        ["daemon"] => desk::daemon(),
-        // Аргументы склеиваются через пробел и уходят в shell одной строкой, как у ssh.
-        ["desk", cmd @ ..] if !cmd.is_empty() => desk::run(&cmd.join(" ")),
-        ["screenshot", file] => screen::screenshot(file),
-        ["record", seconds, fps, dir] => screen::record(seconds, fps, dir),
-        ["input", rest @ ..] => screen::input(rest).map(|out| {
-            print!("{out}");
-            0
-        }),
-        ["stop"] => desk::stop(),
         ["info"] => info::command(),
         ["version" | "--version"] => {
             println!("ferry {}", ferry_core::VERSION);
@@ -148,7 +126,6 @@ fn main() {
         }
         ["mode"] => mode::command(None),
         ["mode", name] if Mode::parse(name).is_some() => mode::command(Some(name)),
-        ["mode", host] => hub::mode(host),
         ["job", name, cmd @ ..] if !cmd.is_empty() => jobs::start(name, &cmd.join(" ")),
         ["job-supervise", name] => jobs::supervise(name),
         ["jobs"] => jobs::list(false),
@@ -166,8 +143,8 @@ fn main() {
     }
 }
 
-/// `run <узел> [--desk] [--no-sync] [--] <команда>`: флаги — только до команды.
-fn run(host: &str, mut rest: &[&str]) -> io::Result<i32> {
+/// `run <цели> [--desk] [--no-sync] [--] <команда>`: флаги — только до команды.
+fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
     let (mut desk, mut sync) = (false, true);
     loop {
         match rest.first() {
@@ -184,11 +161,11 @@ fn run(host: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    devices::run(host, desk, sync, &rest.join(" "))
+    devices::run(spec, desk, sync, &rest.join(" "))
 }
 
-/// `start <узел> <имя> [--no-sync] [--] <команда>`.
-fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
+/// `start <цели> <имя> [--no-sync] [--] <команда>`.
+fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     let mut sync = true;
     loop {
         match rest.first() {
@@ -204,16 +181,7 @@ fn start(host: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    devices::start(host, name, sync, &rest.join(" "))
-}
-
-/// Ответ действия — в stderr, как остальные сообщения ferry; stdout остаётся для данных.
-fn said(result: io::Result<String>) -> io::Result<i32> {
-    let text = result?;
-    if !text.trim().is_empty() {
-        eprintln!("{}", text.trim_end());
-    }
-    Ok(0)
+    devices::start(spec, name, sync, &rest.join(" "))
 }
 
 fn owned(args: &[&str]) -> Vec<String> {
