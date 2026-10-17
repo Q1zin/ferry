@@ -1,6 +1,6 @@
 // Иконки ferry из исходников: `bun run icons` в apps/ferry.
 // - иконка приложения хаба → src-tauri/icons (все размеры — через `tauri icon`);
-// - иконки трея узла (по режиму, 16–32 px под масштаб экрана) → crates/ferry-core/assets/tray,
+// - иконки трея (по режиму, 16–32 px под масштаб экрана) → src-tauri/icons/tray,
 //   ferry.exe вшивает их в себя.
 import { Resvg } from '@resvg/resvg-js'
 import { execFileSync } from 'node:child_process'
@@ -8,8 +8,8 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const HUB = join(dirname(fileURLToPath(import.meta.url)), '..')
-const TRAY = join(HUB, '../../crates/ferry-core/assets/tray')
+const APP = join(dirname(fileURLToPath(import.meta.url)), '..')
+const TRAY = join(APP, 'src-tauri/icons/tray')
 
 const INK = '#1F2937'
 const CORAL = '#F25C3A'
@@ -55,12 +55,12 @@ const trayIcon = mode => {
 const png = (source, width) =>
   new Resvg(source, { fitTo: { mode: 'width', value: width } }).render().asPng()
 
-const appPng = join(HUB, 'src-tauri/icons/app-icon.png')
+const appPng = join(APP, 'src-tauri/icons/app-icon.png')
 writeFileSync(appPng, png(appIcon, 1024))
-execFileSync('bunx', ['tauri', 'icon', appPng, '-o', join(HUB, 'src-tauri/icons')], { stdio: 'inherit' })
+execFileSync('bunx', ['tauri', 'icon', appPng, '-o', join(APP, 'src-tauri/icons')], { stdio: 'inherit' })
 // Мобильных сборок нет; исходник 1024 px — промежуточный.
 for (const extra of ['android', 'ios', 'app-icon.png']) {
-  rmSync(join(HUB, 'src-tauri/icons', extra), { recursive: true, force: true })
+  rmSync(join(APP, 'src-tauri/icons', extra), { recursive: true, force: true })
 }
 
 mkdirSync(TRAY, { recursive: true })

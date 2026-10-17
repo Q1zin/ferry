@@ -226,11 +226,11 @@ fn show(app: &AppHandle) {
 /// Иконки трея по режиму (`apps/ferry/scripts/icons.mjs`): коралл, фиолетовый, серое кольцо.
 fn tray_icon(mode: Mode) -> tauri::image::Image<'static> {
     let bytes: &[u8] = match mode {
-        Mode::Active => include_bytes!("../../../../crates/ferry-core/assets/tray/active-32.png"),
+        Mode::Active => include_bytes!("../icons/tray/active-32.png"),
         Mode::NoDesktop => {
-            include_bytes!("../../../../crates/ferry-core/assets/tray/no-desktop-32.png")
+            include_bytes!("../icons/tray/no-desktop-32.png")
         }
-        Mode::Paused => include_bytes!("../../../../crates/ferry-core/assets/tray/paused-32.png"),
+        Mode::Paused => include_bytes!("../icons/tray/paused-32.png"),
     };
     tauri::image::Image::from_bytes(bytes).expect("иконка трея — PNG из репозитория")
 }
