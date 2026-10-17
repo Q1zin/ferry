@@ -62,6 +62,8 @@ export const api = {
   startJob: (id: string, name: string, cmd: string) => invoke<string>('start_job', { id, name, cmd }),
   killJob: (id: string, name: string) => invoke<string>('kill_job', { id, name }),
   power: (id: string, action: string) => invoke<string>('power', { id, action }),
+  cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
+  installCli: () => invoke<string>('install_cli'),
 }
 
 /// Почему с устройством сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий

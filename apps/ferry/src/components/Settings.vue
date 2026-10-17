@@ -7,14 +7,28 @@ const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 
 // null — ещё не прочитано: не показывать неверное состояние переключателя.
 const autostart = ref<boolean | null>(null)
+const cli = ref<{ path: string | null; installed: string | null } | null>(null)
+const installing = ref(false)
 
 onMounted(async () => {
   try {
-    autostart.value = await api.autostart()
+    ;[autostart.value, cli.value] = await Promise.all([api.autostart(), api.cli()])
   } catch (e) {
     emit('say', String(e), true)
   }
 })
+
+async function installCli() {
+  installing.value = true
+  try {
+    emit('say', await api.installCli())
+    cli.value = await api.cli()
+  } catch (e) {
+    emit('say', String(e), true)
+  } finally {
+    installing.value = false
+  }
+}
 
 async function toggle() {
   const on = !autostart.value
@@ -39,6 +53,25 @@ async function toggle() {
       <p class="muted small">
         Без этого устройство не на связи, пока ferry не откроют вручную. Окно при этом не появляется — только
         иконка в трее.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3>Команда ferry в терминале</h3>
+      <p class="muted small">
+        Через неё работают Claude и скрипты: <code>ferry run all -- bun test</code>, снимки, ввод, туннели.
+      </p>
+      <template v-if="cli?.path">
+        <p v-if="cli.installed" class="small">Стоит: <code>{{ cli.installed }}</code></p>
+        <div class="row">
+          <button :disabled="installing" :aria-busy="installing" @click="installCli">
+            {{ cli.installed ? 'Переустановить' : 'Поставить команду ferry' }}
+          </button>
+        </div>
+      </template>
+      <p v-else-if="cli" class="muted small">
+        В этой сборке CLI рядом с приложением нет — он едет с установщиком. Из исходников:
+        <code>cargo install --path crates/ferry</code>.
       </p>
     </div>
 
