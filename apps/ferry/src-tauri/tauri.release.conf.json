@@ -1,0 +1,8 @@
+{
+  "build": {
+    "beforeBuildCommand": "bun run build && bun scripts/cli.mjs"
+  },
+  "bundle": {
+    "externalBin": ["binaries/ferry"]
+  }
+}
