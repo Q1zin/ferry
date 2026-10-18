@@ -85,6 +85,7 @@ pub fn supervise(name: &str) -> io::Result<i32> {
         .stderr(log.try_clone()?);
     let code = match command.spawn() {
         Ok(mut child) => {
+            let _tree = crate::desk::Tree::track(child.id());
             fs::write(dir.join("child"), child.id().to_string())?;
             exit_code(child.wait()?)
         }

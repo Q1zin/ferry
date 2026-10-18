@@ -60,10 +60,134 @@ fn shell_path() -> OsString {
     }
 }
 
+/// Дерево процессов команды. На Windows — Job Object `Local\ferry-<pid>`: [`kill_tree`] гасит
+/// его целиком, вместе с процессами, чей родитель уже вышел (их taskkill /t не находит:
+/// вспомогательные процессы CEF, `cmd /c start`). Держать, пока команда работает; вышла сама —
+/// оставшиеся процессы живут дальше, как и без него. На unix то же даёт группа процессов.
+pub struct Tree {
+    #[cfg(windows)]
+    _job: Option<job::Job>,
+}
+
+impl Tree {
+    pub fn track(pid: u32) -> Tree {
+        #[cfg(windows)]
+        return Tree {
+            _job: job::track(pid),
+        };
+        #[cfg(unix)]
+        {
+            let _ = pid;
+            Tree {}
+        }
+    }
+}
+
+#[cfg(windows)]
+mod job {
+    use std::ffi::c_void;
+    use std::ptr::null;
+
+    type Handle = *mut c_void;
+
+    const JOB_OBJECT_TERMINATE: u32 = 0x0008;
+    const PROCESS_SET_QUOTA: u32 = 0x0100;
+    const PROCESS_TERMINATE: u32 = 0x0001;
+    const JOB_OBJECT_BASIC_LIMIT_INFORMATION: i32 = 2;
+    const JOB_OBJECT_LIMIT_BREAKAWAY_OK: u32 = 0x0800;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        per_process_user_time: i64,
+        per_job_user_time: i64,
+        flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_processes: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
+        fn OpenJobObjectW(access: u32, inherit: i32, name: *const u16) -> Handle;
+        fn SetInformationJobObject(job: Handle, class: i32, info: *const c_void, len: u32) -> i32;
+        fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        fn TerminateJobObject(job: Handle, code: u32) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
+        fn CloseHandle(handle: Handle) -> i32;
+    }
+
+    fn name(pid: u32) -> Vec<u16> {
+        format!("Local\\ferry-{pid}")
+            .encode_utf16()
+            .chain([0])
+            .collect()
+    }
+
+    pub struct Job(Handle);
+
+    // Хэндл ядра можно закрыть из любого потока.
+    unsafe impl Send for Job {}
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    pub fn track(pid: u32) -> Option<Job> {
+        unsafe {
+            let job = CreateJobObjectW(null(), name(pid).as_ptr());
+            if job.is_null() {
+                return None;
+            }
+            let job = Job(job);
+            // Кто сам просит выйти из job (так умеет Chromium), пусть выходит, а не падает с
+            // «отказано в доступе»; такие процессы и раньше не гасились.
+            let limits = BasicLimits {
+                flags: JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+                ..Default::default()
+            };
+            let info = (&limits as *const BasicLimits).cast();
+            let size = size_of::<BasicLimits>() as u32;
+            SetInformationJobObject(job.0, JOB_OBJECT_BASIC_LIMIT_INFORMATION, info, size);
+            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            // ponytail: процесс уже идёт; то, что он успел запустить до этой строки, в job не
+            // попадёт. Шеллу на старт нужны десятки миллисекунд — хватает; если не хватит —
+            // запуск с CREATE_SUSPENDED.
+            let assigned = AssignProcessToJobObject(job.0, process) != 0;
+            CloseHandle(process);
+            assigned.then_some(job)
+        }
+    }
+
+    /// Погасить всё дерево команды; `false` — job нет (команда вышла или запущена не так).
+    pub fn terminate(pid: u32) -> bool {
+        unsafe {
+            let job = OpenJobObjectW(JOB_OBJECT_TERMINATE, 0, name(pid).as_ptr());
+            if job.is_null() {
+                return false;
+            }
+            let done = TerminateJobObject(job, 1) != 0;
+            CloseHandle(job);
+            done
+        }
+    }
+}
+
 /// Остановить команду вместе со всем, что она запустила.
-// ponytail: taskkill /t идёт по ссылкам на родителя, поэтому процессы, чей родитель уже
-// вышел, переживут обрыв; если начнут мешать — Job Object с KILL_ON_JOB_CLOSE.
 pub fn kill_tree(pid: u32) -> io::Result<()> {
+    #[cfg(windows)]
+    if job::terminate(pid) {
+        return Ok(());
+    }
     #[cfg(windows)]
     let mut command = {
         use std::os::windows::process::CommandExt;
