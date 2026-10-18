@@ -1,7 +1,8 @@
 // Иконки ferry из исходников: `bun run icons` в apps/ferry.
 // - иконка приложения хаба → src-tauri/icons (все размеры — через `tauri icon`);
 // - иконки трея (по режиму, 16–32 px под масштаб экрана) → src-tauri/icons/tray,
-//   ferry.exe вшивает их в себя.
+//   ferry.exe вшивает их в себя;
+// - обложка репозитория (README и Social preview на GitHub) → .github/social-preview.png.
 import { Resvg } from '@resvg/resvg-js'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -18,19 +19,37 @@ const svg = body => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1
 const line = 'stroke-linecap="round" stroke-linejoin="round" fill="none"'
 
 // Маршрут переправы: от точки (хаб) к кольцу (узел). Поля — по сетке macOS (824 из 1024).
-const appIcon = svg(`<defs>
+const markDefs = `
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="${PAPER}"/><stop offset="1" stop-color="#EBE1D1"/></linearGradient>
     <radialGradient id="glow" cx="0.28" cy="0.18" r="0.85">
-      <stop offset="0" stop-color="#fff" stop-opacity="0.55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>
-  </defs>
+      <stop offset="0" stop-color="#fff" stop-opacity="0.55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>`
+const mark = `
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
   <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
   <g transform="translate(512 512) scale(0.9) translate(-512 -512)">
     <path d="M306 704 C430 704 404 536 512 512 C620 488 594 326 718 326" stroke="${INK}" stroke-width="54" ${line}/>
     <circle cx="306" cy="704" r="64" fill="${INK}"/>
     <circle cx="718" cy="326" r="68" stroke="${CORAL}" stroke-width="50" fill="${PAPER}"/>
-  </g>`)
+  </g>`
+const appIcon = svg(`<defs>${markDefs}</defs>${mark}`)
+
+// Обложка репозитория на GitHub (Settings → Social preview): знак и подпись на 1280×640.
+const font = 'font-family="Helvetica Neue, Arial, sans-serif"'
+const social = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640">
+  <defs>${markDefs}
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EFE7DA"/><stop offset="1" stop-color="#E6DBC8"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="${INK}" flood-opacity="0.18"/></filter>
+  </defs>
+  <rect width="1280" height="640" fill="url(#page)"/>
+  <g transform="translate(96 140) scale(0.352)" filter="url(#shadow)">${mark}</g>
+  <text x="520" y="292" ${font} font-weight="700" font-size="148" letter-spacing="-5" fill="${INK}">ferry</text>
+  <text x="526" y="370" ${font} font-size="38" fill="#4B5563">Разработка и тесты на нескольких</text>
+  <text x="526" y="420" ${font} font-size="38" fill="#4B5563">устройствах сразу</text>
+  <text x="526" y="496" ${font} font-weight="500" font-size="27" fill="${CORAL}">macOS · Windows · CLI для Claude</text>
+</svg>`
 
 // Режим узла — цветом и формой: «не трогать» фиолетовый, как «Не беспокоить» в macOS;
 // пауза — пустое кольцо, чтобы читалось и без цвета.
@@ -70,3 +89,8 @@ for (const mode of Object.keys(modes)) {
   }
 }
 console.log(`трей: ${TRAY}`)
+
+const cover = join(APP, '../../.github/social-preview.png')
+mkdirSync(dirname(cover), { recursive: true })
+writeFileSync(cover, png(social, 1280))
+console.log(`обложка: ${cover}`)
