@@ -74,6 +74,8 @@ ferry — разработка и тесты на нескольких устр�
                                     режим: работать, не трогать рабочий стол, отключиться
   ferry jobs | log <имя> [-f] | kill <имя>
                                     фоновые задачи этой машины
+  ferry skill                       поставить скилл для Claude Code (~/.claude/skills/ferry):
+                                    как работать с устройствами через ferry
 
 Служебные: ferry ssh — ssh для git на устройстве (релей), ferry job <имя> <команда> (запуск
 задачи), ferry job-supervise <имя> (надсмотрщик задачи).
@@ -133,6 +135,7 @@ fn main() {
         ["logs", rest @ ..] => logs(rest),
         ["update"] => devices::update(None),
         ["update", spec] => devices::update(Some(spec)),
+        ["skill"] => skill(),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["ssh", args @ ..] => relay::ssh(args),
@@ -214,6 +217,16 @@ fn logs(rest: &[&str]) -> io::Result<i32> {
         Ok(lines) => devices::logs(spec, lines),
         Err(_) => usage(),
     }
+}
+
+/// `ferry skill`: скилл едет внутри CLI — ставится туда, где его найдёт Claude Code.
+fn skill() -> io::Result<i32> {
+    let dir = ferry_core::home()?.join(".claude/skills/ferry");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("SKILL.md");
+    std::fs::write(&path, include_str!("../../../skills/ferry/SKILL.md"))?;
+    println!("ferry: скилл для Claude Code — {}", path.display());
+    Ok(0)
 }
 
 fn owned(args: &[&str]) -> Vec<String> {
