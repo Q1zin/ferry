@@ -61,6 +61,8 @@ const fixtures = {
   cli: { path: '/Applications/ferry.app/Contents/MacOS/ferry', installed: null },
   install_cli: 'Команда ferry: /opt/homebrew/bin/ferry',
   version: '0.1.0',
+  check_update: '0.1.1',
+  install_update: 'ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
 }
 
 const server = createServer((req, res) => {
@@ -223,6 +225,10 @@ try {
     assert.deepEqual((await calls()).find(([c]) => c === 'set_autostart'), ['set_autostart', { on: false }])
     await page.getByRole('button', { name: 'Поставить команду ferry' }).click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'install_cli'))
+    // Обновление: тихая проверка при запуске уже нашла версию.
+    await page.getByText('Есть ferry 0.1.1').waitFor()
+    await page.getByRole('button', { name: 'Обновить и перезапустить' }).click()
+    await page.getByText('ставлю и перезапускаюсь').waitFor()
     await fits('настройки')
     await shot('settings')
     await page.close()

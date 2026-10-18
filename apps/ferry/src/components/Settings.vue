@@ -2,13 +2,14 @@
 import { onMounted, ref } from 'vue'
 import { api, type Snapshot } from '../api'
 
-defineProps<{ snap: Snapshot }>()
-const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
+const props = defineProps<{ snap: Snapshot; update: string | null }>()
+const emit = defineEmits<{ say: [text: string, error?: boolean]; checked: [version: string | null] }>()
 
 // null — ещё не прочитано: не показывать неверное состояние переключателя.
 const autostart = ref<boolean | null>(null)
 const cli = ref<{ path: string | null; installed: string | null } | null>(null)
 const installing = ref(false)
+const updating = ref(false)
 
 onMounted(async () => {
   try {
@@ -27,6 +28,30 @@ async function installCli() {
     emit('say', String(e), true)
   } finally {
     installing.value = false
+  }
+}
+
+async function checkUpdate() {
+  updating.value = true
+  try {
+    const version = await api.checkUpdate()
+    emit('checked', version)
+    if (!version) emit('say', `ferry ${props.snap.me.version} — последняя версия`)
+  } catch (e) {
+    emit('say', String(e), true)
+  } finally {
+    updating.value = false
+  }
+}
+
+// После ответа приложение перезапускается само: кнопку не возвращаем.
+async function installUpdate() {
+  updating.value = true
+  try {
+    emit('say', await api.installUpdate())
+  } catch (e) {
+    emit('say', String(e), true)
+    updating.value = false
   }
 }
 
@@ -73,6 +98,21 @@ async function toggle() {
         В этой сборке CLI рядом с приложением нет — он едет с установщиком. Из исходников:
         <code>cargo install --path crates/ferry</code>.
       </p>
+    </div>
+
+    <div class="card">
+      <h3>Обновления</h3>
+      <p v-if="update">Есть ferry {{ update }}, здесь — {{ snap.me.version }}.</p>
+      <p class="muted small">
+        Новые версии — из релизов ferry на GitHub. Связанные устройства обновляются отсюда же:
+        <code>ferry update all</code>.
+      </p>
+      <div class="row">
+        <button v-if="update" :disabled="updating" :aria-busy="updating" @click="installUpdate">
+          Обновить и перезапустить
+        </button>
+        <button v-else :disabled="updating" :aria-busy="updating" @click="checkUpdate">Проверить</button>
+      </div>
     </div>
 
     <div class="card">
