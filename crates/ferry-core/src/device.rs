@@ -113,6 +113,23 @@ pub struct Snapshot {
     /// Устройства ferry в локальной сети, ещё не связанные с этим.
     pub lan: Vec<LanDevice>,
     pub pairing: Option<PairingInfo>,
+    /// Что связанные устройства делали на этом, последние — в конце.
+    #[serde(default)]
+    pub activity: Vec<Activity>,
+}
+
+/// Сколько секунд после ввода, снимка или команды с окнами устройство считается управляемым.
+pub const CONTROL_SECS: u64 = 15;
+
+/// Запрос связанного устройства — для журнала человека за этим.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Activity {
+    /// Когда, секунды Unix.
+    pub at: u64,
+    pub who: String,
+    pub what: String,
+    /// Трогает рабочий стол: ввод, снимки, окна.
+    pub desk: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -145,6 +162,16 @@ pub struct PairingInfo {
 }
 
 impl Snapshot {
+    /// Кто управляет этим устройством прямо сейчас: последнее действие на рабочем столе, если
+    /// оно было меньше [`CONTROL_SECS`] назад.
+    pub fn controlled(&self, now: u64) -> Option<&Activity> {
+        self.activity
+            .iter()
+            .rev()
+            .find(|a| a.desk)
+            .filter(|a| now.saturating_sub(a.at) < CONTROL_SECS)
+    }
+
     /// Связанное устройство по имени или началу ключа (от 4 знаков).
     pub fn find(&self, who: &str) -> Result<&PeerView, String> {
         if let Some(peer) = self.peers.iter().find(|p| p.name == who) {
@@ -205,6 +232,7 @@ mod tests {
             peers: vec![peer("c6a00fcf", "win-10"), peer("c6b1aaaa", "win-11")],
             lan: Vec::new(),
             pairing: None,
+            activity: Vec::new(),
         };
         assert_eq!(snap.find("win-11").unwrap().id, "c6b1aaaa");
         assert_eq!(snap.find("c6a0").unwrap().name, "win-10");
@@ -218,6 +246,34 @@ mod tests {
         .find("c6a0")
         .unwrap_err();
         assert!(err.contains("нескольким"), "{err}");
+    }
+
+    #[test]
+    fn controlled_while_desk_actions_are_fresh() {
+        let act = |at, desk| Activity {
+            at,
+            who: "mac".into(),
+            what: "ввод".into(),
+            desk,
+        };
+        let me = Status {
+            name: "win".into(),
+            role: Role::Node,
+            mode: Mode::Active,
+            os: "windows".into(),
+            version: "0.1.3".into(),
+        };
+        let snap = Snapshot {
+            id: "ff".into(),
+            me,
+            peers: Vec::new(),
+            lan: Vec::new(),
+            pairing: None,
+            activity: vec![act(100, true), act(110, false)],
+        };
+        // Сборка после ввода не продлевает управление; ввод — да, пока свежий.
+        assert_eq!(snap.controlled(105).map(|a| a.at), Some(100));
+        assert!(snap.controlled(100 + CONTROL_SECS).is_none());
     }
 
     #[test]

@@ -15,6 +15,8 @@ pub mod store;
 
 pub use agent::{Agent, Options};
 pub use device::Device;
-pub use ferry_core::device::{Dir, Fail, LanDevice, PairingInfo, PeerView, Role, Snapshot, Status};
+pub use ferry_core::device::{
+    Activity, Dir, Fail, LanDevice, PairingInfo, PeerView, Role, Snapshot, Status,
+};
 pub use ferry_core::mode::Mode;
 pub use iroh::EndpointId;

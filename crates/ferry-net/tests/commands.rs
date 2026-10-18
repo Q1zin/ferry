@@ -141,6 +141,32 @@ async fn logs_give_the_tail_of_the_device_app_log() {
 }
 
 #[tokio::test]
+async fn journal_shows_who_did_what_here() {
+    let (a, b) = paired("jr-ctl", "jr-node").await;
+    let node = a.device("jr-node").unwrap();
+    run(&node, "echo hi", Dir::Home, false).await;
+    // Ввод на маке без экрана откажет — в журнал попадает сам запрос, текст — нет.
+    let _ = node.input(vec!["type".into(), "пароль".into()]).await;
+    let journal = b.snapshot().activity;
+    let lines: Vec<_> = journal
+        .iter()
+        .map(|e| (e.who.as_str(), e.what.as_str(), e.desk))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            ("jr-ctl", "команда: echo hi", false),
+            ("jr-ctl", "ввод текста", true)
+        ]
+    );
+    assert!(b.snapshot().controlled(ferry_core::now()).is_some());
+    assert!(
+        a.snapshot().activity.is_empty(),
+        "журнал — только у того, с кем это делали"
+    );
+}
+
+#[tokio::test]
 async fn dropped_caller_stops_the_command() {
     let (a, b) = paired("ctl2", "node2").await;
     let node = a.device("node2").unwrap();
