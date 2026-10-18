@@ -4,7 +4,7 @@
 
 use ferry_net::{Agent, EndpointId, Mode, Options, PairingInfo, PeerView, Role, Snapshot};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::{TrayIcon, TrayIconBuilder};
+use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
@@ -397,9 +397,13 @@ fn tray_icon(mode: Mode) -> tauri::image::Image<'static> {
     tauri::image::Image::from_bytes(bytes).expect("иконка трея — PNG из репозитория")
 }
 
+const TRAY: &str = "ferry";
+
 /// Трей: режим этого устройства — его выбирает человек за ним; открыть окно; выйти.
 struct Tray {
-    icon: TrayIcon,
+    /// Сам значок не держим: владеет им Tauri. Своя копия пережила бы `cleanup_before_exit`
+    /// (выход, установка обновления), и на Windows в трее оставался бы мёртвый значок.
+    app: AppHandle,
     modes: Vec<(Mode, CheckMenuItem<tauri::Wry>)>,
     mode: std::sync::Mutex<Option<Mode>>,
 }
@@ -431,7 +435,7 @@ impl Tray {
             &quit,
         ]);
         let menu = Menu::with_items(app, &items)?;
-        let icon = TrayIconBuilder::with_id("ferry")
+        TrayIconBuilder::with_id(TRAY)
             .icon(tray_icon(Mode::Active))
             .menu(&menu)
             .show_menu_on_left_click(true)
@@ -450,7 +454,7 @@ impl Tray {
             })
             .build(app)?;
         Ok(Tray {
-            icon,
+            app: app.clone(),
             modes,
             mode: std::sync::Mutex::default(),
         })
@@ -458,12 +462,15 @@ impl Tray {
 
     /// Отметка, иконка и подсказка — по текущему режиму и тому, сколько устройств на связи.
     fn update(&self, snapshot: &Snapshot) {
+        let Some(icon) = self.app.tray_by_id(TRAY) else {
+            return;
+        };
         let mode = snapshot.me.mode;
         if self.mode.lock().unwrap().replace(mode) != Some(mode) {
             for (m, item) in &self.modes {
                 let _ = item.set_checked(*m == mode);
             }
-            let _ = self.icon.set_icon(Some(tray_icon(mode)));
+            let _ = icon.set_icon(Some(tray_icon(mode)));
         }
         let online = snapshot.peers.iter().filter(|p| p.online).count();
         let tip = format!(
@@ -472,7 +479,7 @@ impl Tray {
             label(mode),
             snapshot.peers.len()
         );
-        let _ = self.icon.set_tooltip(Some(tip));
+        let _ = icon.set_tooltip(Some(tip));
     }
 }
 
