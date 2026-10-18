@@ -150,6 +150,12 @@ pub struct Tunnel {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Update;
 
+/// Последние `lines` строк лога приложения на устройстве.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Logs {
+    pub lines: usize,
+}
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -169,6 +175,9 @@ pub enum Relay {
     Exit(i32),
 }
 
+/// Совместимость между версиями: новые запросы — только в конец, существующие типы не меняются
+/// (postcard не описывает поля — старое устройство не разберёт изменённый). Новый запрос
+/// отправитель шлёт, только если версия устройства его знает: `Device::need`.
 #[rpc_requests(message = DeviceMessage)]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DeviceProtocol {
@@ -216,6 +225,9 @@ pub enum DeviceProtocol {
     GitSsh(GitSsh),
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     Update(Update),
+    /// С 0.1.3.
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Logs(Logs),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

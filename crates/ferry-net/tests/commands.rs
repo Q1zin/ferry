@@ -116,6 +116,31 @@ async fn update_goes_to_the_devices_own_updater() {
 }
 
 #[tokio::test]
+async fn logs_give_the_tail_of_the_device_app_log() {
+    let (a, b) = paired("logs-ctl", "logs-node").await;
+    let node = a.device("logs-node").unwrap();
+    let fail = node.logs(10).await.unwrap_err();
+    assert!(
+        fail.message.contains("ferry.log"),
+        "лога ещё нет: {}",
+        fail.message
+    );
+
+    let log = ferry_core::app_log(&path("logs-node"));
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    std::fs::write(&log, "one\ntwo\nthree\n").unwrap();
+    assert_eq!(node.logs(2).await.unwrap(), "two\nthree");
+    assert_eq!(
+        a.logs_self(5).unwrap_err().code,
+        1,
+        "у этого устройства лога нет"
+    );
+
+    b.set_mode(Mode::Paused).unwrap();
+    assert_eq!(node.logs(2).await.unwrap_err().code, 75);
+}
+
+#[tokio::test]
 async fn dropped_caller_stops_the_command() {
     let (a, b) = paired("ctl2", "node2").await;
     let node = a.device("node2").unwrap();

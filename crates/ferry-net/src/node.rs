@@ -310,8 +310,32 @@ impl Node {
             DeviceMessage::Update(WithChannels { tx, .. }) => {
                 tx.send(self.update().await).await.ok();
             }
+            DeviceMessage::Logs(WithChannels {
+                tx,
+                inner: Logs { lines },
+                ..
+            }) => {
+                tx.send(self.logs(lines)).await.ok();
+            }
             DeviceMessage::Watch(_) | DeviceMessage::SetRole(_) | DeviceMessage::Rename(_) => {}
         }
+    }
+
+    /// Последние `lines` строк лога приложения. Отключённое устройство не отвечает и на это.
+    pub fn logs(&self, lines: usize) -> Reply<String> {
+        let me = self.me.borrow().clone();
+        if me.mode == Mode::Paused {
+            return Err(Fail::refused(format!(
+                "{} отключён от других устройств",
+                me.name
+            )));
+        }
+        let path = ferry_core::app_log(&self.dir);
+        let text = std::fs::read(&path)
+            .map_err(|e| Fail::new(format!("{}: лог {}: {e}", me.name, path.display())))?;
+        let text = String::from_utf8_lossy(&text);
+        let all: Vec<&str> = text.lines().collect();
+        Ok(all[all.len().saturating_sub(lines)..].join("\n"))
     }
 
     /// Обновить ferry из релиза. Отключённое человеком устройство издалека не трогаем.

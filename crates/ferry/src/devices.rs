@@ -690,6 +690,22 @@ pub fn update(spec: Option<&str>) -> io::Result<i32> {
     }
 }
 
+/// `ferry logs [<цели>] [-n <строк>]`: хвост лога приложения ferry — на устройствах или здесь.
+pub fn logs(spec: Option<&str>, lines: usize) -> io::Result<i32> {
+    let one =
+        |device: Option<String>, printer: &Printer| match ask(Request::Logs { device, lines })? {
+            Response::Message(text) => {
+                printer.out(format!("{text}\n").as_bytes());
+                Ok(0)
+            }
+            _ => Err(unexpected()),
+        };
+    match spec {
+        None => finish(one(None, &Printer::new(None))),
+        Some(spec) => each(spec, |device, printer| one(Some(device.into()), printer)),
+    }
+}
+
 /// `ferry stop <цели>`: снять всё — команды и задачи.
 pub fn stop(spec: &str) -> io::Result<i32> {
     each(spec, |device, printer| {

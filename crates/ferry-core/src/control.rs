@@ -116,6 +116,11 @@ pub enum Request {
     Update {
         device: Option<String>,
     },
+    /// Хвост лога приложения: устройства или (`device` пуст) этой машины.
+    Logs {
+        device: Option<String>,
+        lines: usize,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

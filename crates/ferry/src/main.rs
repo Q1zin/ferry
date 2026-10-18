@@ -46,6 +46,8 @@ ferry — разработка и тесты на нескольких устр�
                                     питание (Windows); reboot и shutdown — через 10 с
   ferry update [<цели>]             обновить ferry из релиза: на устройствах или (без целей)
                                     на этой машине; они перезапустятся и снова выйдут на связь
+  ferry logs [<цели>] [-n <строк>]  лог приложения ferry на устройствах или (без целей) здесь:
+                                    последние строки, по умолчанию 100
   ferry trust [<хост>]              git с хоста на устройствах — через ключи этой машины
                                     (только чтение); без аргумента — доверенные хосты
 
@@ -118,6 +120,7 @@ fn main() {
         ["rec", device, seconds] => devices::rec(device, seconds, "5"),
         ["rec", device, seconds, fps] => devices::rec(device, seconds, fps),
         ["power", spec, action] => devices::power(spec, action),
+        ["logs", rest @ ..] => logs(rest),
         ["update"] => devices::update(None),
         ["update", spec] => devices::update(Some(spec)),
         ["trust"] => relay::trust(None),
@@ -186,6 +189,21 @@ fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
         return usage();
     }
     devices::start(spec, name, sync, &rest.join(" "))
+}
+
+/// `logs [<цели>] [-n <строк>]`.
+fn logs(rest: &[&str]) -> io::Result<i32> {
+    let (spec, lines) = match rest {
+        [] => (None, "100"),
+        ["-n", n] => (None, *n),
+        [spec] => (Some(*spec), "100"),
+        [spec, "-n", n] => (Some(*spec), *n),
+        _ => return usage(),
+    };
+    match lines.parse() {
+        Ok(lines) => devices::logs(spec, lines),
+        Err(_) => usage(),
+    }
 }
 
 fn owned(args: &[&str]) -> Vec<String> {
