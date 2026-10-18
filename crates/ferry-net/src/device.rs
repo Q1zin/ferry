@@ -69,6 +69,14 @@ impl Device {
     }
 
     pub async fn input(&self, args: Vec<String>) -> Reply<String> {
+        if args.first().is_some_and(|a| a == "ui") || args.iter().any(|a| a == "--name") {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.4",
+                "ferry ui и --name",
+            )?;
+        }
         self.client.ask(Input { args }).await
     }
 

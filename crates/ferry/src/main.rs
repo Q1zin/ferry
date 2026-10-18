@@ -54,8 +54,12 @@ ferry — разработка и тесты на нескольких устр�
 Экран устройства (координаты — пиксели снимка ferry shot):
   ferry shot <цели> [файл.png]      снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png)
   ferry windows <устройство>        окна сверху вниз: процесс, место, размер; * — фокус
+  ferry ui <устройство> [<окно>]    элементы окна с фокусом (или по процессу, части заголовка):
+                                    роль, «имя», #id, место — по ним кликать надёжнее
   ferry click <устройство> <x> <y> [right|double]
-  ferry move <устройство> <x> <y>   навести курсор
+  ferry click <устройство> --name <имя> [right|double]
+                                    клик в центр элемента с этим именем в окне с фокусом
+  ferry move <устройство> <x> <y>   навести курсор (или --name <имя>)
   ferry scroll <устройство> <n>     колесо: больше нуля — вверх
   ferry type <устройство> <текст>   ввести текст (юникод, раскладка не важна)
   ferry key <устройство> <комбинация>...
@@ -109,6 +113,9 @@ fn main() {
         ["tunnel", device, port] => devices::tunnel(Some((device, port)), false),
         ["tunnel", device, port, "--close"] => devices::tunnel(Some((device, port)), true),
         ["windows", device] => devices::input(device, owned(&["windows"])),
+        ["ui", device, window @ ..] => {
+            devices::input(device, owned(&[&["ui"][..], window].concat()))
+        }
         ["move", device, x, y] => devices::input(device, owned(&["move", x, y])),
         ["click", device, x, y, how @ ..] => {
             devices::input(device, owned(&[&["click", *x, *y][..], how].concat()))
