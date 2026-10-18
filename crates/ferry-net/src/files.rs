@@ -39,18 +39,33 @@ pub async fn send_file(path: &Path, tx: &mpsc::Sender<Chunk>) -> Result<(), Fail
 }
 
 /// Принять файл кусками в `path`.
+/// Сначала во временный файл рядом: отказ или обрыв — прежний файл цел (последний удачный
+/// снимок экрана), огрызка не остаётся.
 pub async fn recv_file(rx: &mut mpsc::Receiver<Chunk>, path: &Path) -> Result<(), Fail> {
-    let mut file = tokio::fs::File::create(path).await?;
-    loop {
-        match rx.recv().await.map_err(crate::proto::lost)? {
-            Some(Chunk::Data(data)) => file.write_all(&data).await?,
-            Some(Chunk::End) => break,
-            Some(Chunk::Fail(fail)) => return Err(fail),
-            None => return Err(Fail::new("передача оборвалась")),
+    let mut part = path.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let received = async {
+        let mut file = tokio::fs::File::create(&part).await?;
+        loop {
+            match rx.recv().await.map_err(crate::proto::lost)? {
+                Some(Chunk::Data(data)) => file.write_all(&data).await?,
+                Some(Chunk::End) => break,
+                Some(Chunk::Fail(fail)) => return Err(fail),
+                None => return Err(Fail::new("передача оборвалась")),
+            }
+        }
+        file.flush().await?;
+        Ok(())
+    }
+    .await;
+    match received {
+        Ok(()) => Ok(tokio::fs::rename(&part, path).await?),
+        Err(fail) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            Err(fail)
         }
     }
-    file.flush().await?;
-    Ok(())
 }
 
 /// Ответ потоком: ошибка — последним куском.
@@ -127,6 +142,29 @@ mod tests {
             "<h1>ok</h1>"
         );
         assert_eq!(fs::read_to_string(root.join("out/.env")).unwrap(), "KEY=1");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn refused_transfer_keeps_the_previous_file() {
+        let root = std::env::temp_dir().join(format!("ferry-recv-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let shot = root.join("win-10.png");
+        fs::write(&shot, "old shot").unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Chunk::Data(b"partial".to_vec())).await.unwrap();
+        tx.send(Chunk::Fail(Fail::new("нет доступа к экрану")))
+            .await
+            .unwrap();
+        assert!(recv_file(&mut rx, &shot).await.is_err());
+        assert_eq!(fs::read_to_string(&shot).unwrap(), "old shot");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "без .part");
+
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(Chunk::Data(b"new shot".to_vec())).await.unwrap();
+        tx.send(Chunk::End).await.unwrap();
+        recv_file(&mut rx, &shot).await.unwrap();
+        assert_eq!(fs::read_to_string(&shot).unwrap(), "new shot");
         let _ = fs::remove_dir_all(&root);
     }
 }
