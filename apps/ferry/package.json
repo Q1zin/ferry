@@ -10,8 +10,9 @@
     "tauri": "tauri",
     "icons": "bun scripts/icons.mjs",
     "test:ui": "node tests/ui.mjs",
-    "release:mac": "tauri build --config src-tauri/tauri.release.conf.json --bundles dmg",
-    "release:windows": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-pc-windows-gnu --bundles nsis"
+    "release:mac": "tauri build --config src-tauri/tauri.release.conf.json --bundles app,dmg",
+    "release:windows": "tauri build --config src-tauri/tauri.release.conf.json --target x86_64-pc-windows-gnu --bundles nsis",
+    "release:files": "bun scripts/release.mjs"
   },
   "dependencies": {
     "vue": "^3.5.13",
