@@ -230,6 +230,8 @@ async fn cli_drives_devices_through_the_app() {
     );
     let out = ferry_as("a", &outside, &["run", "win", "--desk", "--", "echo a"]).await;
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // Рамка управления: команда кончилась, но рамка ещё горит — и от действия, а не от брони.
+    assert_eq!(win.acting().as_deref(), Some("ctl"));
     let out = ferry_as("b", &outside, &["run", "win", "--desk", "--", "echo b"]).await;
     assert_eq!(out.status.code(), Some(75), "{}", text(&out.stderr));
     let said = text(&out.stderr);

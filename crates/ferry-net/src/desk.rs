@@ -33,11 +33,6 @@ impl Holder {
 pub struct Lease(Option<Holder>);
 
 impl Lease {
-    /// Кто держит стол сейчас.
-    pub fn holder(&self, now: Instant, name: impl Fn(EndpointId) -> String) -> Option<String> {
-        self.0.as_ref().filter(|h| h.until > now).map(|h| h.who(name))
-    }
-
     /// Применить действие `session` с устройства `from`. Ответ — для человека; отказ — если стол
     /// держит другой. `name` — как назвать устройство в ответе.
     pub fn apply(
@@ -86,6 +81,35 @@ impl Lease {
     }
 }
 
+/// Сколько рамка управления горит после конца последнего действия.
+pub const GRACE: Duration = Duration::from_secs(10);
+
+/// Кто сейчас действует на рабочем столе — для рамки управления. Она горит, пока действие идёт
+/// (ввод, снимок, `run --desk` до конца команды), и ещё [`GRACE`] после; бронь на неё не влияет —
+/// забытый `take` не держит рамку.
+#[derive(Debug, Default)]
+pub struct Acting {
+    now: Vec<String>,
+    last: Option<(Instant, String)>,
+}
+
+impl Acting {
+    pub fn start(&mut self, who: String) {
+        self.now.push(who);
+    }
+
+    pub fn finish(&mut self, who: &str, at: Instant) {
+        if let Some(i) = self.now.iter().position(|w| w == who) {
+            self.last = Some((at, self.now.remove(i)));
+        }
+    }
+
+    pub fn who(&self, now: Instant) -> Option<String> {
+        let recent = self.last.as_ref().filter(|(at, _)| now < *at + GRACE);
+        self.now.last().or(recent.map(|(_, who)| who)).cloned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,8 +136,6 @@ mod tests {
             Ok("свободен".into())
         );
         assert!(lease.apply(mac, "claude:1", hold, t0, name).is_ok());
-        assert_eq!(lease.holder(t0, name).as_deref(), Some("mac (claude:1)"));
-        assert_eq!(lease.holder(t0 + Duration::from_secs(180), name), None);
         // Та же сессия — продлевает; другая сессия того же мака и другое устройство — отказ.
         assert!(
             lease
@@ -178,5 +200,30 @@ mod tests {
                 .apply(win, "", hold, t0 + Duration::from_secs(304), name)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn frame_lasts_while_acting_and_a_bit_after() {
+        let t0 = Instant::now();
+        let mut acting = Acting::default();
+        assert_eq!(acting.who(t0), None);
+        acting.start("mac".into());
+        acting.start("win".into());
+        // Пока действие идёт — сколько угодно долго.
+        assert_eq!(
+            acting.who(t0 + Duration::from_secs(600)).as_deref(),
+            Some("win")
+        );
+        acting.finish("win", t0 + Duration::from_secs(600));
+        assert_eq!(
+            acting.who(t0 + Duration::from_secs(700)).as_deref(),
+            Some("mac")
+        );
+        acting.finish("mac", t0 + Duration::from_secs(700));
+        assert_eq!(
+            acting.who(t0 + Duration::from_secs(709)).as_deref(),
+            Some("mac")
+        );
+        assert_eq!(acting.who(t0 + Duration::from_secs(710)), None);
     }
 }
