@@ -146,6 +146,10 @@ pub struct Tunnel {
     pub port: u16,
 }
 
+/// Обновить ferry на устройстве из релиза; ответ — что будет (новая версия или «уже последняя»).
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Update;
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -210,6 +214,8 @@ pub enum DeviceProtocol {
     /// stdin кусками; пустой кусок — конец stdin.
     #[rpc(tx = mpsc::Sender<Relay>, rx = mpsc::Receiver<Vec<u8>>)]
     GitSsh(GitSsh),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Update(Update),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

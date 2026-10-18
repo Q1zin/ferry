@@ -679,6 +679,17 @@ pub fn power(spec: &str, action: &str) -> io::Result<i32> {
     })
 }
 
+/// `ferry update [<цели>]`: обновить ferry из релиза — на устройствах или на этой машине. Они
+/// перезапустятся и снова выйдут на связь.
+pub fn update(spec: Option<&str>) -> io::Result<i32> {
+    let one =
+        |device: Option<String>, printer: &Printer| said(ask(Request::Update { device })?, printer);
+    match spec {
+        None => finish(one(None, &Printer::new(None))),
+        Some(spec) => each(spec, |device, printer| one(Some(device.into()), printer)),
+    }
+}
+
 /// `ferry stop <цели>`: снять всё — команды и задачи.
 pub fn stop(spec: &str) -> io::Result<i32> {
     each(spec, |device, printer| {

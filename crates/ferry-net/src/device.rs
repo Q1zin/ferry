@@ -78,6 +78,11 @@ impl Device {
             .await
     }
 
+    /// Обновить ferry на устройстве из релиза; оно перезапустится и снова выйдет на связь.
+    pub async fn update(&self) -> Reply<String> {
+        self.client.ask(Update).await
+    }
+
     pub async fn stop(&self) -> Reply<String> {
         self.client.ask(Stop).await
     }

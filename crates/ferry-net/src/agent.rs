@@ -44,7 +44,13 @@ pub struct Options {
     pub supervisor: PathBuf,
     /// UDP-порт для соединений; `None` — любой свободный.
     pub port: Option<u16>,
+    /// Обновить ferry на этом устройстве из релиза (умеет приложение): ответ — что будет; само
+    /// обновление и перезапуск — после ответа.
+    pub update: Option<UpdateHook>,
 }
+
+pub type UpdateHook =
+    Arc<dyn Fn() -> n0_future::boxed::BoxFuture<Result<String, String>> + Send + Sync>;
 
 /// Порт ferry по умолчанию.
 pub const PORT: u16 = 47760;
@@ -58,6 +64,7 @@ impl Options {
             home: ferry_core::home().unwrap_or_default(),
             supervisor: std::env::current_exe().unwrap_or_default(),
             port: Some(PORT),
+            update: None,
         }
     }
 }
@@ -177,6 +184,7 @@ impl Agent {
         let relay = Arc::new(crate::relay::Local::default());
         let node = Arc::new(Node {
             relay: relay.clone(),
+            update: opts.update.clone(),
             dir: opts.dir.clone(),
             home: opts.home,
             supervisor: opts.supervisor,
@@ -453,6 +461,11 @@ impl Agent {
     /// Открытые туннели: устройство и порт.
     pub fn tunnels(&self) -> Vec<(String, u16)> {
         self.inner.tunnels.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Обновить ferry на этом устройстве (`ferry update` без целей).
+    pub async fn update_self(&self) -> Result<String, Fail> {
+        self.inner.node.update().await
     }
 
     pub async fn shutdown(&self) {
