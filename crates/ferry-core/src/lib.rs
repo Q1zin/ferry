@@ -33,6 +33,13 @@ pub fn ferry_home() -> io::Result<PathBuf> {
     Ok(home()?.join(".ferry"))
 }
 
+/// Сейчас, секунды Unix.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Лог приложения ferry в `~/.ferry`: `ferry logs` читает его хвост, в том числе издалека.
 pub fn app_log(dir: &Path) -> PathBuf {
     dir.join("logs").join("ferry.log")
