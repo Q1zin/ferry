@@ -285,9 +285,14 @@ fn said(response: Response, printer: &Printer) -> Result<i32, Fail> {
 // --- Команды ---------------------------------------------------------------------------------
 
 /// `ferry devices`: это устройство и связанные.
-pub fn list() -> io::Result<i32> {
+pub fn list(json: bool) -> io::Result<i32> {
     finish(state().map(|snap| {
-        print!("{}", table(&snap));
+        if json {
+            let view = serde_json::json!({ "id": snap.id, "me": snap.me, "peers": snap.peers });
+            println!("{view}");
+        } else {
+            print!("{}", table(&snap));
+        }
         0
     }))
 }
@@ -466,7 +471,8 @@ pub fn start(spec: &str, name: &str, sync: bool, cmd: &str) -> io::Result<i32> {
 }
 
 /// `ferry jobs <цели>`.
-pub fn jobs(spec: &str) -> io::Result<i32> {
+/// `--json` — строка JSON на устройство, без подписи `[устройство]`: её разбирают построчно.
+pub fn jobs(spec: &str, json: bool) -> io::Result<i32> {
     each(spec, |device, printer| {
         let Response::Jobs(jobs) = ask(Request::Jobs {
             device: device.into(),
@@ -474,6 +480,10 @@ pub fn jobs(spec: &str) -> io::Result<i32> {
         else {
             return Err(unexpected());
         };
+        if json {
+            println!("{}", serde_json::json!({ "device": device, "jobs": jobs }));
+            return Ok(0);
+        }
         if jobs.is_empty() {
             printer.line("ferry: задач нет", true);
         }
@@ -636,13 +646,15 @@ pub fn rec(device: &str, seconds: &str, fps: &str) -> io::Result<i32> {
             String::new()
         };
         eprintln!("ferry: {frames} кадров в {}{video}", dest.display());
-        println!("{}", dest.join("sheet.png").display());
+        // Лист-обзор собирает Windows; с мака — только кадры.
+        let sheet = dest.join("sheet.png");
+        println!("{}", if sheet.exists() { &sheet } else { &dest }.display());
         Ok(0)
     })())
 }
 
 /// `ferry info <цели>`: свойства и предупреждения.
-pub fn info(spec: &str) -> io::Result<i32> {
+pub fn info(spec: &str, json: bool) -> io::Result<i32> {
     each(spec, |device, printer| {
         let Response::Info(pairs) = ask(Request::Info {
             device: device.into(),
@@ -650,6 +662,18 @@ pub fn info(spec: &str) -> io::Result<i32> {
         else {
             return Err(unexpected());
         };
+        if json {
+            let info: serde_json::Map<_, _> = pairs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone().into()))
+                .collect();
+            let warnings = ferry_core::info::warnings(&pairs);
+            println!(
+                "{}",
+                serde_json::json!({ "device": device, "info": info, "warnings": warnings })
+            );
+            return Ok(0);
+        }
         let shown = ferry_core::info::describe(&pairs);
         let width = shown
             .iter()

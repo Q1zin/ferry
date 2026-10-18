@@ -10,7 +10,7 @@ ferry — разработка и тесты на нескольких устр�
 идут отсюда через приложение на этой машине
 
 Устройства:
-  ferry devices                     это устройство и связанные: на связи ли, путь, роль, режим
+  ferry devices [--json]            это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят
   ferry pair <код|ссылка>           связать с устройством, которое показало код
   ferry role [<устройство>] <роль>  роль этого или связанного устройства:
@@ -30,7 +30,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry start <цели> <имя> [--no-sync] [--] <команда>
                                     фоновая задача (приложение, dev-сервер, сборка): живёт
                                     после вызова, пишет лог; то же имя ещё раз — перезапуск
-  ferry jobs <цели>                 задачи: работает, код выхода, когда запущена
+  ferry jobs <цели> [--json]        задачи: работает, код выхода, когда запущена
   ferry log <устройство> <имя> [-f] лог задачи; -f — следить до конца и выйти с её кодом
   ferry kill <цели> <имя>           остановить задачу
   ferry stop <цели>                 снять всё: команды и задачи
@@ -41,7 +41,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry tunnel [<устройство> <порт>] [--close]
                                     127.0.0.1:<порт> здесь → <порт> устройства (CDP,
                                     dev-сервер); без аргументов — открытые туннели
-  ferry info <цели>                 свойства: система, железо, питание, экран, ferry
+  ferry info <цели> [--json]        свойства: система, железо, питание, экран, ferry
   ferry power <цели> reboot|sleep|shutdown|cancel
                                     питание (Windows); reboot и shutdown — через 10 с
   ferry update [<цели>]             обновить ferry из релиза: на устройствах или (без целей)
@@ -79,12 +79,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
-        ["devices"] => devices::list(),
+        ["devices"] => devices::list(false),
+        ["devices", "--json"] => devices::list(true),
         ["pair"] => devices::pair(None),
         ["pair", code] => devices::pair(Some(code)),
         ["role", role] => devices::role(None, role),
         ["role", device, role] => devices::role(Some(device), role),
-        ["info", spec] => devices::info(spec),
+        ["info", spec] => devices::info(spec, false),
+        ["info", spec, "--json"] => devices::info(spec, true),
         ["sync", spec] => devices::sync(spec),
         ["doctor", spec] => devices::doctor(spec),
         ["run", spec, rest @ ..] => run(spec, rest),
@@ -98,7 +100,8 @@ fn main() {
         ["start", spec, name, rest @ ..] => start(spec, name, rest),
         // Раньше `jobs <цели>`: иначе `--tsv` приняли бы за имя устройства.
         ["jobs", "--tsv"] => jobs::list(true),
-        ["jobs", spec] => devices::jobs(spec),
+        ["jobs", spec, "--json"] => devices::jobs(spec, true),
+        ["jobs", spec] => devices::jobs(spec, false),
         ["log", device, name] if *name != "-f" => devices::log(device, name, false),
         ["log", device, name, "-f"] => devices::log(device, name, true),
         ["kill", spec, name] => devices::kill(spec, name),

@@ -1422,6 +1422,7 @@ version = "0.1.4"
 dependencies = [
  "ferry-core",
  "ferry-net",
+ "serde_json",
  "tokio",
 ]
 
