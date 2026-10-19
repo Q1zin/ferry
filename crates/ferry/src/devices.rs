@@ -603,12 +603,18 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
                 Some(region)
             }
         };
-        match region {
-            None => ask(Request::Shot {
+        match (&area, region) {
+            (Area::Screen, _) | (_, None) => ask(Request::Shot {
                 device: device.into(),
                 file: path.clone(),
             })?,
-            Some(area) => ask(Request::ShotArea {
+            // Окно — само окно, даже закрытое другими; место нужно только для координат.
+            (Area::Window(name), Some(_)) => ask(Request::ShotWindow {
+                device: device.into(),
+                file: path.clone(),
+                name: (*name).into(),
+            })?,
+            (Area::Region(_), Some(area)) => ask(Request::ShotArea {
                 device: device.into(),
                 file: path.clone(),
                 area,

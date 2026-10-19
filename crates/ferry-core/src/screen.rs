@@ -151,6 +151,8 @@ pub fn input(args: &[&str]) -> io::Result<String> {
 
 /// Окно для `windows` и поиска по имени: место — в пикселях снимка, `None` — свёрнуто.
 struct Window {
+    /// Чем ОС снимает именно это окно: HWND на Windows, номер окна на маке.
+    id: i64,
     process: String,
     pid: i64,
     title: String,
@@ -176,24 +178,81 @@ fn table(windows: &[Window]) -> String {
     table
 }
 
-/// Место самого верхнего видимого окна: по имени процесса (без учёта регистра, можно без .exe)
-/// или по части заголовка. Ответ — `x y ширина высота` в пикселях снимка.
-fn window_rect(windows: &[Window], name: &str) -> io::Result<String> {
+/// Самое верхнее несвёрнутое окно: по имени процесса (без учёта регистра, можно без .exe) или
+/// по части заголовка. Его место — `rect`, всегда есть.
+fn find_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
     let want = name.to_lowercase();
     let bare = |p: &str| p.trim_end_matches(".exe").to_string();
     windows
         .iter()
-        .filter_map(|w| w.rect.map(|rect| (w, rect)))
-        .find(|(w, _)| {
+        .filter(|w| w.rect.is_some())
+        .find(|w| {
             let process = w.process.to_lowercase();
             bare(&process) == bare(&want) || w.title.to_lowercase().contains(&want)
         })
-        .map(|(_, (x, y, width, height))| format!("{x} {y} {width} {height}\n"))
         .ok_or_else(|| {
             io::Error::other(format!(
                 "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
             ))
         })
+}
+
+/// Место окна — `x y ширина высота` в пикселях снимка.
+fn window_rect(windows: &[Window], name: &str) -> io::Result<String> {
+    let (x, y, width, height) = find_window(windows, name)?.rect.unwrap_or_default();
+    Ok(format!("{x} {y} {width} {height}\n"))
+}
+
+/// Снимок самого окна — даже закрытого другими окнами (в отличие от области экрана).
+pub fn screenshot_window(file: &str, name: &str) -> io::Result<i32> {
+    let file = std::path::absolute(file)?;
+    let windows = os::windows()?;
+    let window = find_window(&windows, name)?;
+    #[cfg(target_os = "macos")]
+    {
+        // -o — без тени: размер снимка совпадает с местом окна.
+        let status = Command::new("screencapture")
+            .args(["-x", "-o", &format!("-l{}", window.id)])
+            .arg(file)
+            .status()?;
+        Ok(exit_code(status))
+    }
+    #[cfg(windows)]
+    {
+        // PrintWindow с PW_RENDERFULLCONTENT: окно рисует себя в наш bitmap, так снимаются и
+        // закрытые окна, и Chromium.
+        let script = r#"
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class FerryWindow {
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
+}
+'@
+[FerryWindow]::SetProcessDPIAware() | Out-Null
+Add-Type -AssemblyName System.Drawing
+$bmp = New-Object System.Drawing.Bitmap ([int]$args[2]), ([int]$args[3])
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$dc = $g.GetHdc()
+$ok = [FerryWindow]::PrintWindow([IntPtr][long]$args[1], $dc, 2)
+$g.ReleaseHdc($dc)
+if (-not $ok) { [Console]::Error.WriteLine('окно не дало себя снять (PrintWindow)'); exit 2 }
+$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+"#;
+        let (_, _, width, height) = window.rect.unwrap_or_default();
+        let status = powershell("ferry-screenshot-window.ps1", script)?
+            .arg(file)
+            .args([window.id.to_string(), width.to_string(), height.to_string()])
+            .status()?;
+        Ok(exit_code(status))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (file, window);
+        Err(io::Error::other(
+            "снимок экрана есть только на Windows и macOS",
+        ))
+    }
 }
 
 const MOUSE_LEFT_DOWN: u32 = 0x0002;
@@ -422,7 +481,7 @@ mod mac {
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
         kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowName,
-        kCGWindowOwnerName, kCGWindowOwnerPID,
+        kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
     };
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -718,6 +777,7 @@ mod mac {
             };
             let px = |v: f64| (v * k).round() as i64;
             windows.push(super::Window {
+                id: number(unsafe { kCGWindowNumber }).unwrap_or_default(),
                 process: text(unsafe { kCGWindowOwnerName }),
                 pid: number(unsafe { kCGWindowOwnerPID }).unwrap_or_default(),
                 title: text(unsafe { kCGWindowName }),
@@ -996,6 +1056,7 @@ mod win {
             unsafe { GetWindowThreadProcessId(window, &mut pid) };
             let minimized = unsafe { IsIconic(window) } != 0;
             windows.push(super::Window {
+                id: window as i64,
                 process: names.get(&pid).cloned().unwrap_or_else(|| "?".into()),
                 pid: i64::from(pid),
                 title: String::from_utf16_lossy(&title[..len as usize]),
@@ -1169,6 +1230,7 @@ mod tests {
     #[test]
     fn finds_windows_by_process_or_title() {
         let window = |process: &str, title: &str, rect, focused| Window {
+            id: 1,
             process: process.into(),
             pid: 7,
             title: title.into(),

@@ -928,6 +928,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
         },
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
         DeviceMessage::ShotArea(_) => ("снимок части экрана".into(), true),
+        DeviceMessage::ShotWindow(m) => (format!("снимок окна {}", m.inner.name), true),
         DeviceMessage::Rec(m) => (format!("запись экрана, {} с", m.inner.seconds), true),
         DeviceMessage::Power(m) => (format!("питание: {}", m.inner.action), false),
         DeviceMessage::SyncApply(m) => (format!("снимок проекта {}", m.inner.project), false),
