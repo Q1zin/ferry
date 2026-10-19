@@ -653,16 +653,20 @@ pub enum Wait<'a> {
 /// `ferry wait`: опрашивать устройство, пока окно или элемент не появится (или не исчезнет с
 /// `gone`). Появилось — место на stdout (`x y [ширина высота]`), код 0; не дождался — код 1.
 pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Result<i32> {
-    let (args, label) = match what {
+    // Глагол — по роду: окно появилось, элемент появился.
+    let (args, label, [appeared, vanished]) = match what {
         Wait::Window(name) => (
             vec!["probe-window".to_string(), name.into()],
             format!("окно «{name}»"),
+            ["появилось", "исчезло"],
         ),
         Wait::Name(name) => (
             vec!["probe".to_string(), name.into()],
             format!("элемент «{name}»"),
+            ["появился", "исчез"],
         ),
     };
+    let verb = if gone { vanished } else { appeared };
     let start = std::time::Instant::now();
     loop {
         let answer = ask(Request::Input {
@@ -684,21 +688,11 @@ pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Resu
             if let Some(place) = answer.strip_prefix("found ") {
                 println!("{place}");
             }
-            let what = if gone {
-                "исчезло"
-            } else {
-                "появилось"
-            };
-            eprintln!("ferry: {label} {what} за {took:.1} с");
+            eprintln!("ferry: {label} {verb} за {took:.1} с");
             return Ok(0);
         }
         if start.elapsed() >= timeout {
-            let what = if gone {
-                "не исчезло"
-            } else {
-                "не появилось"
-            };
-            eprintln!("ferry: {label} {what} за {} с", timeout.as_secs());
+            eprintln!("ferry: {label} не {verb} за {} с", timeout.as_secs());
             return Ok(1);
         }
         std::thread::sleep(Duration::from_millis(500));
