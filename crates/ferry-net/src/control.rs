@@ -220,6 +220,11 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             device: Some(device),
             lines,
         } => Response::Message(agent.device(&device)?.logs(lines).await?),
+        Request::Crashes {
+            device,
+            process,
+            last,
+        } => Response::Message(agent.device(&device)?.crashes(&process, last).await?),
         Request::PortOpen { device, port } => {
             Response::Flag(agent.device(&device)?.port_open(port).await?)
         }

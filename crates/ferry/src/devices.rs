@@ -427,6 +427,24 @@ pub fn role(device: Option<&str>, role: &str) -> io::Result<i32> {
     })())
 }
 
+/// `ferry crashes <устройство> [программа] [--last]`: падения на устройстве — в stdout.
+pub fn crashes(device: &str, process: &str, last: bool) -> io::Result<i32> {
+    finish((|| {
+        let request = Request::Crashes {
+            device: device.into(),
+            process: process.into(),
+            last,
+        };
+        match ask(request)? {
+            Response::Message(text) => {
+                print!("{text}");
+                Ok(0)
+            }
+            _ => Err(unexpected()),
+        }
+    })())
+}
+
 /// `ferry forget <устройство>`: забыть связанное — только на этом устройстве.
 pub fn forget(device: &str) -> io::Result<i32> {
     finish((|| {

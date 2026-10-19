@@ -354,6 +354,16 @@ impl Node {
             DeviceMessage::Peers(WithChannels { tx, .. }) => {
                 tx.send(()).await.ok();
             }
+            DeviceMessage::Crashes(WithChannels { inner, tx, .. }) => {
+                let result = match self.check(false) {
+                    Ok(()) => {
+                        blocking(move || ferry_core::crashes::report(&inner.process, inner.last))
+                            .await
+                    }
+                    Err(fail) => Err(fail),
+                };
+                tx.send(result).await.ok();
+            }
             DeviceMessage::PortOpen(WithChannels { inner, tx, .. }) => {
                 let result = match self.check(false) {
                     Ok(()) => Ok(local(inner.port).await.is_some()),

@@ -373,11 +373,12 @@ fn read(dir: &Path, file: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn ago(secs: u64) -> String {
+pub(crate) fn ago(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs} с назад"),
         60..3600 => format!("{} мин назад", secs / 60),
-        _ => format!("{} ч назад", secs / 3600),
+        3600..172_800 => format!("{} ч назад", secs / 3600),
+        _ => format!("{} дн назад", secs / 86_400),
     }
 }
 
