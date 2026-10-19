@@ -659,48 +659,63 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
     })
 }
 
-/// Чего ждать: окна (процесс или часть заголовка) или элемента окна с фокусом (имя или #id).
+/// Чего ждать: окна (процесс или часть заголовка), элемента окна с фокусом (имя или #id),
+/// открытого порта или текста в логе задачи.
+#[derive(Clone, Copy)]
 pub enum Wait<'a> {
     Window(&'a str),
     Name(&'a str),
+    Port(u16),
+    Log { job: &'a str, text: &'a str },
 }
 
-/// `ferry wait`: опрашивать устройство, пока окно или элемент не появится (или не исчезнет с
-/// `gone`). Появилось — место на stdout (`x y [ширина высота]`), код 0; не дождался — код 1.
+/// `ferry wait`: опрашивать устройство, пока окно, элемент или порт не появится (или не исчезнет
+/// с `gone`), либо читать лог задачи, пока в нём не появится текст. Появилось — место или строку
+/// лога на stdout, код 0; не дождался — код 1.
 pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Result<i32> {
-    // Глагол — по роду: окно появилось, элемент появился.
-    let (args, label, [appeared, vanished]) = match what {
-        Wait::Window(name) => (
-            vec!["probe-window".to_string(), name.into()],
-            format!("окно «{name}»"),
-            ["появилось", "исчезло"],
-        ),
-        Wait::Name(name) => (
-            vec!["probe".to_string(), name.into()],
-            format!("элемент «{name}»"),
-            ["появился", "исчез"],
-        ),
+    let input = |args: [&str; 2]| Request::Input {
+        device: device.into(),
+        args: args.map(String::from).to_vec(),
+    };
+    // Глагол — по роду: окно появилось, элемент появился, порт открылся.
+    let (label, [appeared, vanished]) = match what {
+        Wait::Log { job, text } => return wait_log(device, job, text, timeout),
+        Wait::Window(name) => (format!("окно «{name}»"), ["появилось", "исчезло"]),
+        Wait::Name(name) => (format!("элемент «{name}»"), ["появился", "исчез"]),
+        Wait::Port(port) => (format!("порт {port}"), ["открылся", "закрылся"]),
+    };
+    let request = || match what {
+        Wait::Window(name) => input(["probe-window", name]),
+        Wait::Name(name) => input(["probe", name]),
+        Wait::Port(port) => Request::PortOpen {
+            device: device.into(),
+            port,
+        },
+        Wait::Log { .. } => unreachable!("лог читается потоком"),
     };
     let verb = if gone { vanished } else { appeared };
     let start = std::time::Instant::now();
     loop {
-        let answer = ask(Request::Input {
-            device: device.into(),
-            args: args.clone(),
-        })
-        .and_then(|response| match response {
-            Response::Message(text) => Ok(text.trim().to_string()),
+        // Есть ли сейчас и где: у окна и элемента — `found x y …`; несколько элементов — тоже
+        // «есть».
+        let answer = ask(request()).and_then(|response| match response {
+            Response::Message(text) => {
+                let text = text.trim();
+                Ok((
+                    text != "none",
+                    text.strip_prefix("found ").map(String::from),
+                ))
+            }
+            Response::Flag(open) => Ok((open, None)),
             _ => Err(unexpected()),
         });
-        let answer = match answer {
+        let (present, place) = match answer {
             Ok(answer) => answer,
             Err(fail) => return finish(Err(fail)),
         };
-        // Несколько подходящих элементов — тоже «есть».
-        let present = answer != "none";
         if present != gone {
             let took = start.elapsed().as_secs_f64();
-            if let Some(place) = answer.strip_prefix("found ") {
+            if let Some(place) = place {
                 println!("{place}");
             }
             eprintln!("ferry: {label} {verb} за {took:.1} с");
@@ -712,6 +727,125 @@ pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Resu
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Чем кончилось чтение лога: нашлась строка или задача вышла раньше.
+enum Seen {
+    Line(String),
+    Exited(i32),
+}
+
+/// `ferry wait --log`: лог задачи потоком, как `ferry log -f`, пока в нём не появится `text`.
+/// Он может уже быть в логе — тогда сразу.
+fn wait_log(device: &str, job: &str, text: &str, timeout: Duration) -> io::Result<i32> {
+    let start = std::time::Instant::now();
+    let request = Request::Log {
+        device: device.into(),
+        name: job.into(),
+        follow: true,
+    };
+    let mut matcher = LogMatch::new(text);
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Поток ответа блокирующий — ждём его в своём потоке, чтобы уйти по таймауту.
+    std::thread::spawn(move || {
+        let seen = (|| {
+            for response in control::open(request)? {
+                match response? {
+                    Response::Out(data) | Response::Err(data) => {
+                        if let Some(line) = matcher.feed(&data) {
+                            return Ok(Seen::Line(line));
+                        }
+                    }
+                    Response::Exit(code) => return Ok(Seen::Exited(code)),
+                    Response::Error(fail) => return Err(fail),
+                    _ => return Err(unexpected()),
+                }
+            }
+            Err(Fail::new("приложение оборвало ответ"))
+        })();
+        let _ = tx.send(seen);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(Seen::Line(line))) => {
+            println!("{line}");
+            let took = start.elapsed().as_secs_f64();
+            eprintln!("ferry: «{text}» в логе задачи {job} — за {took:.1} с");
+            Ok(0)
+        }
+        Ok(Ok(Seen::Exited(code))) => {
+            eprintln!("ferry: задача {job} завершилась (код {code}), а «{text}» в её логе нет");
+            Ok(1)
+        }
+        Ok(Err(fail)) => finish(Err(fail)),
+        Err(_) => {
+            eprintln!(
+                "ferry: «{text}» не появилось в логе задачи {job} за {} с",
+                timeout.as_secs()
+            );
+            Ok(1)
+        }
+    }
+}
+
+/// Поиск текста в логе, который приходит кусками. Строка копится до перевода строки — так
+/// найдётся и текст, разрезанный между кусками; цветовые коды терминала и `\r` не мешают.
+/// Нашёлся — вся строка (или её начало, если строка ещё не кончилась: приглашение без `\n`).
+struct LogMatch {
+    want: String,
+    line: Vec<u8>,
+}
+
+impl LogMatch {
+    fn new(want: &str) -> LogMatch {
+        LogMatch {
+            want: want.into(),
+            line: Vec::new(),
+        }
+    }
+
+    fn feed(&mut self, data: &[u8]) -> Option<String> {
+        for &byte in data {
+            if byte == b'\n' {
+                if let Some(line) = self.check() {
+                    return Some(line);
+                }
+                self.line.clear();
+            } else {
+                self.line.push(byte);
+            }
+        }
+        // Строка без конца и без нужного текста — не копить её бесконечно.
+        if self.line.len() > 1 << 20 {
+            self.line.drain(..self.line.len() - (1 << 16));
+        }
+        self.check()
+    }
+
+    fn check(&self) -> Option<String> {
+        let text = String::from_utf8_lossy(&self.line);
+        let plain = without_colors(text.trim_end_matches('\r'));
+        plain.contains(&self.want).then_some(plain)
+    }
+}
+
+/// Строка без управляющих последовательностей терминала (`ESC [ … буква`).
+fn without_colors(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Окна и ввод: `windows`, `click`, `move`, `scroll`, `type`, `key`.
@@ -1005,6 +1139,45 @@ pub fn tunnel(target: Option<(&str, &str)>, close: bool) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_match_finds_text_across_chunks() {
+        let mut log = LogMatch::new("ready on");
+        assert_eq!(log.feed(b"building...\nserver rea"), None);
+        assert_eq!(
+            log.feed(b"dy on :4242\nmore\n").as_deref(),
+            Some("server ready on :4242"),
+            "текст разрезан между кусками"
+        );
+
+        // Windows: \r\n; цвет терминала внутри текста; строка без перевода в конце.
+        let mut log = LogMatch::new("Local: http");
+        assert_eq!(
+            log.feed(b"  \x1b[32mLocal\x1b[39m: http://localhost:5173/\r\n")
+                .as_deref(),
+            Some("  Local: http://localhost:5173/")
+        );
+        let mut log = LogMatch::new("password:");
+        assert_eq!(
+            log.feed(b"enter password:").as_deref(),
+            Some("enter password:")
+        );
+
+        let mut log = LogMatch::new("ready");
+        assert_eq!(log.feed(b"not yet\nstill not\n"), None);
+        assert_eq!(
+            log.feed(&vec![b'x'; 3 << 20]),
+            None,
+            "длинная строка не копится вся"
+        );
+        assert!(log.line.len() <= 1 << 20);
+        assert_eq!(
+            log.feed(b" ready\n")
+                .as_deref()
+                .map(|l| l.ends_with(" ready")),
+            Some(true)
+        );
+    }
     use ferry_core::device::Status;
     use ferry_core::mode::Mode;
 

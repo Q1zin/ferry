@@ -69,6 +69,17 @@ impl Device {
         self.client.ask(Kill { name: name.into() }).await
     }
 
+    /// Слушает ли кто-нибудь `port` на устройстве.
+    pub async fn port_open(&self, port: u16) -> Reply<bool> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.11",
+            "ferry wait --port",
+        )?;
+        self.client.ask(PortOpen { port }).await
+    }
+
     pub async fn input(&self, args: Vec<String>) -> Reply<String> {
         if let Some((since, what)) = input_since(&args, self.os.as_deref()) {
             need(&self.name, self.version.as_deref(), since, what)?;

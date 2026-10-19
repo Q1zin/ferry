@@ -137,6 +137,11 @@ pub enum Request {
     Forget {
         device: String,
     },
+    /// Слушает ли кто-нибудь `port` на устройстве.
+    PortOpen {
+        device: String,
+        port: u16,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -159,6 +164,8 @@ pub enum Response {
     /// Что легло на диск.
     Files(Vec<String>),
     Tunnels(Vec<(String, u16)>),
+    /// Да или нет: порт открыт.
+    Flag(bool),
 }
 
 impl Response {
