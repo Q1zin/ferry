@@ -8,7 +8,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ferry_core::control::{self, Request, Response};
 use ferry_core::device::{Dir, Fail, PeerView, Role, Snapshot};
@@ -632,6 +632,67 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
         }
         Ok(0)
     })
+}
+
+/// Чего ждать: окна (процесс или часть заголовка) или элемента окна с фокусом (имя или #id).
+pub enum Wait<'a> {
+    Window(&'a str),
+    Name(&'a str),
+}
+
+/// `ferry wait`: опрашивать устройство, пока окно или элемент не появится (или не исчезнет с
+/// `gone`). Появилось — место на stdout (`x y [ширина высота]`), код 0; не дождался — код 1.
+pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Result<i32> {
+    let (args, label) = match what {
+        Wait::Window(name) => (
+            vec!["probe-window".to_string(), name.into()],
+            format!("окно «{name}»"),
+        ),
+        Wait::Name(name) => (
+            vec!["probe".to_string(), name.into()],
+            format!("элемент «{name}»"),
+        ),
+    };
+    let start = std::time::Instant::now();
+    loop {
+        let answer = ask(Request::Input {
+            device: device.into(),
+            args: args.clone(),
+        })
+        .and_then(|response| match response {
+            Response::Message(text) => Ok(text.trim().to_string()),
+            _ => Err(unexpected()),
+        });
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(fail) => return finish(Err(fail)),
+        };
+        // Несколько подходящих элементов — тоже «есть».
+        let present = answer != "none";
+        if present != gone {
+            let took = start.elapsed().as_secs_f64();
+            if let Some(place) = answer.strip_prefix("found ") {
+                println!("{place}");
+            }
+            let what = if gone {
+                "исчезло"
+            } else {
+                "появилось"
+            };
+            eprintln!("ferry: {label} {what} за {took:.1} с");
+            return Ok(0);
+        }
+        if start.elapsed() >= timeout {
+            let what = if gone {
+                "не исчезло"
+            } else {
+                "не появилось"
+            };
+            eprintln!("ferry: {label} {what} за {} с", timeout.as_secs());
+            return Ok(1);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Окна и ввод: `windows`, `click`, `move`, `scroll`, `type`, `key`.

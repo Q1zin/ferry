@@ -56,6 +56,8 @@ ferry shot win-10 --window app           # само окно, даже закр�
                                          #   для click прибавь к точке начало окна (ferry его печатает),
                                          #   а клик попадёт в верхнее окно — закрытое сначала выведи вперёд
 ferry click win-10 458 390 [right|double]  # координаты — пиксели снимка
+ferry wait win-10 --window "Сохранить как"   # ждать окно вместо sleep; --gone — пока не закроется
+ferry wait win-10 --name "Готово" --timeout 60   # ждать элемент (Windows); печатает его место
 ferry type win-10 'текст'                # юникодом, раскладка не важна
 ferry key win-10 ctrl+s enter alt+f4
 ferry rec win-10 6                       # 6 с кадрами → лист-обзор (анимации, мигание)

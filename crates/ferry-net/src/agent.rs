@@ -923,7 +923,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
         // Набранный текст в журнал и лог не пишем: там бывают пароли тестовых входов.
         DeviceMessage::Input(m) => match m.inner.args.first().map(String::as_str) {
             Some("type") => ("ввод текста".into(), true),
-            Some("windows" | "window" | "ui") => return None,
+            Some("windows" | "window" | "ui" | "probe" | "probe-window") => return None,
             _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
         },
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),

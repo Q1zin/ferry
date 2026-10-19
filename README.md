@@ -83,6 +83,8 @@ ferry scroll win-10 -3                   # колесо: больше нуля �
 ferry type win-10 'Привет, мир'          # юникодом: раскладка не важна
 ferry key win-10 ctrl+a delete alt+f4    # комбинации по порядку
 ferry shot win-10 --window notepad       # само окно (процесс или часть заголовка), даже закрытое другими
+ferry wait win-10 --window "Сохранить как"   # ждать окно (или --gone — пока не закроется), до 30 с
+ferry wait win-10 --name "Готово" --timeout 60   # ждать элемент окна с фокусом (Windows)
 ferry shot win-10 --region 0,0,800,600   # область x,y,ширина,высота
 ferry rec win-10 6 [4]                   # 6 с по 4 кадра → ~/.ferry/recs/<устройство>-<время>/
 ```
