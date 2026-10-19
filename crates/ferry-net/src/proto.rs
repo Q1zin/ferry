@@ -169,10 +169,10 @@ pub struct Logs {
     pub lines: usize,
 }
 
-/// Кого знает отправитель (ключ, имя, когда связали) и кого забыли (ключ, когда): получатель
-/// сводит это со своим списком — по каждому устройству побеждает то, что новее. Так связанное
-/// однажды устройство знакомится со всеми, а забытое на одном забывают все.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+/// Только в 0.1.9: списки связанных устройств для знакомства всех со всеми. Знакомство убрано
+/// — связь только та, что настроили сами; запрос принимают и ничего не делают. Вариант остаётся
+/// на своём месте: иначе следующий новый запрос получил бы его номер.
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Peers {
     pub known: Vec<(EndpointId, String, u64)>,
     pub forgotten: Vec<(EndpointId, u64)>,
@@ -256,7 +256,7 @@ pub enum DeviceProtocol {
     /// С 0.1.7.
     #[rpc(tx = mpsc::Sender<Chunk>)]
     ShotWindow(ShotWindow),
-    /// С 0.1.9.
+    /// Только 0.1.9, теперь игнорируется.
     #[rpc(tx = oneshot::Sender<()>)]
     Peers(Peers),
 }
@@ -287,10 +287,6 @@ impl DeviceClient {
 
     pub async fn rename(&self, name: String) -> anyhow::Result<()> {
         self.0.rpc(Rename(name)).await?.map_err(anyhow::Error::msg)
-    }
-
-    pub async fn peers(&self, peers: Peers) -> irpc::Result<()> {
-        self.0.rpc(peers).await
     }
 
     /// Разовый запрос: ответ устройства или ошибка связи.

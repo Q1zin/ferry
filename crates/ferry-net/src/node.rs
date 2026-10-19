@@ -349,10 +349,10 @@ impl Node {
             }) => {
                 tx.send(self.logs(lines)).await.ok();
             }
-            DeviceMessage::Watch(_)
-            | DeviceMessage::SetRole(_)
-            | DeviceMessage::Rename(_)
-            | DeviceMessage::Peers(_) => {}
+            DeviceMessage::Watch(_) | DeviceMessage::SetRole(_) | DeviceMessage::Rename(_) => {}
+            DeviceMessage::Peers(WithChannels { tx, .. }) => {
+                tx.send(()).await.ok();
+            }
         }
     }
 
