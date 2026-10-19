@@ -220,6 +220,14 @@ async fn answer(agent: &Agent, request: Request) -> Result<Answer, Fail> {
             device: Some(device),
             lines,
         } => Response::Message(agent.device(&device)?.logs(lines).await?),
+        Request::Forget { device } => {
+            let snapshot = agent.snapshot();
+            let id = snapshot.find(&device).map_err(Fail::new)?.id.parse();
+            agent
+                .forget(id.map_err(Fail::new)?)
+                .map_err(|e| Fail::new(format!("{e:#}")))?;
+            Response::Done
+        }
     };
     Ok(Answer::Once(Box::new(response)))
 }

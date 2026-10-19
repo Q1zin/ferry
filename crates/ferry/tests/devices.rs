@@ -261,4 +261,13 @@ async fn cli_drives_devices_through_the_app() {
         "{}",
         text(&out.stderr)
     );
+
+    // forget — только здесь: mac пропал из списка, win остался, сам mac об этом не знает.
+    let out = ferry(&outside, &["forget", "mac"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let names: Vec<String> = ctl.snapshot().peers.into_iter().map(|p| p.name).collect();
+    assert_eq!(names, ["win"]);
+    assert_eq!(mac.snapshot().peers.len(), 1);
+    let out = ferry(&outside, &["forget", "mac"]).await;
+    assert_eq!(out.status.code(), Some(1), "второй раз — нет такого");
 }

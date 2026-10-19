@@ -423,6 +423,17 @@ pub fn role(device: Option<&str>, role: &str) -> io::Result<i32> {
     })())
 }
 
+/// `ferry forget <устройство>`: забыть связанное — только на этом устройстве.
+pub fn forget(device: &str) -> io::Result<i32> {
+    finish((|| {
+        ask(Request::Forget {
+            device: device.into(),
+        })?;
+        println!("{device}: забыто на этом устройстве");
+        Ok(0)
+    })())
+}
+
 /// `ferry run <цели> [--desk] [--no-sync] -- <команда>`: снимок проекта на цели, затем команда
 /// в том же подкаталоге проекта (или в доме, если мы не в репозитории).
 pub fn run(spec: &str, desk: bool, sync: bool, cmd: &str) -> io::Result<i32> {
