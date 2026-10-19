@@ -52,7 +52,10 @@ ferry — разработка и тесты на нескольких устр�
                                     (только чтение); без аргумента — доверенные хосты
 
 Экран устройства (координаты — пиксели снимка ferry shot):
-  ferry shot <цели> [файл.png]      снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png)
+  ferry shot <цели> [файл.png] [--window <окно> | --region x,y,ширина,высота]
+                                    снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png);
+                                    --window — только окно (процесс или часть заголовка), --region —
+                                    область; печатает, что прибавить к точке на снимке для click
   ferry windows <устройство>        окна сверху вниз: процесс, место, размер; * — фокус
   ferry ui <устройство> [<окно>]    элементы окна с фокусом (или по процессу, части заголовка):
                                     роль, «имя», #id, место — по ним кликать надёжнее
@@ -100,8 +103,7 @@ fn main() {
         ["put", spec, paths @ ..] if !paths.is_empty() => devices::put(spec, paths),
         ["get", device, path] => devices::get(device, path, None),
         ["get", device, path, dest] => devices::get(device, path, Some(dest)),
-        ["shot", spec] => devices::shot(spec, None),
-        ["shot", spec, file] => devices::shot(spec, Some(file)),
+        ["shot", spec, rest @ ..] => shot(spec, rest),
         ["stop", spec] => devices::stop(spec),
         ["start", spec, name, rest @ ..] => start(spec, name, rest),
         // Раньше `jobs <цели>`: иначе `--tsv` приняли бы за имя устройства.
@@ -202,6 +204,36 @@ fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
         return usage();
     }
     devices::start(spec, name, sync, &rest.join(" "))
+}
+
+/// `shot <цели> [файл.png] [--window <окно>] [--region x,y,ширина,высота]`.
+fn shot(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
+    let (mut file, mut area) = (None, devices::Area::Screen);
+    while let Some((first, tail)) = rest.split_first() {
+        match (*first, tail) {
+            ("--window", [name, tail @ ..]) => {
+                area = devices::Area::Window(name);
+                rest = tail;
+            }
+            ("--region", [region, tail @ ..]) => {
+                let numbers: Vec<i32> = region
+                    .split(',')
+                    .filter_map(|n| n.trim().parse().ok())
+                    .collect();
+                let Ok(region) = numbers.try_into() else {
+                    return usage();
+                };
+                area = devices::Area::Region(region);
+                rest = tail;
+            }
+            (path, tail) if file.is_none() && !path.starts_with("--") => {
+                file = Some(path);
+                rest = tail;
+            }
+            _ => return usage(),
+        }
+    }
+    devices::shot(spec, file, area)
 }
 
 /// `logs [<цели>] [-n <строк>]`.

@@ -17,6 +17,62 @@ pub fn screenshot(file: &str) -> io::Result<i32> {
     Ok(exit_code(screenshot_command()?.arg(file).status()?))
 }
 
+/// Снимок области экрана: `x y ширина высота` в пикселях снимка — окно или часть экрана.
+pub fn screenshot_area(file: &str, area: [i32; 4]) -> io::Result<i32> {
+    let file = std::path::absolute(file)?;
+    let [x, y, width, height] = area;
+    if width <= 0 || height <= 0 {
+        return Err(io::Error::other(
+            "у области нужны ширина и высота больше нуля",
+        ));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // screencapture -R ждёт точки, а координаты — пиксели снимка.
+        let k = mac::pixels_per_point();
+        let points = |v: i32| (f64::from(v) / k).round() as i64;
+        let region = format!(
+            "{},{},{},{}",
+            points(x),
+            points(y),
+            points(width),
+            points(height)
+        );
+        let status = Command::new("screencapture")
+            .args(["-x", "-R", &region])
+            .arg(file)
+            .status()?;
+        Ok(exit_code(status))
+    }
+    #[cfg(windows)]
+    {
+        let script = r#"
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();' -Name Dpi -Namespace Ferry
+[Ferry.Dpi]::SetProcessDPIAware() | Out-Null
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$x = [int]$args[1]; $y = [int]$args[2]; $w = [int]$args[3]; $h = [int]$args[4]
+$bmp = New-Object System.Drawing.Bitmap $w, $h
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.X + $x, $b.Y + $y, 0, 0, (New-Object System.Drawing.Size $w, $h))
+$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+"#;
+        let numbers = [x, y, width, height].map(|v| v.to_string());
+        let status = powershell("ferry-screenshot-area.ps1", script)?
+            .arg(file)
+            .args(numbers)
+            .status()?;
+        Ok(exit_code(status))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (file, x, y);
+        Err(io::Error::other(
+            "снимок экрана есть только на Windows и macOS",
+        ))
+    }
+}
+
 /// `ferry record <секунды> <кадров в секунду> <каталог>`: кадры `frame-0001.png`… с курсором
 /// и `sheet.png` — до 12 равномерно выбранных кадров с отметкой времени на одном листе.
 /// На маке листа нет — только кадры.
@@ -70,7 +126,8 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         Ok((0..presses).flat_map(|_| [down, up]).collect())
     };
     match args {
-        ["windows"] => os::windows(),
+        ["windows"] => Ok(table(&os::windows()?)),
+        ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
         ["ui", window @ ..] => os::ui(&window.join(" ")),
         ["move", "--name", name] => {
             let (x, y) = os::find(name)?;
@@ -90,6 +147,53 @@ pub fn input(args: &[&str]) -> io::Result<String> {
              | click --name <имя|#id> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
         )),
     }
+}
+
+/// Окно для `windows` и поиска по имени: место — в пикселях снимка, `None` — свёрнуто.
+struct Window {
+    process: String,
+    pid: i64,
+    title: String,
+    rect: Option<(i64, i64, i64, i64)>,
+    focused: bool,
+}
+
+/// Окна сверху вниз: процесс (pid), место, размер, заголовок; `*` — с фокусом.
+fn table(windows: &[Window]) -> String {
+    let mut table = format!(
+        "  {:<26} {:>11} {:>11}  заголовок\n",
+        "процесс (pid)", "x,y", "ширина×выс."
+    );
+    for w in windows {
+        let process = format!("{} ({})", w.process, w.pid);
+        let (place, size) = match w.rect {
+            Some((x, y, width, height)) => (format!("{x},{y}"), format!("{width}×{height}")),
+            None => ("свёрнуто".to_string(), String::new()),
+        };
+        let mark = if w.focused { '*' } else { ' ' };
+        table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {}\n", w.title);
+    }
+    table
+}
+
+/// Место самого верхнего видимого окна: по имени процесса (без учёта регистра, можно без .exe)
+/// или по части заголовка. Ответ — `x y ширина высота` в пикселях снимка.
+fn window_rect(windows: &[Window], name: &str) -> io::Result<String> {
+    let want = name.to_lowercase();
+    let bare = |p: &str| p.trim_end_matches(".exe").to_string();
+    windows
+        .iter()
+        .filter_map(|w| w.rect.map(|rect| (w, rect)))
+        .find(|(w, _)| {
+            let process = w.process.to_lowercase();
+            bare(&process) == bare(&want) || w.title.to_lowercase().contains(&want)
+        })
+        .map(|(_, (x, y, width, height))| format!("{x} {y} {width} {height}\n"))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
+            ))
+        })
 }
 
 const MOUSE_LEFT_DOWN: u32 = 0x0002;
@@ -271,8 +375,8 @@ mod none {
     fn unsupported() -> io::Result<String> {
         Err(io::Error::other("окна и ввод — только на Windows и macOS"))
     }
-    pub fn windows() -> io::Result<String> {
-        unsupported()
+    pub fn windows() -> io::Result<Vec<super::Window>> {
+        unsupported().map(|_| Vec::new())
     }
     pub fn ui(_: &str) -> io::Result<String> {
         unsupported()
@@ -367,6 +471,10 @@ mod mac {
             "ввод на этом маке не пускают: «Системные настройки» → «Конфиденциальность и \
              безопасность» → «Универсальный доступ» — включи ferry и повтори",
         ))
+    }
+
+    pub fn pixels_per_point() -> f64 {
+        scale()
     }
 
     /// Пикселей в точке на главном дисплее. `pixels_wide` на Retina отдаёт точки — настоящие
@@ -572,20 +680,16 @@ mod mac {
         }
     }
 
-    /// Видимые окна приложений — сверху вниз; `*` — самое верхнее. Заголовки чужих окон macOS
-    /// отдаёт только с доступом к записи экрана (он и так нужен снимкам).
-    pub fn windows() -> io::Result<String> {
+    /// Видимые окна приложений — сверху вниз; с фокусом — самое верхнее. Заголовки чужих окон
+    /// macOS отдаёт только с доступом к записи экрана (он и так нужен снимкам).
+    pub fn windows() -> io::Result<Vec<super::Window>> {
         let k = scale();
         let list = copy_window_info(
             kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
             kCGNullWindowID,
         )
         .ok_or_else(|| io::Error::other("macOS не отдал список окон"))?;
-        let mut table = format!(
-            "  {:<26} {:>11} {:>11}  заголовок\n",
-            "процесс (pid)", "x,y", "ширина×выс."
-        );
-        let mut top = true;
+        let mut windows = Vec::new();
         for item in list.iter() {
             let window: CFDictionary<CFString, CFType> =
                 unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
@@ -613,19 +717,20 @@ mod mac {
                 continue;
             };
             let px = |v: f64| (v * k).round() as i64;
-            let process = format!(
-                "{} ({})",
-                text(unsafe { kCGWindowOwnerName }),
-                number(unsafe { kCGWindowOwnerPID }).unwrap_or_default()
-            );
-            let place = format!("{},{}", px(rect.origin.x), px(rect.origin.y));
-            let size = format!("{}×{}", px(rect.size.width), px(rect.size.height));
-            let mark = if top { '*' } else { ' ' };
-            top = false;
-            let title = text(unsafe { kCGWindowName });
-            table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {title}\n");
+            windows.push(super::Window {
+                process: text(unsafe { kCGWindowOwnerName }),
+                pid: number(unsafe { kCGWindowOwnerPID }).unwrap_or_default(),
+                title: text(unsafe { kCGWindowName }),
+                rect: Some((
+                    px(rect.origin.x),
+                    px(rect.origin.y),
+                    px(rect.size.width),
+                    px(rect.size.height),
+                )),
+                focused: windows.is_empty(),
+            });
         }
-        Ok(table)
+        Ok(windows)
     }
 
     pub fn ui(_: &str) -> io::Result<String> {
@@ -863,8 +968,8 @@ mod win {
         send(&inputs)
     }
 
-    /// Видимые окна с заголовком — сверху вниз по z-порядку; `*` — окно с фокусом.
-    pub fn windows() -> io::Result<String> {
+    /// Видимые окна с заголовком — сверху вниз по z-порядку.
+    pub fn windows() -> io::Result<Vec<super::Window>> {
         extern "system" fn collect(window: isize, list: isize) -> i32 {
             unsafe { (*(list as *mut Vec<isize>)).push(window) };
             1
@@ -874,11 +979,7 @@ mod win {
         unsafe { EnumWindows(collect, &mut found as *mut Vec<isize> as isize) };
         let names = process_names();
         let focused = unsafe { GetForegroundWindow() };
-
-        let mut table = format!(
-            "  {:<26} {:>11} {:>11}  заголовок\n",
-            "процесс (pid)", "x,y", "ширина×выс."
-        );
+        let mut windows = Vec::new();
         for window in found {
             let mut title = [0u16; 512];
             let len = unsafe { GetWindowTextW(window, title.as_mut_ptr(), title.len() as i32) };
@@ -893,20 +994,24 @@ mod win {
             }
             let mut pid = 0;
             unsafe { GetWindowThreadProcessId(window, &mut pid) };
-            let process = format!("{} ({pid})", names.get(&pid).map_or("?", String::as_str));
-            let (place, size) = if unsafe { IsIconic(window) } != 0 {
-                ("свёрнуто".to_string(), String::new())
-            } else {
-                (
-                    format!("{},{}", rect.left - left, rect.top - top),
-                    format!("{width}×{height}"),
-                )
-            };
-            let mark = if window == focused { '*' } else { ' ' };
-            let title = String::from_utf16_lossy(&title[..len as usize]);
-            table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {title}\n");
+            let minimized = unsafe { IsIconic(window) } != 0;
+            windows.push(super::Window {
+                process: names.get(&pid).cloned().unwrap_or_else(|| "?".into()),
+                pid: i64::from(pid),
+                title: String::from_utf16_lossy(&title[..len as usize]),
+                rect: (!minimized).then(|| {
+                    let at = |v: i32, origin: i32| i64::from(v - origin);
+                    (
+                        at(rect.left, left),
+                        at(rect.top, top),
+                        i64::from(width),
+                        i64::from(height),
+                    )
+                }),
+                focused: window == focused,
+            });
         }
-        Ok(table)
+        Ok(windows)
     }
 
     /// Элементы окна (UI Automation): роль, имя, #id, место в пикселях снимка. Окно — с фокусом
@@ -1059,6 +1164,43 @@ mod tests {
         assert_eq!(combo("7").unwrap(), [(0x37, false)]);
         assert!(combo("ctrl+f25").is_err());
         assert!(combo("ctrl+ыы").is_err());
+    }
+
+    #[test]
+    fn finds_windows_by_process_or_title() {
+        let window = |process: &str, title: &str, rect, focused| Window {
+            process: process.into(),
+            pid: 7,
+            title: title.into(),
+            rect,
+            focused,
+        };
+        let windows = [
+            window("notepad.exe", "*Безымянный – Блокнот", None, false),
+            window("ferry-app.exe", "ferry", Some((104, 104, 1116, 759)), true),
+            window(
+                "notepad.exe",
+                "Заметки – Блокнот",
+                Some((288, 153, 1440, 759)),
+                false,
+            ),
+        ];
+        assert_eq!(
+            window_rect(&windows, "Notepad").unwrap(),
+            "288 153 1440 759\n"
+        );
+        assert_eq!(
+            window_rect(&windows, "ferry-app.exe").unwrap(),
+            "104 104 1116 759\n"
+        );
+        assert_eq!(
+            window_rect(&windows, "заметки").unwrap(),
+            "288 153 1440 759\n"
+        );
+        assert!(window_rect(&windows, "chrome").is_err());
+        let table = table(&windows);
+        assert!(table.contains("* ferry-app.exe (7)"), "{table}");
+        assert!(table.contains("свёрнуто"), "{table}");
     }
 
     #[cfg(target_os = "macos")]

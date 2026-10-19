@@ -150,6 +150,12 @@ pub struct Tunnel {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Update;
 
+/// Снимок области экрана: `[x, y, ширина, высота]` в пикселях снимка.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ShotArea {
+    pub area: [i32; 4],
+}
+
 /// Последние `lines` строк лога приложения на устройстве.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Logs {
@@ -228,6 +234,9 @@ pub enum DeviceProtocol {
     /// С 0.1.3.
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     Logs(Logs),
+    /// С 0.1.6.
+    #[rpc(tx = mpsc::Sender<Chunk>)]
+    ShotArea(ShotArea),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

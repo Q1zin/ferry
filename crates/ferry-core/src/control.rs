@@ -116,6 +116,12 @@ pub enum Request {
     Update {
         device: Option<String>,
     },
+    /// Снимок области `[x, y, ширина, высота]` в пикселях снимка — в файл `file`.
+    ShotArea {
+        device: String,
+        file: PathBuf,
+        area: [i32; 4],
+    },
     /// Хвост лога приложения: устройства или (`device` пуст) этой машины.
     Logs {
         device: Option<String>,

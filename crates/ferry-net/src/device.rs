@@ -69,6 +69,14 @@ impl Device {
     }
 
     pub async fn input(&self, args: Vec<String>) -> Reply<String> {
+        if args.first().is_some_and(|a| a == "window") {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.6",
+                "ferry shot --window",
+            )?;
+        }
         if args.first().is_some_and(|a| a == "ui") || args.iter().any(|a| a == "--name") {
             need(
                 &self.name,
@@ -104,6 +112,26 @@ impl Device {
     }
 
     /// Снимок экрана устройства в PNG-файл `file`.
+    /// Снимок области `[x, y, ширина, высота]` — окна или части экрана.
+    pub async fn shot_area(&self, file: &Path, area: [i32; 4]) -> Reply<()> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.6",
+            "снимок окна и области",
+        )?;
+        let mut rx = self
+            .client
+            .0
+            .server_streaming(ShotArea { area }, 8)
+            .await
+            .map_err(lost)?;
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        files::recv_file(&mut rx, file).await
+    }
+
     pub async fn shot(&self, file: &Path) -> Reply<()> {
         let mut rx = self
             .client
