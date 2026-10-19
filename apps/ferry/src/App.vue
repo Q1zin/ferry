@@ -1,18 +1,38 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api, modeLabel, onOpenPairing, onState, osLabel, path, roleLabel, tone, type Snapshot } from './api'
+import {
+  api,
+  modeLabel,
+  onOpenPairing,
+  onState,
+  osLabel,
+  path,
+  roleLabel,
+  tone,
+  type Permissions,
+  type Snapshot,
+} from './api'
 import logo from '../src-tauri/icons/128x128.png'
 import Device from './components/Device.vue'
 import Pairing from './components/Pairing.vue'
+import PermissionsView from './components/Permissions.vue'
 import Settings from './components/Settings.vue'
 
-type View = { kind: 'home' } | { kind: 'device'; id: string | null } | { kind: 'pairing' } | { kind: 'settings' }
+type View =
+  | { kind: 'home' }
+  | { kind: 'device'; id: string | null }
+  | { kind: 'pairing' }
+  | { kind: 'settings' }
+  | { kind: 'permissions' }
 
 const snap = ref<Snapshot | null>(null)
 const view = ref<View>({ kind: 'home' })
 const notice = ref<{ text: string; error: boolean } | null>(null)
 /// Версия новее этой: проверяется тихо при запуске и в настройках.
 const update = ref<string | null>(null)
+/// Доступы macOS; null — не мак. Чего-то не хватает — страница разрешений открывается сама.
+const perms = ref<Permissions | null>(null)
+const missing = computed(() => !!perms.value && (!perms.value.screen || !perms.value.input))
 
 const version = computed(() => snap.value?.me.version ?? '')
 
@@ -42,6 +62,8 @@ onMounted(async () => {
   } catch (e) {
     say(String(e), true)
   }
+  perms.value = await api.permissions().catch(() => null)
+  if (missing.value) view.value = { kind: 'permissions' }
   // Нет сети или релиза — просто не показываем.
   api.checkUpdate().then(
     (v) => (update.value = v),
@@ -89,6 +111,9 @@ onUnmounted(() => unlisten.forEach((f) => f()))
 
       <footer>
         <button @click="view = { kind: 'pairing' }">+ Связать устройство</button>
+        <button v-if="perms" @click="view = { kind: 'permissions' }">
+          Разрешения<template v-if="missing"> · нужно выдать</template>
+        </button>
         <button @click="view = { kind: 'settings' }">
           Настройки<template v-if="update"> · есть {{ update }}</template>
         </button>
@@ -110,6 +135,11 @@ onUnmounted(() => unlisten.forEach((f) => f()))
         :snap="snap"
         @say="say"
         @paired="(id: string) => (view = { kind: 'device', id })"
+      />
+      <PermissionsView
+        v-else-if="view.kind === 'permissions'"
+        @say="say"
+        @changed="(p: Permissions) => (perms = p)"
       />
       <Settings
         v-else-if="view.kind === 'settings' && snap"

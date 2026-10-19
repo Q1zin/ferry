@@ -359,6 +359,39 @@ fn version() -> String {
     ferry_core::VERSION.into()
 }
 
+/// Доступы macOS для снимков и ввода; на других системах их нет — `None`.
+#[derive(serde::Serialize)]
+struct Permissions {
+    screen: bool,
+    input: bool,
+}
+
+#[tauri::command]
+fn permissions() -> Option<Permissions> {
+    #[cfg(target_os = "macos")]
+    {
+        let (screen, input) = ferry_core::screen::access();
+        Some(Permissions { screen, input })
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+/// Системный запрос и раздел настроек с этим доступом: `screen` или `input`.
+#[tauri::command]
+fn ask_permission(kind: String) -> Reply<()> {
+    #[cfg(target_os = "macos")]
+    return ferry_core::screen::ask_access(&kind).map_err(err);
+    #[cfg(not(target_os = "macos"))]
+    Err(format!("доступ {kind} нужен только на macOS"))
+}
+
+/// Запись экрана macOS применяет после перезапуска приложения.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart();
+}
+
 /// Окно из конфига (1100×720) на маленьком экране уходит под панель задач: ужимаем до рабочей
 /// области монитора и ставим по центру.
 fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
@@ -650,6 +683,9 @@ pub fn run() {
             set_autostart,
             check_update,
             install_update,
+            permissions,
+            ask_permission,
+            restart_app,
             cli,
             install_cli,
             detail,

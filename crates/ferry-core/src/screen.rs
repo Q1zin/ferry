@@ -34,6 +34,19 @@ pub fn record(seconds: &str, fps: &str, dir: &str) -> io::Result<i32> {
 use mac as os;
 #[cfg(not(any(windows, target_os = "macos")))]
 use none as os;
+/// Доступы macOS, без которых ferry не работает с экраном: (запись экрана, ввод).
+#[cfg(target_os = "macos")]
+pub fn access() -> (bool, bool) {
+    mac::access()
+}
+
+/// Попросить доступ: системный запрос (если macOS ещё не спрашивала) и нужный раздел настроек.
+/// `screen` — запись экрана, `input` — «Универсальный доступ».
+#[cfg(target_os = "macos")]
+pub fn ask_access(kind: &str) -> io::Result<()> {
+    mac::ask_access(kind)
+}
+
 #[cfg(windows)]
 use win as os;
 
@@ -310,7 +323,34 @@ mod mac {
 
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
+        fn AXIsProcessTrusted() -> bool;
         fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+        fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    pub fn access() -> (bool, bool) {
+        unsafe { (CGPreflightScreenCaptureAccess(), AXIsProcessTrusted()) }
+    }
+
+    pub fn ask_access(kind: &str) -> io::Result<()> {
+        let pane = match kind {
+            "screen" => {
+                unsafe { CGRequestScreenCaptureAccess() };
+                "Privacy_ScreenCapture"
+            }
+            "input" => {
+                let _ = trusted();
+                "Privacy_Accessibility"
+            }
+            _ => return Err(io::Error::other(format!("неизвестный доступ: {kind}"))),
+        };
+        Command::new("open")
+            .arg(format!(
+                "x-apple.systempreferences:com.apple.preference.security?{pane}"
+            ))
+            .status()?;
+        Ok(())
     }
 
     /// Ввод macOS пускает только приложениям с доступом к «Универсальному доступу». Нет его —
