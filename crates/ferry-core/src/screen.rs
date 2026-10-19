@@ -178,18 +178,16 @@ fn table(windows: &[Window]) -> String {
     table
 }
 
-/// Самое верхнее несвёрнутое окно: по имени процесса (без учёта регистра, можно без .exe) или
-/// по части заголовка. Его место — `rect`, всегда есть.
+/// Самое верхнее несвёрнутое окно: сначала по имени процесса (без учёта регистра, можно без
+/// .exe), потом по части заголовка — иначе `ferry` нашёл бы окно с файлом `ferry-test.txt`
+/// поверх самого ferry. Его место — `rect`, всегда есть.
 fn find_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
     let want = name.to_lowercase();
     let bare = |p: &str| p.trim_end_matches(".exe").to_string();
-    windows
-        .iter()
-        .filter(|w| w.rect.is_some())
-        .find(|w| {
-            let process = w.process.to_lowercase();
-            bare(&process) == bare(&want) || w.title.to_lowercase().contains(&want)
-        })
+    let open = || windows.iter().filter(|w| w.rect.is_some());
+    open()
+        .find(|w| bare(&w.process.to_lowercase()) == bare(&want))
+        .or_else(|| open().find(|w| w.title.to_lowercase().contains(&want)))
         .ok_or_else(|| {
             io::Error::other(format!(
                 "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
@@ -1263,6 +1261,25 @@ mod tests {
         let table = table(&windows);
         assert!(table.contains("* ferry-app.exe (7)"), "{table}");
         assert!(table.contains("свёрнуто"), "{table}");
+
+        // Имя процесса важнее совпадения в заголовке окна поверх.
+        let windows = [
+            window(
+                "TextEdit",
+                "ferry-test.txt",
+                Some((300, 134, 1312, 844)),
+                true,
+            ),
+            window("ferry", "ferry", Some((396, 126, 2200, 1440)), false),
+        ];
+        assert_eq!(
+            window_rect(&windows, "ferry").unwrap(),
+            "396 126 2200 1440\n"
+        );
+        assert_eq!(
+            window_rect(&windows, "test.txt").unwrap(),
+            "300 134 1312 844\n"
+        );
     }
 
     #[cfg(target_os = "macos")]
