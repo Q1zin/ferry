@@ -1,6 +1,6 @@
 //! Экран узла: снимок, запись кадрами, окна и настоящий ввод — мышь и клавиатура через ОС,
-//! а не через CDP. Windows — SendInput и UI Automation, macOS — CGEvent (нужен доступ к
-//! «Универсальному доступу»); элементы окон (`ui`, `--name`) — пока только на Windows.
+//! а не через CDP. Windows — SendInput и UI Automation, macOS — CGEvent и Accessibility (нужен
+//! доступ к «Универсальному доступу»).
 //!
 //! Координаты везде — пиксели снимка (`ferry shot`): от левого верхнего угла всего рабочего
 //! стола, в физических пикселях (процесс объявляет себя DPI-aware, иначе на экране с
@@ -486,7 +486,8 @@ mod mac {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::array::{CFArray, CFArrayRef};
+    use core_foundation::base::{CFType, CFTypeID, CFTypeRef, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
     use core_foundation::number::CFNumber;
@@ -510,6 +511,21 @@ mod mac {
         fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
+        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
+        fn AXUIElementCopyAttributeValue(
+            element: CFTypeRef,
+            attribute: CFStringRef,
+            value: *mut CFTypeRef,
+        ) -> i32;
+        fn AXUIElementCopyMultipleAttributeValues(
+            element: CFTypeRef,
+            attributes: CFArrayRef,
+            options: u32,
+            values: *mut CFArrayRef,
+        ) -> i32;
+        fn AXValueGetTypeID() -> CFTypeID;
+        fn AXValueGetType(value: CFTypeRef) -> u32;
+        fn AXValueGetValue(value: CFTypeRef, kind: u32, out: *mut std::ffi::c_void) -> bool;
     }
 
     pub fn access() -> (bool, bool) {
@@ -813,18 +829,280 @@ mod mac {
         Ok(windows)
     }
 
-    pub fn ui(_: &str) -> io::Result<String> {
-        Err(io::Error::other(
-            "элементы окон (ferry ui, --name) пока только на Windows — на маке ferry shot и клик по координатам",
-        ))
+    /// Элемент окна (Accessibility): роль, имя, #id (AXIdentifier), место в точках.
+    struct Element {
+        depth: usize,
+        role: String,
+        name: String,
+        id: String,
+        rect: (f64, f64, f64, f64),
+        enabled: bool,
+        focused: bool,
     }
 
+    impl Element {
+        /// Строка как у UI Automation на Windows: `роль "имя" #id x,y ширина×высота`.
+        fn line(&self, k: f64) -> String {
+            let px = |v: f64| (v * k).round() as i64;
+            let mut text = format!("{}{}", "  ".repeat(self.depth), self.role);
+            if self.name.chars().count() > 80 {
+                text += &format!(" \"{}…\"", self.name.chars().take(79).collect::<String>());
+            } else if !self.name.is_empty() {
+                text += &format!(" \"{}\"", self.name);
+            }
+            if !self.id.is_empty() {
+                text += &format!(" #{}", self.id);
+            }
+            let (x, y, width, height) = self.rect;
+            text += &format!(" {},{} {}×{}", px(x), px(y), px(width), px(height));
+            if !self.enabled {
+                text += " выключен";
+            }
+            if self.focused {
+                text += " *фокус";
+            }
+            text
+        }
+
+        fn center(&self, k: f64) -> (i32, i32) {
+            let (x, y, width, height) = self.rect;
+            (
+                ((x + width / 2.0) * k).round() as i32,
+                ((y + height / 2.0) * k).round() as i32,
+            )
+        }
+    }
+
+    fn attribute(element: &CFType, name: &str) -> Option<CFType> {
+        let mut value: CFTypeRef = std::ptr::null();
+        let name = CFString::new(name);
+        let error = unsafe {
+            AXUIElementCopyAttributeValue(
+                element.as_CFTypeRef(),
+                name.as_concrete_TypeRef(),
+                &mut value,
+            )
+        };
+        (error == 0 && !value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) })
+    }
+
+    fn items(array: Option<CFType>) -> Vec<CFType> {
+        array
+            .and_then(|a| a.downcast_into::<CFArray>())
+            .map(|a| {
+                a.get_all_values()
+                    .into_iter()
+                    .map(|item| unsafe { CFType::wrap_under_get_rule(item) })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Окно для `ui` и `--name`: с фокусом или по процессу / части заголовка, как в
+    /// `ferry windows`; у приложения — окно с тем же заголовком, иначе то, что с фокусом.
+    fn window(filter: &str) -> io::Result<(CFType, String)> {
+        trusted()?;
+        let windows = windows()?;
+        let found = match filter {
+            "" => windows
+                .first()
+                .ok_or_else(|| io::Error::other("на экране нет окон"))?,
+            _ => super::find_window(&windows, filter)?,
+        };
+        let app = unsafe {
+            CFType::wrap_under_create_rule(AXUIElementCreateApplication(found.pid as i32))
+        };
+        let title = |w: &CFType| {
+            attribute(w, "AXTitle")
+                .and_then(|t| t.downcast_into::<CFString>())
+                .map(|t| t.to_string())
+                .unwrap_or_default()
+        };
+        let all = items(attribute(&app, "AXWindows"));
+        let window = all
+            .iter()
+            .find(|w| !found.title.is_empty() && title(w) == found.title)
+            .cloned()
+            .or_else(|| attribute(&app, "AXFocusedWindow"))
+            .or_else(|| all.first().cloned())
+            .ok_or_else(|| io::Error::other(format!("у {} нет окон", found.process)))?;
+        let name = title(&window);
+        Ok((window, name))
+    }
+
+    /// Видимые элементы окна сверху вниз. Безымянные контейнеры не печатаются — только их
+    /// дети; элементы вне окна (прокручены, свёрнуты) пропускаются вместе с детьми. Предел —
+    /// 1500 элементов, как на Windows.
+    fn elements(window: &CFType) -> Vec<Element> {
+        const NAMES: [&str; 10] = [
+            "AXRole",
+            "AXTitle",
+            "AXDescription",
+            "AXValue",
+            "AXIdentifier",
+            "AXPosition",
+            "AXSize",
+            "AXEnabled",
+            "AXFocused",
+            "AXChildren",
+        ];
+        let names = CFArray::from_CFTypes(&NAMES.map(CFString::new));
+        let mut out = Vec::new();
+        let mut bounds = None;
+        let mut stack = vec![(window.clone(), 0usize, 0usize)];
+        while let Some((element, depth, level)) = stack.pop() {
+            if out.len() >= 1500 || level > 40 {
+                continue;
+            }
+            let mut values: CFArrayRef = std::ptr::null();
+            let error = unsafe {
+                AXUIElementCopyMultipleAttributeValues(
+                    element.as_CFTypeRef(),
+                    names.as_concrete_TypeRef(),
+                    0,
+                    &mut values,
+                )
+            };
+            if error != 0 || values.is_null() {
+                continue;
+            }
+            let values: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(values) };
+            let get = |i: isize| values.get(i).map(|v| v.clone());
+            let text = |i| {
+                get(i)
+                    .and_then(|v| v.downcast_into::<CFString>())
+                    .map(|s| {
+                        s.to_string()
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default()
+            };
+            let flag = |i| {
+                get(i)
+                    .and_then(|v| v.downcast_into::<CFBoolean>())
+                    .map(bool::from)
+            };
+            // AXPosition и AXSize — AXValue с CGPoint и CGSize; отсутствующее — AXValue-ошибка.
+            let pair = |i, kind| -> Option<(f64, f64)> {
+                let v = get(i)?;
+                if v.type_of() != unsafe { AXValueGetTypeID() }
+                    || unsafe { AXValueGetType(v.as_CFTypeRef()) } != kind
+                {
+                    return None;
+                }
+                let mut xy = [0f64; 2];
+                unsafe { AXValueGetValue(v.as_CFTypeRef(), kind, xy.as_mut_ptr().cast()) }
+                    .then_some((xy[0], xy[1]))
+            };
+            let (Some((x, y)), Some((width, height))) = (pair(5, 1), pair(6, 2)) else {
+                continue;
+            };
+            let (left, top, right, bottom) = *bounds.get_or_insert((x, y, x + width, y + height));
+            if level > 0 && (x >= right || y >= bottom || x + width <= left || y + height <= top) {
+                continue;
+            }
+            let role = text(0);
+            let role = role.strip_prefix("AX").unwrap_or(&role).to_string();
+            let name = [1, 2, 3]
+                .map(text)
+                .into_iter()
+                .find(|s| !s.is_empty())
+                .unwrap_or_default();
+            let id = text(4);
+            let noise = name.is_empty()
+                && id.is_empty()
+                && ["Group", "ScrollArea", "SplitGroup", "LayoutArea", "Unknown"]
+                    .contains(&role.as_str());
+            let next = if level == 0 || !noise {
+                out.push(Element {
+                    depth,
+                    role,
+                    name,
+                    id,
+                    rect: (x, y, width, height),
+                    enabled: flag(7) != Some(false),
+                    focused: flag(8) == Some(true),
+                });
+                depth + 1
+            } else {
+                depth
+            };
+            // В стек — с конца: дети выходят в своём порядке.
+            for child in items(get(9)).into_iter().rev() {
+                stack.push((child, next, level + 1));
+            }
+        }
+        out
+    }
+
+    pub fn ui(filter: &str) -> io::Result<String> {
+        let (window, _) = window(filter)?;
+        let k = scale();
+        let all = elements(&window);
+        let mut text: String = all.iter().map(|e| e.line(k) + "\n").collect();
+        if all.len() >= 1500 {
+            text += "… дальше не показано: элементов больше 1500\n";
+        }
+        Ok(text)
+    }
+
+    /// Элементы окна с фокусом с этим именем (без учёта регистра) или `#id`; нет точных —
+    /// с частью имени.
+    fn hits(name: &str) -> io::Result<(String, Vec<Element>)> {
+        let (window, title) = window("")?;
+        let want = name.to_lowercase();
+        // Само окно (глубина 0) — не кандидат, как и на Windows.
+        let (exact, rest): (Vec<_>, Vec<_>) = elements(&window)
+            .into_iter()
+            .filter(|e| e.depth > 0)
+            .partition(|e| e.name.to_lowercase() == want || format!("#{}", e.id) == name);
+        let hits = if exact.is_empty() && !name.starts_with('#') {
+            rest.into_iter()
+                .filter(|e| e.name.to_lowercase().contains(&want))
+                .collect()
+        } else {
+            exact
+        };
+        Ok((title, hits))
+    }
+
+    /// Центр видимого элемента в окне с фокусом. Не нашёлся или их несколько — ошибка.
     pub fn find(name: &str) -> io::Result<(i32, i32)> {
-        ui(name).map(|_| (0, 0))
+        let (title, hits) = hits(name)?;
+        let k = scale();
+        match hits.as_slice() {
+            [one] => Ok(one.center(k)),
+            [] => Err(io::Error::other(format!(
+                "в окне «{title}» нет элемента «{name}» — ferry ui покажет, что там есть"
+            ))),
+            many => {
+                let list: Vec<String> = many
+                    .iter()
+                    .take(10)
+                    .map(|e| format!("  {}", e.line(k).trim_start()))
+                    .collect();
+                Err(io::Error::other(format!(
+                    "«{name}» — элементов несколько ({}), уточни имя:\n{}",
+                    many.len(),
+                    list.join("\n")
+                )))
+            }
+        }
     }
 
+    /// Есть ли элемент сейчас: `found x y`, `none` или `many N` — для `ferry wait`.
     pub fn probe(name: &str) -> io::Result<String> {
-        ui(name)
+        let (_, hits) = hits(name)?;
+        Ok(match hits.as_slice() {
+            [one] => {
+                let (x, y) = one.center(scale());
+                format!("found {x} {y}\n")
+            }
+            [] => "none\n".into(),
+            many => format!("many {}\n", many.len()),
+        })
     }
 
     pub fn focus(_: &super::Window) -> io::Result<()> {
