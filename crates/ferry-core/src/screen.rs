@@ -128,6 +128,11 @@ pub fn input(args: &[&str]) -> io::Result<String> {
     match args {
         ["windows"] => Ok(table(&os::windows()?)),
         ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
+        ["focus", name @ ..] if !name.is_empty() => {
+            let (windows, name) = (os::windows()?, name.join(" "));
+            os::focus(find_window(&windows, &name)?)?;
+            window_rect(&windows, &name)
+        }
         // Для `ferry wait`: есть ли сейчас — ответ, а не ошибка, чтобы «нет» не спутать с обрывом.
         ["probe-window", name @ ..] if !name.is_empty() => {
             Ok(match find_window(&os::windows()?, &name.join(" ")) {
@@ -154,7 +159,7 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["type", text @ ..] if !text.is_empty() => os::type_text(&text.join(" ")),
         ["key", combos @ ..] if !combos.is_empty() => os::keys(combos),
         _ => Err(io::Error::other(
-            "ferry input windows | ui [<окно>] | move <x> <y> | click <x> <y> [right|double] \
+            "ferry input windows | ui [<окно>] | focus <окно> | move <x> <y> | click <x> <y> [right|double] \
              | click --name <имя|#id> [right|double] | scroll <n> | type <текст> | key <комбинация>…",
         )),
     }
@@ -454,6 +459,9 @@ mod none {
     }
     pub fn probe(_: &str) -> io::Result<String> {
         unsupported()
+    }
+    pub fn focus(_: &super::Window) -> io::Result<()> {
+        unsupported().map(drop)
     }
     pub fn pointer(_: i32, _: i32, _: &[u32]) -> io::Result<String> {
         unsupported()
@@ -819,6 +827,12 @@ mod mac {
         ui(name)
     }
 
+    pub fn focus(_: &super::Window) -> io::Result<()> {
+        Err(io::Error::other(
+            "ferry focus пока только на Windows — на маке кликни по видимой части окна",
+        ))
+    }
+
     /// Кадры `frame-0001.png`… с курсором по расписанию от секундомера. Листа-обзора нет.
     pub fn record(seconds: &str, fps: &str, dir: &Path) -> io::Result<i32> {
         let number = |s: &str| {
@@ -925,6 +939,14 @@ mod win {
         fn GetWindowRect(window: isize, rect: *mut Rect) -> i32;
         fn GetForegroundWindow() -> isize;
         fn GetWindowThreadProcessId(window: isize, pid: *mut u32) -> u32;
+        fn AttachThreadInput(attach: u32, to: u32, on: i32) -> i32;
+        fn BringWindowToTop(window: isize) -> i32;
+        fn SetForegroundWindow(window: isize) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
     }
 
     /// Левый верхний угол и размер всего рабочего стола (всех мониторов) в физических пикселях.
@@ -1089,6 +1111,26 @@ mod win {
             });
         }
         Ok(windows)
+    }
+
+    /// Вывести окно вперёд, с фокусом. Windows отдаёт фокус только тому, у кого он уже есть, —
+    /// окна задач ferry открываются позади, — поэтому на время подключаемся к вводу окна с фокусом.
+    pub fn focus(window: &super::Window) -> io::Result<()> {
+        let window = window.id as isize;
+        unsafe {
+            let ours = GetCurrentThreadId();
+            let theirs = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            let attached = theirs != ours && AttachThreadInput(ours, theirs, 1) != 0;
+            BringWindowToTop(window);
+            SetForegroundWindow(window);
+            if attached {
+                AttachThreadInput(ours, theirs, 0);
+            }
+        }
+        if unsafe { GetForegroundWindow() } != window {
+            return Err(io::Error::other("Windows не дал вывести окно вперёд"));
+        }
+        Ok(())
     }
 
     /// Элементы окна (UI Automation): роль, имя, #id, место в пикселях снимка. Окно — с фокусом

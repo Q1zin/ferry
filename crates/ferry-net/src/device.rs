@@ -75,6 +75,9 @@ impl Device {
         {
             need(&self.name, self.version.as_deref(), "0.1.8", "ferry wait")?;
         }
+        if args.first().is_some_and(|a| a == "focus") {
+            need(&self.name, self.version.as_deref(), "0.1.9", "ferry focus")?;
+        }
         if args.first().is_some_and(|a| a == "window") {
             need(
                 &self.name,
