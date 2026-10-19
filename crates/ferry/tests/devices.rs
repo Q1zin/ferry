@@ -170,6 +170,38 @@ async fn cli_drives_devices_through_the_app() {
         "{}",
         text(&out.stderr)
     );
+    // Новый ввод доходит до устройства, но без рабочего стола — отказ, а не настоящий клик: в
+    // тестах ввода нет. Текст для буфера обмена в журнал не попадает.
+    let actions: [&[&str]; 5] = [
+        &["drag", "mac", "1", "2", "3", "4", "--hold", "shift"],
+        &["click", "mac", "1", "2", "--hold", "shift"],
+        &["key", "mac", "a", "--for", "1"],
+        &["clip", "mac"],
+        &["clip", "mac", "секрет-буфера"],
+    ];
+    for args in actions {
+        let out = ferry(&outside, args).await;
+        assert_eq!(
+            out.status.code(),
+            Some(75),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    let journal: Vec<String> = mac
+        .snapshot()
+        .activity
+        .into_iter()
+        .map(|a| a.what)
+        .collect();
+    assert!(
+        journal.iter().any(|w| w == "буфер обмена: записать"),
+        "{journal:?}"
+    );
+    assert!(
+        journal.iter().all(|w| !w.contains("секрет-буфера")),
+        "{journal:?}"
+    );
     mac.set_mode(Mode::Active).unwrap();
 
     // В репозитории — сначала снимок, потом команда в том же подкаталоге проекта.

@@ -428,8 +428,13 @@ fn need(name: &str, version: Option<&str>, since: &str, what: &str) -> Reply<()>
 /// С какой версии устройство понимает этот ввод — и как его назвать в просьбе обновиться.
 fn input_since(args: &[String], os: Option<&str>) -> Option<(&'static str, &'static str)> {
     let first = args.first().map_or("", String::as_str);
-    let elements = first == "ui" || first == "probe" || args.iter().any(|a| a == "--name");
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let elements = first == "ui" || first == "probe" || has("--name");
     Some(match first {
+        "drag" => ("0.1.11", "ferry drag"),
+        "clip" => ("0.1.11", "ferry clip"),
+        "click" | "move" if has("--hold") => ("0.1.11", "--hold"),
+        "key" if has("--for") => ("0.1.11", "key --for"),
         _ if elements && os == Some("macos") => ("0.1.10", "элементы окон на маке"),
         "focus" => ("0.1.9", "ferry focus"),
         "probe" | "probe-window" => ("0.1.8", "ferry wait"),
@@ -473,6 +478,14 @@ mod tests {
         assert_eq!(since(&["focus", "app"], win), Some("0.1.9"));
         assert_eq!(since(&["window", "app"], win), Some("0.1.6"));
         assert_eq!(since(&["click", "1", "2"], mac), None);
+        assert_eq!(since(&["drag", "1", "2", "3", "4"], win), Some("0.1.11"));
+        assert_eq!(since(&["clip"], mac), Some("0.1.11"));
+        assert_eq!(
+            since(&["click", "1", "2", "--hold", "shift"], win),
+            Some("0.1.11")
+        );
+        assert_eq!(since(&["key", "a", "--for", "1"], win), Some("0.1.11"));
+        assert_eq!(since(&["key", "ctrl+s"], win), None);
     }
 
     #[test]
