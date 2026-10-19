@@ -103,7 +103,7 @@ async function forget() {
   if (!props.device.id) return
   try {
     await api.forget(props.device.id)
-    emit('say', `${props.device.name} забыто`)
+    emit('say', `${props.device.name} забыто — здесь и на связанных устройствах`)
     emit('gone')
   } catch (e) {
     emit('say', String(e), true)
