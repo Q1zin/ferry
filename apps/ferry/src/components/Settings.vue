@@ -55,6 +55,18 @@ async function installUpdate() {
   }
 }
 
+// Сначала связанные, потом это устройство: оно перезапустится, если есть новая версия.
+async function updateAll() {
+  updating.value = true
+  try {
+    emit('say', await api.updateAll())
+  } catch (e) {
+    emit('say', String(e), true)
+  } finally {
+    updating.value = false
+  }
+}
+
 async function toggle() {
   const on = !autostart.value
   try {
@@ -105,14 +117,17 @@ async function toggle() {
       <h3>Обновления</h3>
       <p v-if="update">Есть ferry {{ update }}, здесь — {{ snap.me.version }}.</p>
       <p class="muted small">
-        Новые версии — из релизов ferry на GitHub. Связанные устройства обновляются отсюда же:
-        <code>ferry update all</code>.
+        Новые версии — из релизов ferry на GitHub. «Обновить все устройства» — связанные на связи и это (или
+        <code>ferry update all</code>).
       </p>
       <div class="row">
         <button v-if="update" :disabled="updating" :aria-busy="updating" @click="installUpdate">
           Обновить и перезапустить
         </button>
         <button v-else :disabled="updating" :aria-busy="updating" @click="checkUpdate">Проверить</button>
+        <button v-if="snap.peers.some((p) => p.online)" :disabled="updating" @click="updateAll">
+          Обновить все устройства
+        </button>
       </div>
     </div>
 

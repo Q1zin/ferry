@@ -224,6 +224,21 @@ async fn install_update(app: AppHandle) -> Reply<String> {
     update(&app).await
 }
 
+/// Обновить все связанные устройства на связи (и пульты), а затем это — оно перезапустится.
+#[tauri::command]
+async fn update_all(app: AppHandle, agent: State<'_, Agent>) -> Reply<String> {
+    let mut said = Vec::new();
+    for peer in agent.snapshot().peers.into_iter().filter(|p| p.online) {
+        let line = match agent.device(&peer.id) {
+            Ok(device) => device.update().await.unwrap_or_else(|fail| fail.message),
+            Err(fail) => fail.message,
+        };
+        said.push(format!("{}: {line}", peer.name));
+    }
+    said.push(update(&app).await?);
+    Ok(said.join("\n"))
+}
+
 /// Новая версия — из релизов на GitHub (`plugins.updater` в tauri.conf.json): скачать (подпись
 /// сверяется публичным ключом), ответить и через секунду поставить и перезапуститься. На Windows
 /// установщик закрывает приложение сам — ответ должен успеть уйти.
@@ -683,6 +698,7 @@ pub fn run() {
             set_autostart,
             check_update,
             install_update,
+            update_all,
             permissions,
             ask_permission,
             restart_app,
