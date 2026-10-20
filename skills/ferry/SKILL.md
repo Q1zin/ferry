@@ -9,6 +9,8 @@ description: Сборка, запуск и тесты приложения на 
 
 ## Сначала
 
+Если подключён MCP-сервер ferry (`claude mcp add ferry -- ferry mcp`) — инструмент `ferry`, `args` — те же аргументы, что ниже после слова `ferry`; снимки приходят картинкой сразу. Иначе — команда в терминале.
+
 ```sh
 ferry devices --json        # me и peers: name, online, status.role/mode/os/version
 ```

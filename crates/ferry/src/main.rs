@@ -1,6 +1,7 @@
 use std::io;
 
 mod devices;
+mod mcp;
 
 use ferry_core::mode::{self, Mode};
 use ferry_core::{info, jobs, relay};
@@ -109,6 +110,8 @@ ferry — разработка и тесты на нескольких устр�
                                     фоновые задачи этой машины
   ferry skill                       поставить скилл для Claude Code (~/.claude/skills/ferry):
                                     как работать с устройствами через ferry
+  ferry mcp                         MCP-сервер для Claude Code: claude mcp add ferry -- ferry mcp;
+                                    снимки приходят в разговор картинками
 
 Служебные: ferry ssh — ssh для git на устройстве (релей), ferry job <имя> <команда> (запуск
 задачи), ferry job-supervise <имя> (надсмотрщик задачи).
@@ -189,6 +192,7 @@ fn main() {
         ["update"] => devices::update(None),
         ["update", spec] => devices::update(Some(spec)),
         ["skill"] => skill(),
+        ["mcp"] => mcp::serve(),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["ssh", args @ ..] => relay::ssh(args),
