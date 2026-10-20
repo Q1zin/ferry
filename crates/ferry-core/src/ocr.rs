@@ -34,6 +34,48 @@ pub fn read(image: &Path, want: &str) -> io::Result<Vec<Text>> {
     Ok(found)
 }
 
+/// Сколько ждать распознавателя: обычно — секунда-две, а сломанный Vision (видели на бете
+/// macOS 27: ошибка e5rt) висит почти минуту и ничего не находит.
+const LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Запустить распознаватель и дождаться его не дольше [`LIMIT`]; не успел — убить.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+fn finish(mut command: std::process::Command) -> io::Result<String> {
+    use std::process::Stdio;
+    // Своя группа процессов: по пределу убиваем её целиком (`kill_tree`).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    let out = match rx.recv_timeout(LIMIT) {
+        Ok(out) => out?,
+        Err(_) => {
+            crate::desk::kill_tree(pid).ok();
+            return Err(io::Error::other(format!(
+                "распознавание текста не ответило за {} с — распознаватель системы на этом \
+                 устройстве не работает",
+                LIMIT.as_secs()
+            )));
+        }
+    };
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(io::Error::other(format!(
+            "распознавание текста не вышло: {}",
+            said.trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Строки распознавателя: `вид<TAB>x<TAB>y<TAB>ширина<TAB>высота<TAB>текст`, вид — `line`,
 /// `exact` или `part`.
 fn parse(out: &str) -> Vec<Text> {
@@ -69,7 +111,7 @@ pub fn pick(found: Vec<Text>) -> Vec<Text> {
 mod os {
     use std::io;
     use std::path::Path;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     /// Vision: русский и английский одним запросом; место подстроки — `boundingBoxForRange`.
     /// Рамки у Vision — доли картинки от левого нижнего угла.
@@ -86,7 +128,10 @@ function run(argv) {
     request.recognitionLevel = 0;
     request.recognitionLanguages = $(['ru-RU', 'en-US']);
     request.usesLanguageCorrection = true;
-    $.VNImageRequestHandler.alloc.initWithURLOptions(url, $()).performRequestsError($([request]), null);
+    var error = $();
+    if (!$.VNImageRequestHandler.alloc.initWithURLOptions(url, $()).performRequestsError($([request]), error)) {
+        throw new Error('Vision не распознал: ' + (error.isNil() ? '?' : error.localizedDescription.js));
+    }
     var box = function (b) {
         return [Math.round(b.origin.x * W), Math.round((1 - b.origin.y - b.size.height) * H),
                 Math.round(b.size.width * W), Math.round(b.size.height * H)].join('\t');
@@ -109,20 +154,12 @@ function run(argv) {
 "#;
 
     pub fn run(image: &Path, want: &str) -> io::Result<String> {
-        let out = Command::new("osascript")
+        let mut command = Command::new("osascript");
+        command
             .args(["-l", "JavaScript", "-e", SCRIPT])
             .arg(image)
-            .arg(want)
-            .stdin(Stdio::null())
-            .output()?;
-        if !out.status.success() {
-            let said = String::from_utf8_lossy(&out.stderr);
-            return Err(io::Error::other(format!(
-                "распознавание текста не вышло: {}",
-                said.trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            .arg(want);
+        super::finish(command)
     }
 }
 
@@ -130,7 +167,6 @@ function run(argv) {
 mod os {
     use std::io;
     use std::path::Path;
-    use std::process::Stdio;
 
     /// Windows.Media.Ocr. Один распознаватель знает один язык, а в интерфейсах и кириллица, и
     /// латиница — ищут два: язык пользователя и английский; каждый хорош на своём алфавите, а
@@ -202,19 +238,9 @@ foreach ($tag in ($tags | Select-Object -Unique)) {
 "#;
 
     pub fn run(image: &Path, want: &str) -> io::Result<String> {
-        let out = crate::screen::powershell("ferry-ocr.ps1", SCRIPT)?
-            .arg(image)
-            .arg(want)
-            .stdin(Stdio::null())
-            .output()?;
-        if !out.status.success() {
-            let said = String::from_utf8_lossy(&out.stderr);
-            return Err(io::Error::other(format!(
-                "распознавание текста не вышло: {}",
-                said.trim()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut command = crate::screen::powershell("ferry-ocr.ps1", SCRIPT)?;
+        command.arg(image).arg(want);
+        super::finish(command)
     }
 }
 
