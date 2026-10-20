@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod info;
 pub mod jobs;
 pub mod mode;
+pub mod ocr;
 pub mod power;
 pub mod project;
 pub mod relay;

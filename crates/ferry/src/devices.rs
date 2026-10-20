@@ -677,12 +677,13 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
     })
 }
 
-/// Чего ждать: окна (процесс или часть заголовка), элемента окна с фокусом (имя или #id),
-/// открытого порта или текста в логе задачи.
+/// Чего ждать: окна (процесс или часть заголовка), элемента или текста на экране в окне с
+/// фокусом, открытого порта или текста в логе задачи.
 #[derive(Clone, Copy)]
 pub enum Wait<'a> {
     Window(&'a str),
     Name(&'a str),
+    Text(&'a str),
     Port(u16),
     Log { job: &'a str, text: &'a str },
 }
@@ -700,11 +701,13 @@ pub fn wait(device: &str, what: Wait, gone: bool, timeout: Duration) -> io::Resu
         Wait::Log { job, text } => return wait_log(device, job, text, timeout),
         Wait::Window(name) => (format!("окно «{name}»"), ["появилось", "исчезло"]),
         Wait::Name(name) => (format!("элемент «{name}»"), ["появился", "исчез"]),
+        Wait::Text(text) => (format!("текст «{text}»"), ["появился", "исчез"]),
         Wait::Port(port) => (format!("порт {port}"), ["открылся", "закрылся"]),
     };
     let request = || match what {
         Wait::Window(name) => input(["probe-window", name]),
         Wait::Name(name) => input(["probe", name]),
+        Wait::Text(text) => input(["probe-text", text]),
         Wait::Port(port) => Request::PortOpen {
             device: device.into(),
             port,

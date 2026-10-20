@@ -145,6 +145,35 @@ pub fn input(args: &[&str]) -> io::Result<String> {
             })
         }
         ["probe", name @ ..] if !name.is_empty() => os::probe(&name.join(" ")),
+        ["text", window @ ..] => {
+            let (_, lines) = window_text(&window.join(" "), "")?;
+            Ok(lines
+                .iter()
+                .map(|t| {
+                    let (x, y, width, height) = t.rect;
+                    format!("\"{}\" {x},{y} {width}×{height}\n", t.text)
+                })
+                .collect())
+        }
+        ["probe-text", want @ ..] if !want.is_empty() => {
+            let (_, hits) = text_hits(&want.join(" "))?;
+            Ok(match hits.as_slice() {
+                [one] => {
+                    let (x, y) = one.center();
+                    format!("found {x} {y}\n")
+                }
+                [] => "none\n".into(),
+                many => format!("many {}\n", many.len()),
+            })
+        }
+        ["move", "--text", want] => {
+            let (x, y) = find_text(want)?;
+            os::pointer(x, y, &[], hold)
+        }
+        ["click", "--text", want, how @ ..] => {
+            let (x, y) = find_text(want)?;
+            os::pointer(x, y, &buttons(how)?, hold)
+        }
         ["ui", window @ ..] => os::ui(&window.join(" ")),
         ["move", "--name", name] => {
             let (x, y) = os::find(name)?;
@@ -167,7 +196,8 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["clip", text] => os::clip_set(text),
         _ => Err(io::Error::other(
             "ferry input windows | ui [<окно>] | focus <окно> | move <x> <y> | click <x> <y> [right|double] \
-             | click --name <имя|#id> [right|double] | drag <x1> <y1> <x2> <y2> | scroll <n> \
+             | click --name <имя|#id> [right|double] | click --text <текст> [right|double] \
+             | text [<окно>] | drag <x1> <y1> <x2> <y2> | scroll <n> \
              | type <текст> | key <комбинация>… | key <комбинация> --for <секунд> | clip [<текст>]; \
              у click, move и drag — [--hold <комбинация>]",
         )),
@@ -218,6 +248,76 @@ fn find_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> 
                 "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
             ))
         })
+}
+
+/// Текст в окне — с фокусом или по процессу / части заголовка. Распознаём снимок его области
+/// экрана, а не самого окна: в снимке окна нет того, что рисует видеокарта (canvas на WebGL).
+/// Места — в пикселях снимка экрана.
+fn window_text(name: &str, want: &str) -> io::Result<(String, Vec<crate::ocr::Text>)> {
+    let windows = os::windows()?;
+    let window = match name {
+        "" => windows
+            .iter()
+            .find(|w| w.focused && w.rect.is_some())
+            .ok_or_else(|| io::Error::other("нет окна с фокусом — ferry windows покажет окна"))?,
+        _ => find_window(&windows, name)?,
+    };
+    let (x, y, width, height) = window.rect.unwrap_or_default();
+    // Развёрнутое окно на Windows заходит за край экрана на несколько пикселей.
+    let (left, top) = (x.max(0), y.max(0));
+    let area = [left, top, width - (left - x), height - (top - y)].map(|v| v as i32);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let file = std::env::temp_dir().join(format!("ferry-ocr-{}-{nanos}.png", std::process::id()));
+    let file_name = file.to_string_lossy().into_owned();
+    let shot = screenshot_area(&file_name, area);
+    let found = match shot {
+        Ok(0) => crate::ocr::read(&file, want),
+        Ok(code) => Err(io::Error::other(format!(
+            "снимок окна не вышел (код {code})"
+        ))),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_file(&file);
+    let mut found = found?;
+    for t in &mut found {
+        t.rect.0 += area[0];
+        t.rect.1 += area[1];
+    }
+    Ok((window.title.clone(), found))
+}
+
+/// Где в окне с фокусом искомый текст: точные совпадения, а нет их — части строк.
+fn text_hits(want: &str) -> io::Result<(String, Vec<crate::ocr::Text>)> {
+    let (title, found) = window_text("", want)?;
+    Ok((title, crate::ocr::pick(found)))
+}
+
+/// Центр текста в окне с фокусом. Не нашёлся или нашёлся в нескольких местах — ошибка.
+fn find_text(want: &str) -> io::Result<(i32, i32)> {
+    let (title, hits) = text_hits(want)?;
+    match hits.as_slice() {
+        [one] => Ok(one.center()),
+        [] => Err(io::Error::other(format!(
+            "в окне «{title}» не видно текста «{want}» — ferry text покажет, что распознано"
+        ))),
+        many => {
+            let list: Vec<String> = many
+                .iter()
+                .take(10)
+                .map(|t| {
+                    let (x, y, width, height) = t.rect;
+                    format!("  \"{}\" {x},{y} {width}×{height}", t.text)
+                })
+                .collect();
+            Err(io::Error::other(format!(
+                "«{want}» — на экране в нескольких местах ({}), уточни текст:\n{}",
+                many.len(),
+                list.join("\n")
+            )))
+        }
+    }
 }
 
 /// Место окна — `x y ширина высота` в пикселях снимка.

@@ -926,7 +926,10 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
             Some("type") => ("ввод текста".into(), true),
             Some("clip") if m.inner.args.len() > 1 => ("буфер обмена: записать".into(), true),
             Some("clip") => ("буфер обмена: прочитать".into(), true),
-            Some("windows" | "window" | "ui" | "probe" | "probe-window") => return None,
+            Some("windows" | "window" | "ui" | "probe" | "probe-window" | "probe-text") => {
+                return None;
+            }
+            Some("text") => ("текст с экрана".into(), true),
             _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
         },
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
