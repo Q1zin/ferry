@@ -95,6 +95,8 @@ struct Inner {
     tunnels: Mutex<BTreeMap<(String, u16), AbortHandle>>,
     /// Бронь рабочего стола этого устройства.
     desk: Mutex<crate::desk::Lease>,
+    /// Кто сейчас действует на рабочем столе — для рамки управления.
+    acting: Mutex<crate::desk::Acting>,
 }
 
 /// Что известно о связанном устройстве прямо сейчас.
@@ -301,6 +303,7 @@ impl Agent {
             node,
             tunnels: Mutex::default(),
             desk: Mutex::default(),
+            acting: Mutex::default(),
             peers: Mutex::default(),
             lan,
             pairing: Mutex::default(),
@@ -569,16 +572,10 @@ impl Agent {
         self.inner.tunnels.lock().unwrap().keys().cloned().collect()
     }
 
-    /// Кто держит рабочий стол этого устройства, если держит: `ferry desk`, `--desk`, ввод.
-    pub fn desk_holder(&self) -> Option<String> {
-        let name = |id: EndpointId| {
-            let store = self.inner.store.lock().unwrap();
-            store
-                .peer(id)
-                .map_or_else(|| id.fmt_short().to_string(), |p| p.name.clone())
-        };
-        let desk = self.inner.desk.lock().unwrap();
-        desk.holder(std::time::Instant::now(), name)
+    /// Кто сейчас действует на рабочем столе этого устройства (и только что закончил).
+    pub fn acting(&self) -> Option<String> {
+        let acting = self.inner.acting.lock().unwrap();
+        acting.who(std::time::Instant::now())
     }
 
     /// Обновить ferry на этом устройстве (`ferry update` без целей).
@@ -853,9 +850,11 @@ impl Inner {
     }
 
     async fn handle(self: Arc<Self>, msg: DeviceMessage, from: EndpointId) {
-        if let Some((what, desk)) = describe(&msg) {
-            self.note(from, what, desk);
-        }
+        // Действие на рабочем столе идёт, пока его обрабатываем: `run --desk` — до конца команды.
+        let _acting = describe(&msg).and_then(|(what, desk)| {
+            let who = self.note(from, what, desk);
+            desk.then(|| Acting::new(&self, who))
+        });
         match msg {
             DeviceMessage::Watch(WithChannels { tx, .. }) => {
                 let mut rx = self.me.subscribe();
@@ -920,7 +919,7 @@ const JOURNAL: usize = 100;
 
 impl Inner {
     /// Записать запрос в журнал (и в лог) и показать его: окно, трей.
-    fn note(&self, from: EndpointId, what: String, desk: bool) {
+    fn note(&self, from: EndpointId, what: String, desk: bool) -> String {
         let who = self
             .store
             .lock()
@@ -934,12 +933,30 @@ impl Inner {
         }
         journal.push_back(Activity {
             at: ferry_core::now(),
-            who,
+            who: who.clone(),
             what,
             desk,
         });
         drop(journal);
         self.notify();
+        who
+    }
+}
+
+/// Пока жив — `who` действует на рабочем столе: рамка управления горит.
+struct Acting<'a>(&'a Inner, String);
+
+impl<'a> Acting<'a> {
+    fn new(inner: &'a Inner, who: String) -> Self {
+        inner.acting.lock().unwrap().start(who.clone());
+        Acting(inner, who)
+    }
+}
+
+impl Drop for Acting<'_> {
+    fn drop(&mut self) {
+        let mut acting = self.0.acting.lock().unwrap();
+        acting.finish(&self.1, std::time::Instant::now());
     }
 }
 

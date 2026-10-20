@@ -627,18 +627,12 @@ mod mac_frame {
     }
 }
 
-/// Кто управляет устройством для рамки: держит стол (бронь) или только что вводил и снимал экран.
+/// Кто управляет устройством для рамки: действует на рабочем столе сейчас или только что.
 /// В других режимах ввод и снимки и так отклоняются.
 fn controller(agent: &Agent) -> Option<String> {
-    let snapshot = agent.snapshot();
-    if snapshot.me.mode != Mode::Active {
-        return None;
-    }
-    agent.desk_holder().or_else(|| {
-        snapshot
-            .controlled(ferry_core::now())
-            .map(|a| a.who.clone())
-    })
+    (agent.snapshot().me.mode == Mode::Active)
+        .then(|| agent.acting())
+        .flatten()
 }
 
 /// Иконки трея по режиму (`apps/ferry/scripts/icons.mjs`): коралл, фиолетовый, серое кольцо.
@@ -884,7 +878,7 @@ pub fn run() {
                 }
             });
 
-            // Рамка: бронь стола событий не шлёт — раз в секунду смотрим, кто управляет.
+            // Рамка: начало и конец действий событий не шлют — раз в секунду смотрим, кто управляет.
             let (agent, handle) = (app.state::<Agent>().inner().clone(), app.handle().clone());
             tauri::async_runtime::spawn(async move {
                 let mut shown = None;
