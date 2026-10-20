@@ -130,9 +130,10 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["windows"] => Ok(table(&os::windows()?)),
         ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
         ["focus", name @ ..] if !name.is_empty() => {
-            let (windows, name) = (os::windows()?, name.join(" "));
-            os::focus(find_window(&windows, &name)?)?;
-            window_rect(&windows, &name)
+            let name = name.join(" ");
+            os::focus(find_any_window(&os::windows()?, &name)?)?;
+            // Окно могло сменить место: развернулось, приехало с другого рабочего стола.
+            window_rect(&os::windows()?, &name)
         }
         // Для `ferry wait`: есть ли сейчас — ответ, а не ошибка, чтобы «нет» не спутать с обрывом.
         ["probe-window", name @ ..] if !name.is_empty() => {
@@ -225,7 +226,7 @@ fn table(windows: &[Window]) -> String {
         let process = format!("{} ({})", w.process, w.pid);
         let (place, size) = match w.rect {
             Some((x, y, width, height)) => (format!("{x},{y}"), format!("{width}×{height}")),
-            None => ("свёрнуто".to_string(), String::new()),
+            None => ("не на экране".to_string(), String::new()),
         };
         let mark = if w.focused { '*' } else { ' ' };
         table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {}\n", w.title);
@@ -237,9 +238,19 @@ fn table(windows: &[Window]) -> String {
 /// .exe), потом по части заголовка — иначе `ferry` нашёл бы окно с файлом `ferry-test.txt`
 /// поверх самого ferry. Его место — `rect`, всегда есть.
 fn find_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
+    pick_window(windows, name, true)
+}
+
+/// Как [`find_window`], но и среди окон вне экрана — свёрнутых, на другом рабочем столе: их
+/// выводит вперёд `focus`.
+fn find_any_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
+    pick_window(windows, name, false)
+}
+
+fn pick_window<'a>(windows: &'a [Window], name: &str, visible: bool) -> io::Result<&'a Window> {
     let want = name.to_lowercase();
     let bare = |p: &str| p.trim_end_matches(".exe").to_string();
-    let open = || windows.iter().filter(|w| w.rect.is_some());
+    let open = || windows.iter().filter(|w| w.rect.is_some() || !visible);
     open()
         .find(|w| bare(&w.process.to_lowercase()) == bare(&want))
         .or_else(|| open().find(|w| w.title.to_lowercase().contains(&want)))
@@ -656,8 +667,8 @@ mod mac {
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::{CGPoint, CGRect};
     use core_graphics::window::{
-        copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowLayer,
-        kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowName,
+        copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionAll, kCGWindowName,
         kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
     };
 
@@ -673,6 +684,12 @@ mod mac {
             attribute: CFStringRef,
             value: *mut CFTypeRef,
         ) -> i32;
+        fn AXUIElementSetAttributeValue(
+            element: CFTypeRef,
+            attribute: CFStringRef,
+            value: CFTypeRef,
+        ) -> i32;
+        fn AXUIElementPerformAction(element: CFTypeRef, action: CFStringRef) -> i32;
         fn AXUIElementCopyMultipleAttributeValues(
             element: CFTypeRef,
             attributes: CFArrayRef,
@@ -1075,12 +1092,13 @@ mod mac {
         }
     }
 
-    /// Видимые окна приложений — сверху вниз; с фокусом — самое верхнее. Заголовки чужих окон
+    /// Окна приложений сверху вниз; с фокусом — самое верхнее на экране. Вне экрана (свёрнутые,
+    /// на других рабочих столах) — без места: их выводит вперёд `focus`. Заголовки чужих окон
     /// macOS отдаёт только с доступом к записи экрана (он и так нужен снимкам).
     pub fn windows() -> io::Result<Vec<super::Window>> {
         let k = scale();
         let list = copy_window_info(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
             kCGNullWindowID,
         )
         .ok_or_else(|| io::Error::other("macOS не отдал список окон"))?;
@@ -1111,19 +1129,32 @@ mod mac {
             else {
                 continue;
             };
+            let onscreen = field(unsafe { kCGWindowIsOnscreen })
+                .and_then(|v| v.downcast::<CFBoolean>())
+                .is_some_and(bool::from);
+            let title = text(unsafe { kCGWindowName });
+            // Невидимое бывает и служебным: полоски меню каждого приложения, курсоры, окна
+            // 0×0. Настоящее окно — с заголовком и не меньше 100×100.
+            let small = rect.size.width < 100.0 || rect.size.height < 100.0;
+            if !onscreen && (title.is_empty() || small) {
+                continue;
+            }
             let px = |v: f64| (v * k).round() as i64;
+            let first = windows.iter().all(|w: &super::Window| w.rect.is_none());
             windows.push(super::Window {
                 id: number(unsafe { kCGWindowNumber }).unwrap_or_default(),
                 process: text(unsafe { kCGWindowOwnerName }),
                 pid: number(unsafe { kCGWindowOwnerPID }).unwrap_or_default(),
-                title: text(unsafe { kCGWindowName }),
-                rect: Some((
-                    px(rect.origin.x),
-                    px(rect.origin.y),
-                    px(rect.size.width),
-                    px(rect.size.height),
-                )),
-                focused: windows.is_empty(),
+                title,
+                rect: onscreen.then(|| {
+                    (
+                        px(rect.origin.x),
+                        px(rect.origin.y),
+                        px(rect.size.width),
+                        px(rect.size.height),
+                    )
+                }),
+                focused: onscreen && first,
             });
         }
         Ok(windows)
@@ -1405,10 +1436,58 @@ mod mac {
         })
     }
 
-    pub fn focus(_: &super::Window) -> io::Result<()> {
-        Err(io::Error::other(
-            "ferry focus пока только на Windows — на маке кликни по видимой части окна",
-        ))
+    fn set_attribute(element: &CFType, name: &str, value: &CFType) -> bool {
+        let name = CFString::new(name);
+        let error = unsafe {
+            AXUIElementSetAttributeValue(
+                element.as_CFTypeRef(),
+                name.as_concrete_TypeRef(),
+                value.as_CFTypeRef(),
+            )
+        };
+        error == 0
+    }
+
+    /// Вывести окно вперёд: развернуть, если свёрнуто, поднять над окнами его приложения и
+    /// сделать приложение активным — окно с другого рабочего стола macOS покажет, перейдя туда.
+    /// Готово, когда впереди окно этого приложения.
+    pub fn focus(window: &super::Window) -> io::Result<()> {
+        trusted()?;
+        let app = unsafe {
+            CFType::wrap_under_create_rule(AXUIElementCreateApplication(window.pid as i32))
+        };
+        let title = |w: &CFType| {
+            attribute(w, "AXTitle")
+                .and_then(|t| t.downcast_into::<CFString>())
+                .map(|t| t.to_string())
+                .unwrap_or_default()
+        };
+        let all = items(attribute(&app, "AXWindows"));
+        let target = all
+            .iter()
+            .find(|w| !window.title.is_empty() && title(w) == window.title)
+            .or(all.first());
+        let (yes, no) = (
+            CFBoolean::true_value().as_CFType(),
+            CFBoolean::false_value().as_CFType(),
+        );
+        if let Some(target) = target {
+            set_attribute(target, "AXMinimized", &no);
+            let raise = CFString::new("AXRaise");
+            unsafe { AXUIElementPerformAction(target.as_CFTypeRef(), raise.as_concrete_TypeRef()) };
+            set_attribute(target, "AXMain", &yes);
+        }
+        set_attribute(&app, "AXFrontmost", &yes);
+        // Разворачивание и переход на другой стол — с анимацией.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(100));
+            let front = windows()?.into_iter().find(|w| w.rect.is_some());
+            if front.is_some_and(|w| w.pid == window.pid) {
+                return Ok(());
+            }
+        }
+        Err(io::Error::other("macOS не дал вывести окно вперёд"))
     }
 
     /// Кадры `frame-0001.png`… с курсором по расписанию от секундомера. Листа-обзора нет.
@@ -1519,6 +1598,7 @@ mod win {
         fn GetWindowThreadProcessId(window: isize, pid: *mut u32) -> u32;
         fn AttachThreadInput(attach: u32, to: u32, on: i32) -> i32;
         fn BringWindowToTop(window: isize) -> i32;
+        fn ShowWindow(window: isize, command: i32) -> i32;
         fn SetForegroundWindow(window: isize) -> i32;
         fn OpenClipboard(owner: isize) -> i32;
         fn CloseClipboard() -> i32;
@@ -1826,6 +1906,11 @@ mod win {
     /// окна задач ferry открываются позади, — поэтому на время подключаемся к вводу окна с фокусом.
     pub fn focus(window: &super::Window) -> io::Result<()> {
         let window = window.id as isize;
+        const SW_RESTORE: i32 = 9;
+        // Свёрнутое — сначала развернуть: SetForegroundWindow его не показывает.
+        if unsafe { IsIconic(window) } != 0 {
+            unsafe { ShowWindow(window, SW_RESTORE) };
+        }
         unsafe {
             let ours = GetCurrentThreadId();
             let theirs = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
@@ -2073,7 +2158,11 @@ mod tests {
         assert!(window_rect(&windows, "chrome").is_err());
         let table = table(&windows);
         assert!(table.contains("* ferry-app.exe (7)"), "{table}");
-        assert!(table.contains("свёрнуто"), "{table}");
+        assert!(table.contains("не на экране"), "{table}");
+        // focus находит и свёрнутое окно, остальные — только видимые.
+        let hidden = find_any_window(&windows, "безымянный").unwrap();
+        assert!(hidden.rect.is_none());
+        assert!(window_rect(&windows, "безымянный").is_err());
 
         // Имя процесса важнее совпадения в заголовке окна поверх.
         let windows = [
