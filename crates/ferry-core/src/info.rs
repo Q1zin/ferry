@@ -198,6 +198,8 @@ fn platform() -> io::Result<Vec<(String, String)>> {
         ("os".into(), run("uname", &["-sr"])),
         ("computer".into(), run("hostname", &[])),
         ("user".into(), std::env::var("USER").unwrap_or_default()),
+        #[cfg(target_os = "macos")]
+        ("locked".into(), crate::screen::locked().to_string()),
     ])
 }
 
