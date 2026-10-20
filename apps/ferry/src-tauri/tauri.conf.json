@@ -12,6 +12,7 @@
     "windows": [
       {
         "title": "ferry",
+        "create": false,
         "width": 1100,
         "height": 720,
         "minWidth": 800,

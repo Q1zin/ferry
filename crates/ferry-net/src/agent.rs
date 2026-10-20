@@ -569,6 +569,18 @@ impl Agent {
         self.inner.tunnels.lock().unwrap().keys().cloned().collect()
     }
 
+    /// Кто держит рабочий стол этого устройства, если держит: `ferry desk`, `--desk`, ввод.
+    pub fn desk_holder(&self) -> Option<String> {
+        let name = |id: EndpointId| {
+            let store = self.inner.store.lock().unwrap();
+            store
+                .peer(id)
+                .map_or_else(|| id.fmt_short().to_string(), |p| p.name.clone())
+        };
+        let desk = self.inner.desk.lock().unwrap();
+        desk.holder(std::time::Instant::now(), name)
+    }
+
     /// Обновить ferry на этом устройстве (`ferry update` без целей).
     pub fn logs_self(&self, lines: usize) -> Result<String, Fail> {
         self.inner.node.logs(lines)

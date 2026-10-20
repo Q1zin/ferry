@@ -279,6 +279,23 @@ try {
     if (SHOTS) await page.screenshot({ path: join(SHOTS, 'permissions.png') })
     await page.close()
   }
+
+  // «Связать устройство…» из трея, когда окна ещё не было: окно создаётся сразу на связывании.
+  {
+    const page = await browser.newPage({ viewport: { width: win0.minWidth, height: win0.minHeight } })
+    page.on('pageerror', (e) => failures.push(`связывание при создании: ${e.message}`))
+    await page.addInitScript((fx) => {
+      window.FERRY_PAIRING = true
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
+      window.__TAURI_INTERNALS__ = {
+        transformCallback: () => 0,
+        invoke: async (cmd) => (cmd in fx ? fx[cmd] : null),
+      }
+    }, fixtures)
+    await page.goto(url)
+    await page.getByRole('heading', { name: 'Связать устройство' }).waitFor()
+    await page.close()
+  }
 } finally {
   await browser.close()
   server.close()

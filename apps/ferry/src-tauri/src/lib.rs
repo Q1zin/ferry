@@ -426,12 +426,219 @@ fn fit_to_screen(window: &tauri::WebviewWindow) -> tauri::Result<()> {
     Ok(())
 }
 
-fn show(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
+/// Окно пульта: показать, а нет — создать. `pairing` — сразу на связывание.
+fn show(app: &AppHandle, pairing: bool) {
+    let window = match app.get_webview_window("main") {
+        Some(window) => {
+            if pairing {
+                let _ = app.emit("open-pairing", ());
+            }
+            window
+        }
+        None => match main_window(app, pairing) {
+            Ok(window) => window,
+            Err(e) => {
+                tracing::warn!("окно ferry не открылось: {e}");
+                return;
+            }
+        },
+    };
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
+/// Окно пульта создаётся при первом открытии, а не при запуске: WebView на маке при создании
+/// просит активировать приложение, и macOS исполняет это на первом показанном окне — им
+/// оказывалась рамка управления, и фокус уходил у того, чем управляют.
+fn main_window(app: &AppHandle, pairing: bool) -> tauri::Result<tauri::WebviewWindow> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .unwrap_or_default();
+    // Событие `open-pairing` новое окно ещё не услышит — скажем ему при загрузке.
+    let script = if pairing {
+        "window.FERRY_PAIRING = true;"
+    } else {
+        ""
+    };
+    let window = tauri::WebviewWindowBuilder::from_config(app, &config)?
+        .initialization_script(script)
+        .build()?;
+    fit_to_screen(&window)?;
+    Ok(window)
+}
+
+/// Рамка по краю каждого экрана, пока устройством управляют: человеку видно, что за компьютером
+/// сейчас агент. Клики идут сквозь неё, фокус она не берёт, на снимках (`ferry shot`, запись
+/// экрана) и в `ferry windows` её нет. `who` — кто управляет; `None` — убрать.
+fn frame(app: &AppHandle, who: Option<&str>) -> tauri::Result<()> {
+    let text = who.map(|who| format!("ferry: управляет {who} · остановить — в меню ferry в трее"));
+    #[cfg(target_os = "macos")]
+    return app.run_on_main_thread(move || mac_frame::set(text.as_deref()));
+    #[cfg(not(target_os = "macos"))]
+    webview_frame(app, text.as_deref())
+}
+
+/// Окна рамки — заново на каждый показ: показ уже созданного окна на Windows его активирует, а
+/// новое с `focused(false)` показывается без активации.
+#[cfg(not(target_os = "macos"))]
+fn webview_frame(app: &AppHandle, text: Option<&str>) -> tauri::Result<()> {
+    static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    for (label, window) in app.webview_windows() {
+        if label.starts_with("frame-") {
+            // destroy, а не close: close у окон ferry только прячет их.
+            window.destroy()?;
+        }
     }
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let script = format!(
+        "window.FERRY_WHO = {};",
+        serde_json::to_string(text).unwrap_or_default()
+    );
+    // Своё имя на каждый показ: уничтожаемое окно может ещё не уйти из списка.
+    let shown = SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    for (i, monitor) in app.available_monitors()?.iter().enumerate() {
+        let (area, scale) = (monitor.work_area(), monitor.scale_factor());
+        let url = tauri::WebviewUrl::App("frame.html".into());
+        let window = tauri::WebviewWindowBuilder::new(app, format!("frame-{shown}-{i}"), url)
+            .title("")
+            .initialization_script(&script)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .resizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .focused(false)
+            .focusable(false)
+            .content_protected(true)
+            .position(
+                f64::from(area.position.x) / scale,
+                f64::from(area.position.y) / scale,
+            )
+            .inner_size(
+                f64::from(area.size.width) / scale,
+                f64::from(area.size.height) / scale,
+            )
+            .build()?;
+        window.set_ignore_cursor_events(true)?;
+        // Логические координаты на экранах с разным масштабом неточны — ставим физические.
+        window.set_position(area.position)?;
+        window.set_size(area.size)?;
+    }
+    Ok(())
+}
+
+/// Рамка на маке — свои панели AppKit, а не окна Tauri: WebView при создании, а любое окно при
+/// первом показе после запуска активируют приложение — рамка уводила бы фокус у того, чем
+/// управляют. Неактивирующая панель (`NonactivatingPanel`) приложение не активирует.
+#[cfg(target_os = "macos")]
+mod mac_frame {
+    use std::cell::RefCell;
+
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSBackingStoreType, NSBox, NSBoxType, NSColor, NSFloatingWindowLevel, NSFont, NSPanel,
+        NSScreen, NSTextField, NSTitlePosition, NSView, NSWindowCollectionBehavior,
+        NSWindowSharingType, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSPoint, NSRect, NSString};
+
+    thread_local! {
+        static PANELS: RefCell<Vec<Retained<NSPanel>>> = RefCell::default();
+    }
+
+    /// Рамка с надписью `text` на каждом экране; `None` — убрать. Только с главного потока.
+    pub fn set(text: Option<&str>) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        PANELS.with_borrow_mut(|panels| {
+            for panel in panels.drain(..) {
+                panel.orderOut(None);
+            }
+            let Some(text) = text else {
+                return;
+            };
+            for screen in NSScreen::screens(mtm) {
+                panels.push(panel(mtm, screen.visibleFrame(), text));
+            }
+        });
+    }
+
+    fn panel(mtm: MainThreadMarker, area: NSRect, text: &str) -> Retained<NSPanel> {
+        // #f25c3a — коралл ferry.
+        let coral = NSColor::colorWithSRGBRed_green_blue_alpha(0.949, 0.361, 0.227, 1.0);
+        let style = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            area,
+            style,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        // Панель держит `PANELS`; закрытие не должно освобождать её второй раз.
+        unsafe { panel.setReleasedWhenClosed(false) };
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setHasShadow(false);
+        panel.setIgnoresMouseEvents(true);
+        panel.setLevel(NSFloatingWindowLevel);
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::FullScreenAuxiliary
+                | NSWindowCollectionBehavior::IgnoresCycle,
+        );
+        panel.setSharingType(NSWindowSharingType::None);
+
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), area.size);
+        let root = NSView::initWithFrame(NSView::alloc(mtm), bounds);
+        let border = NSBox::initWithFrame(NSBox::alloc(mtm), bounds);
+        border.setBoxType(NSBoxType::Custom);
+        border.setTitlePosition(NSTitlePosition::NoTitle);
+        border.setBorderColor(&coral);
+        border.setBorderWidth(4.0);
+        border.setFillColor(&NSColor::clearColor());
+        root.addSubview(&border);
+        let label = NSTextField::labelWithString(&NSString::from_str(&format!("  {text}  ")), mtm);
+        label.setFont(Some(&NSFont::boldSystemFontOfSize(12.0)));
+        label.setTextColor(Some(&NSColor::whiteColor()));
+        label.setDrawsBackground(true);
+        label.setBackgroundColor(Some(&coral));
+        label.sizeToFit();
+        let size = label.frame().size;
+        label.setFrameOrigin(NSPoint::new(
+            ((area.size.width - size.width) / 2.0).round(),
+            area.size.height - size.height,
+        ));
+        root.addSubview(&label);
+        panel.setContentView(Some(&root));
+        panel.orderFrontRegardless();
+        panel
+    }
+}
+
+/// Кто управляет устройством для рамки: держит стол (бронь) или только что вводил и снимал экран.
+/// В других режимах ввод и снимки и так отклоняются.
+fn controller(agent: &Agent) -> Option<String> {
+    let snapshot = agent.snapshot();
+    if snapshot.me.mode != Mode::Active {
+        return None;
+    }
+    agent.desk_holder().or_else(|| {
+        snapshot
+            .controlled(ferry_core::now())
+            .map(|a| a.who.clone())
+    })
 }
 
 /// Иконки трея по режиму (`apps/ferry/scripts/icons.mjs`): коралл, фиолетовый, серое кольцо.
@@ -506,11 +713,8 @@ impl Tray {
             .menu(&menu)
             .show_menu_on_left_click(true)
             .on_menu_event(|app, event| match event.id().as_ref() {
-                "open" => show(app),
-                "pair" => {
-                    show(app);
-                    let _ = app.emit("open-pairing", ());
-                }
+                "open" => show(app, false),
+                "pair" => show(app, true),
                 "quit" => app.exit(0),
                 // Человек за устройством забирает рабочий стол: ввод, снимки и окна отклоняются.
                 "stop-control" => {
@@ -622,10 +826,15 @@ pub fn run() {
         Err(_) => tracing_subscriber::fmt().with_env_filter(filter()).init(),
     }
     log_panics();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Запуск (вход в систему, перезапуск после обновления) не забирает фокус: иначе macOS
+    // исполняет эту активацию на первом показанном окне — рамке управления (см. `main_window`).
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(false);
+    builder
         // Второй запуск (ярлык, автозапуск) не поднимает второго агента — показывает окно.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            show(app)
+            show(app, false)
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -675,18 +884,31 @@ pub fn run() {
                 }
             });
 
+            // Рамка: бронь стола событий не шлёт — раз в секунду смотрим, кто управляет.
+            let (agent, handle) = (app.state::<Agent>().inner().clone(), app.handle().clone());
+            tauri::async_runtime::spawn(async move {
+                let mut shown = None;
+                loop {
+                    let who = controller(&agent);
+                    if who != shown {
+                        if let Err(e) = frame(&handle, who.as_deref()) {
+                            tracing::warn!("рамка управления: {e}");
+                        }
+                        shown = who;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            });
+
             if !dir.join("no-autostart").exists()
                 && !app.autolaunch().is_enabled().unwrap_or(true)
                 && let Err(e) = app.autolaunch().enable()
             {
                 tracing::warn!("автозапуск не включился: {e}");
             }
-            if let Some(window) = app.get_webview_window("main") {
-                fit_to_screen(&window)?;
-                // При входе в систему (автозапуск) окно не нужно — только трей.
-                if !std::env::args().any(|a| a == "--hidden") {
-                    window.show()?;
-                }
+            // При входе в систему (автозапуск) окно не нужно — только трей.
+            if !std::env::args().any(|a| a == "--hidden") {
+                show(app.handle(), false);
             }
             Ok(())
         })
