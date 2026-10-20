@@ -674,8 +674,9 @@ mod mac {
     use core_graphics::geometry::{CGPoint, CGRect};
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer,
-        kCGWindowListExcludeDesktopElements, kCGWindowListOptionAll, kCGWindowName,
-        kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID,
+        kCGWindowListExcludeDesktopElements, kCGWindowListOptionAll,
+        kCGWindowListOptionOnScreenOnly, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
+        kCGWindowOwnerPID,
     };
 
     #[link(name = "ApplicationServices", kind = "framework")]
@@ -696,6 +697,8 @@ mod mac {
             value: CFTypeRef,
         ) -> i32;
         fn AXUIElementPerformAction(element: CFTypeRef, action: CFStringRef) -> i32;
+        fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
         fn AXUIElementCopyMultipleAttributeValues(
             element: CFTypeRef,
             attributes: CFArrayRef,
@@ -1125,13 +1128,30 @@ mod mac {
         }
     }
 
-    /// Окна приложений сверху вниз; с фокусом — самое верхнее на экране. Вне экрана (свёрнутые,
-    /// на других рабочих столах) — без места: их выводит вперёд `focus`. Заголовки чужих окон
-    /// macOS отдаёт только с доступом к записи экрана (он и так нужен снимкам).
+    /// Окна приложений: на экране — сверху вниз, с фокусом — самое верхнее; следом окна вне
+    /// экрана (свёрнутые, на других рабочих столах) — без места, их выводит вперёд `focus`.
+    /// Заголовки чужих окон macOS отдаёт только с доступом к записи экрана (он и так нужен
+    /// снимкам).
     pub fn windows() -> io::Result<Vec<super::Window>> {
+        // Сверху вниз окна отдаёт только запрос «на экране»; «все» — в другом порядке.
+        let mut windows = listed(kCGWindowListOptionOnScreenOnly)?;
+        let seen: Vec<i64> = windows.iter().map(|w| w.id).collect();
+        windows.extend(
+            listed(kCGWindowListOptionAll)?
+                .into_iter()
+                .filter(|w| w.rect.is_none() && !seen.contains(&w.id)),
+        );
+        if let Some(first) = windows.iter_mut().find(|w| w.rect.is_some()) {
+            first.focused = true;
+        }
+        Ok(windows)
+    }
+
+    /// Обычные окна (слой 0) из CGWindowList: на экране — с местом, вне экрана — без.
+    fn listed(option: u32) -> io::Result<Vec<super::Window>> {
         let k = scale();
         let list = copy_window_info(
-            kCGWindowListOptionAll | kCGWindowListExcludeDesktopElements,
+            option | kCGWindowListExcludeDesktopElements,
             kCGNullWindowID,
         )
         .ok_or_else(|| io::Error::other("macOS не отдал список окон"))?;
@@ -1173,7 +1193,6 @@ mod mac {
                 continue;
             }
             let px = |v: f64| (v * k).round() as i64;
-            let first = windows.iter().all(|w: &super::Window| w.rect.is_none());
             windows.push(super::Window {
                 id: number(unsafe { kCGWindowNumber }).unwrap_or_default(),
                 process: text(unsafe { kCGWindowOwnerName }),
@@ -1187,7 +1206,7 @@ mod mac {
                         px(rect.size.height),
                     )
                 }),
-                focused: onscreen && first,
+                focused: false,
             });
         }
         Ok(windows)
@@ -1504,23 +1523,89 @@ mod mac {
             CFBoolean::true_value().as_CFType(),
             CFBoolean::false_value().as_CFType(),
         );
+        let raise = |w: &CFType| {
+            let action = CFString::new("AXRaise");
+            unsafe { AXUIElementPerformAction(w.as_CFTypeRef(), action.as_concrete_TypeRef()) };
+            set_attribute(w, "AXMain", &yes);
+        };
         if let Some(target) = target {
             set_attribute(target, "AXMinimized", &no);
-            let raise = CFString::new("AXRaise");
-            unsafe { AXUIElementPerformAction(target.as_CFTypeRef(), raise.as_concrete_TypeRef()) };
-            set_attribute(target, "AXMain", &yes);
         }
-        set_attribute(&app, "AXFrontmost", &yes);
-        // Разворачивание и переход на другой стол — с анимацией.
+        // С macOS 14 активным приложение делает только то, что активно само: AXFrontmost и
+        // activate отвечают «готово» и ничего не делают. Dock может — жмём значок, как человек.
+        if !press_dock(&window.process) {
+            set_attribute(&app, "AXFrontmost", &yes);
+        }
+        // Разворачивание и переход на другой стол — с анимацией; окно поднимаем, когда его
+        // приложение уже впереди.
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(3) {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(150));
+            if let Some(target) = target {
+                raise(target);
+            }
+            // Готово, когда окно сверху и клавиатура — у его приложения: поднятое окно
+            // неактивного приложения ввод не получает.
             let front = windows()?.into_iter().find(|w| w.rect.is_some());
-            if front.is_some_and(|w| w.pid == window.pid) {
+            let keyboard = focused_pid().is_none_or(|pid| i64::from(pid) == window.pid);
+            if front.is_some_and(|w| w.pid == window.pid) && keyboard {
                 return Ok(());
             }
         }
         Err(io::Error::other("macOS не дал вывести окно вперёд"))
+    }
+
+    /// pid приложения, у которого клавиатура.
+    fn focused_pid() -> Option<i32> {
+        let system = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateSystemWide()) };
+        let app = attribute(&system, "AXFocusedApplication")?;
+        let mut pid = 0;
+        (unsafe { AXUIElementGetPid(app.as_CFTypeRef(), &mut pid) } == 0).then_some(pid)
+    }
+
+    /// Нажать значок приложения `name` в Dock (Accessibility). Нет значка — `false`.
+    fn press_dock(name: &str) -> bool {
+        let Some(dock) = pid_of("Dock") else {
+            return false;
+        };
+        let dock = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(dock)) };
+        let title = |e: &CFType| {
+            attribute(e, "AXTitle")
+                .and_then(|t| t.downcast_into::<CFString>())
+                .map(|t| t.to_string())
+        };
+        for list in items(attribute(&dock, "AXChildren")) {
+            for item in items(attribute(&list, "AXChildren")) {
+                if title(&item).as_deref() == Some(name) {
+                    let press = CFString::new("AXPress");
+                    let pressed = unsafe {
+                        AXUIElementPerformAction(item.as_CFTypeRef(), press.as_concrete_TypeRef())
+                    };
+                    return pressed == 0;
+                }
+            }
+        }
+        false
+    }
+
+    /// pid процесса по владельцу окон — во всех слоях: у Dock окна выше слоя 0.
+    fn pid_of(owner: &str) -> Option<i32> {
+        let list = copy_window_info(kCGWindowListOptionAll, kCGNullWindowID)?;
+        list.iter().find_map(|item| {
+            let window: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(*item as CFDictionaryRef) };
+            let field =
+                |name: CFStringRef| window.find(unsafe { CFString::wrap_under_get_rule(name) });
+            let name = field(unsafe { kCGWindowOwnerName })
+                .and_then(|v| v.downcast::<CFString>())
+                .map(|s| s.to_string())?;
+            if name != owner {
+                return None;
+            }
+            field(unsafe { kCGWindowOwnerPID })
+                .and_then(|v| v.downcast::<CFNumber>())
+                .and_then(|n| n.to_i32())
+        })
     }
 
     /// Кадры `frame-0001.png`… с курсором по расписанию от секундомера. Листа-обзора нет.
