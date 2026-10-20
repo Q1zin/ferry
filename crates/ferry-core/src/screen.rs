@@ -2315,7 +2315,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "macos")]
     /// Своё окно — отказ сразу, без Accessibility (иначе — падение AppKit не на главном потоке).
     #[cfg(target_os = "macos")]
     #[test]
@@ -2332,6 +2331,7 @@ mod tests {
         assert!(err.contains("самого ferry"), "{err}");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn parses_mac_key_combos() {
         use core_graphics::event::CGEventFlags as F;
