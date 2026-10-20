@@ -52,7 +52,13 @@ async fn pair(controller: &Agent, node: &Agent) {
 
 /// `ferry …` от имени «приложения» `controller`, из каталога `cwd`.
 async fn ferry(cwd: &Path, args: &[&str]) -> Output {
-    let (cwd, args) = (
+    ferry_as("", cwd, args).await
+}
+
+/// То же от сессии `session` (`FERRY_AGENT`); пустая — как вызвал тест.
+async fn ferry_as(session: &str, cwd: &Path, args: &[&str]) -> Output {
+    let (session, cwd, args) = (
+        session.to_string(),
         cwd.to_path_buf(),
         args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
     );
@@ -60,6 +66,7 @@ async fn ferry(cwd: &Path, args: &[&str]) -> Output {
         Command::new(FERRY)
             .args(&args)
             .env("HOME", root("ctl"))
+            .env("FERRY_AGENT", session)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .output()
@@ -205,6 +212,52 @@ async fn cli_drives_devices_through_the_app() {
         "{journal:?}"
     );
     mac.set_mode(Mode::Active).unwrap();
+
+    // Бронь стола: --desk занял win на эту сессию; у другой сессии — отказ с подсказкой, команды
+    // без стола ей можно. Своя снимается просто, чужая — только --force.
+    let out = ferry(&outside, &["desk", "win"]).await;
+    assert!(
+        text(&out.stdout).starts_with("win: занят: ctl"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = ferry(&outside, &["desk", "win", "free"]).await;
+    assert_eq!(
+        text(&out.stdout),
+        "win: свободен\n",
+        "{}",
+        text(&out.stderr)
+    );
+    let out = ferry_as("a", &outside, &["run", "win", "--desk", "--", "echo a"]).await;
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = ferry_as("b", &outside, &["run", "win", "--desk", "--", "echo b"]).await;
+    assert_eq!(out.status.code(), Some(75), "{}", text(&out.stderr));
+    let said = text(&out.stderr);
+    assert!(
+        said.contains("рабочий стол win занят: ctl (a) — ещё 1")
+            && said.contains("ferry desk win free --force"),
+        "{said}"
+    );
+    assert!(text(&out.stdout).is_empty(), "команда не запускалась");
+    // Ввода в тестах нет: сломайся бронь — клик упрётся в режим, а не в экран.
+    win.set_mode(Mode::NoDesktop).unwrap();
+    let out = ferry_as("b", &outside, &["click", "win", "1", "2"]).await;
+    assert!(
+        text(&out.stderr).contains("занят: ctl (a)"),
+        "{}",
+        text(&out.stderr)
+    );
+    win.set_mode(Mode::Active).unwrap();
+    let out = ferry_as("b", &outside, &["run", "win", "--", "echo b"]).await;
+    assert_eq!(out.status.code(), Some(0), "без стола — можно");
+    let out = ferry_as("b", &outside, &["desk", "win", "free"]).await;
+    assert_eq!(out.status.code(), Some(75));
+    let out = ferry_as("a", &outside, &["desk", "win", "free"]).await;
+    assert_eq!(text(&out.stdout), "win: свободен\n");
+    let out = ferry_as("b", &outside, &["desk", "win", "take", "5"]).await;
+    assert_eq!(text(&out.stdout), "win: занят тобой — ещё 300 с\n");
+    let out = ferry_as("a", &outside, &["desk", "win", "free", "--force"]).await;
+    assert_eq!(text(&out.stdout), "win: свободен — бронь ctl (b) снята\n");
 
     // В репозитории — сначала снимок, потом команда в том же подкаталоге проекта.
     let repo = root("ctl").join("app");

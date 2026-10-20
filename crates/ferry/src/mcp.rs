@@ -73,7 +73,7 @@ fn tool() -> Value {
             shot <устройство> [--window <окно> | --region x,y,w,h]; windows; focus; ui; text; \
             click <устройство> (x y | --name <имя> | --text <текст>); type; key; drag; clip; \
             wait <устройство> (--window | --name | --text | --port | --log <задача> <текст>); \
-            crashes; logs; info. Пустой args — полный список команд.",
+            crashes; logs; info; desk — бронь рабочего стола. Пустой args — полный список команд.",
         "inputSchema": {
             "type": "object",
             "properties": {

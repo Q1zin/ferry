@@ -427,6 +427,24 @@ pub fn role(device: Option<&str>, role: &str) -> io::Result<i32> {
     })())
 }
 
+/// `ferry desk <устройство> [take [минут] | free [--force]]`: бронь рабочего стола устройства.
+pub fn desk(device: &str, action: &str, minutes: u32) -> io::Result<i32> {
+    finish((|| {
+        let request = Request::Desk {
+            device: device.into(),
+            action: action.into(),
+            minutes,
+        };
+        match ask(request)? {
+            Response::Message(text) => {
+                println!("{device}: {text}");
+                Ok(0)
+            }
+            _ => Err(unexpected()),
+        }
+    })())
+}
+
 /// `ferry crashes <устройство> [программа] [--last]`: падения на устройстве — в stdout.
 pub fn crashes(device: &str, process: &str, last: bool) -> io::Result<i32> {
     finish((|| {

@@ -93,6 +93,8 @@ struct Inner {
     node: Arc<Node>,
     /// Открытые туннели: (устройство, порт).
     tunnels: Mutex<BTreeMap<(String, u16), AbortHandle>>,
+    /// Бронь рабочего стола этого устройства.
+    desk: Mutex<crate::desk::Lease>,
 }
 
 /// Что известно о связанном устройстве прямо сейчас.
@@ -298,6 +300,7 @@ impl Agent {
             me,
             node,
             tunnels: Mutex::default(),
+            desk: Mutex::default(),
             peers: Mutex::default(),
             lan,
             pairing: Mutex::default(),
@@ -867,6 +870,32 @@ impl Inner {
             }) => {
                 let result = store::valid_name(&name)
                     .and_then(|name| self.remote_change(|| self.rename(name)));
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::Desk(WithChannels { tx, inner, .. }) => {
+                let name = |id: EndpointId| {
+                    let store = self.store.lock().unwrap();
+                    store
+                        .peer(id)
+                        .map_or_else(|| id.fmt_short().to_string(), |p| p.name.clone())
+                };
+                let result = self
+                    .desk
+                    .lock()
+                    .unwrap()
+                    .apply(
+                        from,
+                        &inner.session,
+                        inner.action,
+                        std::time::Instant::now(),
+                        name,
+                    )
+                    .map_err(|why| {
+                        let me = self.me.borrow().name.clone();
+                        Fail::refused(
+                            format!("рабочий стол {me} {why}").replace("<устройство>", &me),
+                        )
+                    });
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,

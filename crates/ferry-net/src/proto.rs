@@ -193,6 +193,25 @@ pub struct Crashes {
     pub last: bool,
 }
 
+/// Бронь рабочего стола: чьи окна и ввод пускать. `session` — кто на управляющем устройстве:
+/// сессия агента или пусто — терминал.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Desk {
+    pub session: String,
+    pub action: DeskAction,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum DeskAction {
+    /// Занять (или продлить свою) на столько секунд.
+    Hold(u32),
+    /// Снять свою.
+    Free,
+    /// Снять любую — человек вправе.
+    ForceFree,
+    Show,
+}
+
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
 /// Тот пропускает только чтение и только к своим доверенным хостам; ключ не покидает его.
 #[derive(Serialize, Deserialize, Debug)]
@@ -280,6 +299,9 @@ pub enum DeviceProtocol {
     /// С 0.1.11.
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     Crashes(Crashes),
+    /// С 0.1.16.
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Desk(Desk),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

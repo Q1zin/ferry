@@ -137,6 +137,12 @@ pub enum Request {
     Forget {
         device: String,
     },
+    /// Бронь рабочего стола устройства: показать, занять, снять.
+    Desk {
+        device: String,
+        action: String,
+        minutes: u32,
+    },
     /// Падения программ на устройстве.
     Crashes {
         device: String,
@@ -202,6 +208,65 @@ mod base64 {
 pub struct Envelope {
     pub token: String,
     pub request: Request,
+    /// Кто просит — по нему устройство бронирует рабочий стол: [`session`].
+    #[serde(default)]
+    pub session: String,
+}
+
+/// Кто вызвал CLI: `FERRY_AGENT`, иначе сессия Claude Code — ближайший предок `claude` (каждая
+/// сессия — свой процесс, команды — его потомки), иначе пусто — человек в терминале.
+pub fn session() -> String {
+    static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SESSION
+        .get_or_init(|| match std::env::var("FERRY_AGENT") {
+            Ok(name) if !name.is_empty() => name,
+            _ => claude_ancestor().map_or_else(String::new, |pid| format!("claude:{pid}")),
+        })
+        .clone()
+}
+
+/// Ближайший предок-процесс `claude`: одна таблица процессов `ps`, по ней — вверх от себя.
+#[cfg(unix)]
+fn claude_ancestor() -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,comm="])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let ppid = fields.next()?.parse().ok()?;
+            let comm = fields.collect::<Vec<_>>().join(" ");
+            Some((pid, ppid, comm))
+        })
+        .collect();
+    ancestor_named(&table, std::process::id(), "claude")
+}
+
+#[cfg(not(unix))]
+fn claude_ancestor() -> Option<u32> {
+    None
+}
+
+/// Ближайший предок `pid` с программой `name` по таблице (pid, ppid, путь программы).
+#[cfg_attr(not(unix), allow(dead_code))]
+fn ancestor_named(table: &[(u32, u32, String)], pid: u32, name: &str) -> Option<u32> {
+    let mut current = pid;
+    for _ in 0..64 {
+        let &(_, parent, _) = table.iter().find(|(p, _, _)| *p == current)?;
+        let (_, _, comm) = table.iter().find(|(p, _, _)| *p == parent)?;
+        if comm.rsplit('/').next() == Some(name) {
+            return Some(parent);
+        }
+        if parent <= 1 {
+            return None;
+        }
+        current = parent;
+    }
+    None
 }
 
 /// Отправить запрос приложению на этой машине и получить ответ.
@@ -229,7 +294,13 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
         .and_then(|(port, token)| Some((port.parse::<u16>().ok()?, token.to_string())))
         .ok_or_else(|| io::Error::other(format!("испорчен {}", dir.join("app").display())))?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| not_running())?;
-    let line = serde_json::to_string(&Envelope { token, request }).map_err(io::Error::other)?;
+    let session = session();
+    let envelope = Envelope {
+        token,
+        request,
+        session,
+    };
+    let line = serde_json::to_string(&envelope).map_err(io::Error::other)?;
     stream.write_all(format!("{line}\n").as_bytes())?;
     Ok(Answer {
         lines: BufReader::new(stream).lines(),
@@ -273,6 +344,30 @@ fn not_running() -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn finds_the_claude_session_above() {
+        let table = vec![
+            (1, 0, "/sbin/launchd".to_string()),
+            (
+                500,
+                1,
+                "/Applications/Code.app/Contents/MacOS/Code".to_string(),
+            ),
+            (
+                600,
+                500,
+                "/Users/a1/.vscode/extensions/anthropic.claude-code/bin/claude".to_string(),
+            ),
+            (700, 600, "/bin/zsh".to_string()),
+            (800, 700, "ferry".to_string()),
+            (900, 500, "/bin/zsh".to_string()),
+        ];
+        assert_eq!(ancestor_named(&table, 800, "claude"), Some(600));
+        // Терминал без Claude Code — нет сессии; чужого pid в таблице нет — тоже.
+        assert_eq!(ancestor_named(&table, 900, "claude"), None);
+        assert_eq!(ancestor_named(&table, 42, "claude"), None);
+    }
+
     use super::*;
 
     #[test]
