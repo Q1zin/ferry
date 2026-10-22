@@ -70,12 +70,12 @@ fn tool() -> Value {
             что в терминале: args — аргументы после `ferry`. Вывод и код выхода — текстом, снимки \
             экрана (shot) и листы записи (rec) — картинками. Основное: devices --json; \
             run <устройство> -- <команда>; start/result/log/jobs/kill — фоновые задачи; result [<устройство>] <задача> --wait 30 — ограниченный JSON результата, --cursor — новые строки; для долгих команд используй start и result; \
-            check <профиль> --devices local,WIN-11-2 — профили из ferry.checks.json и матрица; diagnose — диагностика запуска; history — место, pin и preview очистки; act --from observe.json --click имя --expect имя — проверяемое действие; \
-            select --os windows --shell powershell --tool cargo --desktop — подходящие устройства; observe [<устройство>] [--window <окно>] [--ocr] — состояние интерфейса и снимок; runs/artifacts/tests — история, файлы и JUnit; \
+            check <профиль> --devices local,WIN-11-2 --id ID --detach — устойчивый build/launch/test; check status|resume|collect|cancel ID; diagnose --bundle — переносимые доказательства; history/storage — место и preview очистки; session begin/end — уборка задач и туннелей; start --request ID --session ID --timeout N; workspace create/diff/apply — изоляция и patch; act --from observe.json --click-locator JSON --expect-json JSON — проверяемое действие; \
+            select --os windows --shell powershell --tool cargo --desktop — подходящие устройства; observe [<устройство>] [--window <окно>] [--structured] [--no-screenshot] [--since JSON] — состояние интерфейса или delta; runs/artifacts/tests — история, файлы и JUnit; \
             shot <устройство> [--window <окно> | --region x,y,w,h]; windows; focus; ui; text; \
             click <устройство> (x y | --name <имя> | --text <текст>); type; key; drag; clip; \
             wait <устройство> (--window | --name | --text | --port | --log <задача> <текст>); \
-            crashes; logs; info; desk — бронь рабочего стола. Пустой args — полный список команд.",
+            crashes; logs; info — включая возраст настоящего ввода; desk take --note — намерение на рамке; ask DEVICE вопрос — запрос человеку, --poll ID — ответ (done требует проверки). Пустой args — полный список команд.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -131,6 +131,13 @@ fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -
                 | "act"
                 | "check"
                 | "diagnose"
+                | "ask"
+                | "session"
+                | "workspace"
+                | "storage"
+                | "start-status"
+                | "start"
+                | "tunnel"
         )
     }) && let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(stdout)
     {
