@@ -342,7 +342,7 @@ fn encode(dir: &Path, rows: &[SavedFrame], fps: u32, encoder: &Path) -> Result<P
             "1",
             "-i",
             "frames.ffconcat",
-            "-vsync",
+            "-fps_mode",
             "vfr",
             "-vf",
             "pad=ceil(iw/2)*2:ceil(ih/2)*2",
@@ -601,6 +601,94 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn available_encoder_creates_playable_h264_from_odd_frames_and_timestamps() {
+        let Ok(encoder) = encoder_available() else {
+            eprintln!("skipped actual encoder regression: ffmpeg unavailable");
+            return;
+        };
+        let dir =
+            std::env::temp_dir().join(format!("ferry-encoder-{}", ferry_core::jobs::unique_id()));
+        fs::create_dir_all(dir.join("frames")).unwrap();
+        let rows: Vec<_> = [1000, 1120, 1800]
+            .into_iter()
+            .enumerate()
+            .map(|(index, captured_ms)| {
+                let file = format!("frames/{index:06}.ppm");
+                let mut image = b"P6\n3 5\n255\n".to_vec();
+                for _ in 0..15 {
+                    image.extend_from_slice(&[40 + index as u8 * 60, 80, 180]);
+                }
+                fs::write(dir.join(&file), &image).unwrap();
+                SavedFrame {
+                    file,
+                    sequence: index as u64,
+                    captured_ms,
+                    width: 3,
+                    height: 5,
+                    bytes: image.len() as u64,
+                }
+            })
+            .collect();
+        let video = encode(&dir, &rows, 10, &encoder).unwrap_or_else(|error| {
+            panic!(
+                "{error}: {}",
+                fs::read_to_string(dir.join("encoder.log")).unwrap_or_default()
+            )
+        });
+        assert!(fs::metadata(&video).unwrap().len() > 100);
+        let mut decoder = Command::new(&encoder)
+            .args(["-nostdin", "-v", "error", "-i"])
+            .arg(&video)
+            .args(["-f", "null", "-"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_child(&mut decoder, 10).unwrap(),
+            "encoded MP4 must decode"
+        );
+        let probe = encoder.with_file_name(if cfg!(windows) {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        });
+        if probe.is_file() {
+            let mut process = Command::new(probe)
+                .args([
+                    "-v",
+                    "error",
+                    "-show_streams",
+                    "-show_format",
+                    "-of",
+                    "json",
+                ])
+                .arg(&video)
+                .stdin(Stdio::null())
+                .stdout(fs::File::create(dir.join("probe.json")).unwrap())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            assert!(wait_child(&mut process, 5).unwrap());
+            let data: Value = read(&dir.join("probe.json")).unwrap();
+            assert_eq!(data["streams"][0]["codec_name"], "h264");
+            assert_eq!(data["streams"][0]["width"], 4);
+            assert_eq!(data["streams"][0]["height"], 6);
+            let duration = data["format"]["duration"]
+                .as_str()
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+            assert!(
+                (0.8..=1.2).contains(&duration),
+                "timestamps were lost: {duration}"
+            );
+        }
+        eprintln!("actual encoder regression passed: {}", encoder.display());
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn concat_preserves_frame_times_without_shell_interpolation() {
         let rows = [
