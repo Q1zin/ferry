@@ -95,6 +95,35 @@ async fn cli_drives_devices_through_the_app() {
     }
     let outside = root("ctl");
 
+    // Результат идёт через настоящий CLI и оба транспорта, сохраняя код задачи.
+    let job_dir = root("win").join(".ferry/jobs/report");
+    std::fs::create_dir_all(&job_dir).unwrap();
+    for (file, value) in [
+        ("run-id", "cli-result"),
+        ("cmd", "build"),
+        ("exit", "7"),
+        ("log", "0123456789ERROR"),
+    ] {
+        std::fs::write(job_dir.join(file), value).unwrap();
+    }
+    let out = ferry(&outside, &["result", "win", "report", "--max-bytes", "5"]).await;
+    assert_eq!(out.status.code(), Some(7), "{}", text(&out.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["log"], "ERROR");
+    assert_eq!(result["omitted_bytes"], 10);
+    assert_eq!(result["state"], "failed");
+    assert_eq!(result["device"], "win");
+    let cursor = result["cursor"].as_str().unwrap();
+    let out = ferry(&outside, &["result", "win", "report", "--cursor", cursor]).await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()["log"],
+        ""
+    );
+    std::fs::write(job_dir.join("run-id"), "new-run").unwrap();
+    let out = ferry(&outside, &["result", "win", "report", "--cursor", cursor]).await;
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("перезапущена"));
+
     // Явная оболочка проходит CLI, локальный JSON и сетевой протокол без потери кавычек.
     let out = ferry(
         &outside,

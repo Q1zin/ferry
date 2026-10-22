@@ -37,6 +37,9 @@ ferry — разработка и тесты на нескольких устр�
                                     после вызова, пишет лог; то же имя ещё раз — перезапуск
   ferry jobs <цели> [--json]        задачи: работает, код выхода, когда запущена
   ferry log <устройство> <имя> [-f] лог задачи; -f — следить до конца и выйти с её кодом
+  ferry result [<устройство>] <имя> [--wait <сек>] [--cursor <курсор>] [--max-bytes <байт>]
+                                    JSON: состояние, код выхода и хвост лога (16 КиБ); курсор —
+                                    только новые данные; --wait до 60 с, не останавливает задачу
   ferry kill <цели> <имя>           остановить задачу
   ferry stop <цели>                 снять всё: команды и задачи
   ferry put <цели> <файл>...        файлы отсюда — на то же место в проекте на устройстве
@@ -163,6 +166,7 @@ fn main() {
         ["jobs", "--tsv"] => jobs::list(true),
         ["jobs", spec, "--json"] => devices::jobs(spec, true),
         ["jobs", spec] => devices::jobs(spec, false),
+        ["result", rest @ ..] => job_result(rest),
         ["log", device, name] if *name != "-f" => devices::log(device, name, false),
         ["log", device, name, "-f"] => devices::log(device, name, true),
         ["kill", spec, name] => devices::kill(spec, name),
@@ -234,6 +238,39 @@ fn main() {
             std::process::exit(255)
         }
     }
+}
+
+fn job_result(args: &[&str]) -> io::Result<i32> {
+    let (device, name, mut rest) = match args {
+        [device, name, rest @ ..] if !name.starts_with("--") => (Some(*device), *name, rest),
+        [name, rest @ ..] => (None, *name, rest),
+        _ => return usage(),
+    };
+    let (mut cursor, mut max_bytes, mut wait) = (None, jobs::DEFAULT_BYTES, 0);
+    while !rest.is_empty() {
+        match rest {
+            ["--cursor", value, tail @ ..] if cursor.is_none() => {
+                cursor = Some(*value);
+                rest = tail;
+            }
+            ["--max-bytes", value, tail @ ..] => {
+                max_bytes = match value.parse::<u32>() {
+                    Ok(n) if (4..=jobs::MAX_BYTES).contains(&n) => n,
+                    _ => return usage(),
+                };
+                rest = tail;
+            }
+            ["--wait", value, tail @ ..] => {
+                wait = match value.parse::<u32>() {
+                    Ok(n) if n <= 60 => n,
+                    _ => return usage(),
+                };
+                rest = tail;
+            }
+            _ => return usage(),
+        }
+    }
+    devices::job_result(device, name, cursor, max_bytes, wait)
 }
 
 /// `run <цели> [--desk] [--no-sync] [--] <команда>`: флаги — только до команды.

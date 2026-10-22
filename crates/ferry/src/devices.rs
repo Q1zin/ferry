@@ -611,6 +611,33 @@ pub fn log(device: &str, name: &str, follow: bool) -> io::Result<i32> {
     finish(stream(request, &Printer::new(None)))
 }
 
+/// Машиночитаемый результат: всегда JSON, код процесса — код завершившейся задачи.
+pub fn job_result(
+    device: Option<&str>,
+    name: &str,
+    cursor: Option<&str>,
+    max_bytes: u32,
+    wait: u32,
+) -> io::Result<i32> {
+    finish((|| {
+        let Response::JobResult(result) = ask(Request::JobResult {
+            device: device.map(String::from),
+            name: name.into(),
+            cursor: cursor.map(String::from),
+            max_bytes,
+            wait,
+        })?
+        else {
+            return Err(unexpected());
+        };
+        let code = result.command_code();
+        let mut value = serde_json::to_value(result).map_err(|e| Fail::new(e.to_string()))?;
+        value["device"] = device.unwrap_or("local").into();
+        println!("{value}");
+        Ok(code)
+    })())
+}
+
 /// `ferry doctor <цели>`: готово ли устройство собирать этот проект.
 pub fn doctor(spec: &str) -> io::Result<i32> {
     let repo = match sync::repo() {
