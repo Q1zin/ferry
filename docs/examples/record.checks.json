@@ -1,0 +1,28 @@
+{
+  "profiles": {
+    "desktop-recorded": {
+      "headless": false,
+      "timeout": 300,
+      "platforms": {
+        "macos": {
+          "build": "bun run build",
+          "launch": "./target/debug/my-app --title 'My App {run}'",
+          "command": "bun run test:desktop -- --junit '{output}/junit.xml'",
+          "shell": "bash",
+          "tools": ["bun"]
+        },
+        "windows": {
+          "build": "bun run build; exit $LASTEXITCODE",
+          "launch": ".\\target\\debug\\my-app.exe --title 'My App {run}'; exit $LASTEXITCODE",
+          "command": "bun run test:desktop -- --junit '{output}/junit.xml'; exit $LASTEXITCODE",
+          "shell": "powershell",
+          "tools": ["bun"]
+        }
+      },
+      "ready_window": "My App {run}",
+      "window": "My App {run}",
+      "record": { "window": "My App {run}", "fps": 10, "max_seconds": 300 },
+      "junit": "junit.xml"
+    }
+  }
+}

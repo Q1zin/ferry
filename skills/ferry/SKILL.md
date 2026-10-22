@@ -195,3 +195,59 @@ selected; для value нужен value, для boolean — state. Услови�
 observations. Исходники и квитанции не удаляются, ссылки не обходятся; активное и свежее
 защищено. Перед чисткой кеша останови и сторонние сборки. Архивы одной задачи удаляй через
 history с preview; pin защищает важные запуски. Автоматической очистки нет.
+
+
+## Результаты и повторяемая работа (0.1.24)
+
+Начало: `setup status`, `setup install claude|codex`, затем новая сессия агента. Другие агенты
+автоматически не настраиваются. `setup smoke DEVICE` — фоновая проверка без экрана/ввода и
+изменений проекта. `init --template smoke|tauri|electron|web` создаёт ferry.checks.json без
+перезаписи. Команду test и JUnit в шаблоне адаптируй под проект.
+
+`check list --limit 50 [--before CREATED:ID]` — история пульта. `check compare BASE CANDIDATE`
+требует одинакового профиля, проекта (root/name/prefix), упорядоченной матрицы/ОС и полного
+однозначного testcase index. Новые падающие тесты тоже дают код 1; пропуски/удаление не исправления. Сравнивает
+[device,suite,class,name,file], отдельно показывает добавленные/удалённые тесты. `comparable:false`
+не означает отсутствие регрессий. `check export ID --dest NEW_DIR` собирает все цели/этапы,
+логи, исходный JUnit и артефакты в переносимый каталог и ZIP. Всегда проверяй complete/errors;
+при недоступном узле пакет частичный. Предел evidence — 512 МиБ, индекс — 20 000 testcase / 4 МиБ,
+исходный JUnit — 16 МиБ. В UI до 200 testcase на цель / 1 МиБ предпросмотра; полный XML в ZIP.
+
+`queue add PROFILE --file FILE --devices all|local|os:windows|NAME,NAME [--os windows|macos]
+--wait 600 --id UNIQUE` фиксирует профиль/снимок при постановке, затем ждёт совместимое
+устройство. Сохранённый git-снимок всегда запускается в изоляции. --home/--no-sync фиксируют только профиль. --wait 1..86400 ограничивает назначение, timeout профиля — проверку. До двух операций,
+не более одной на устройство. Для GUI нужны active, незаблокированный экран, свободная бронь,
+известный physical idle >= 30 секунд; это не разрешение нарушить указания человека. Для headless
+разрешён no-desktop. `queue status|cancel|resume ID`, `queue list`; `queue restart ID` создаёт
+новый ID только для завершённой операции и сохраняет исходный профиль/снимок. При uncertain
+не переноси и не создавай дубликат: проверь status, затем resume того же ID. Пульт должен работать,
+watchdog нет. Очередь дополнительно проверяет окончательный atomic admission на узле.
+
+`run SELECTOR --grouped [--device NAME] -- COMMAND` сохраняет раздельные stdout/stderr и
+report.json в ~/.ferry/outputs/run-...; filter пересекается с SELECTOR. До 64 целей / 8 параллельно,
+64 МиБ вывода на устройство. Не путай grouped run с очередью check.
+
+Workflow JSON: schema_version 1, name, parameters {key: default-or-null}, preconditions[], steps[].
+`workflow validate FILE --param key=value`; `workflow run FILE --device DEVICE --job JOB
+--run EXACT_RUN --window EXACT_TITLE --param key=value [--dry-run]`. До 100 шагов, 32 параметров,
+timeout шага 0..30. Step={id,action?,target?,preconditions?,expect,new_window?,allow_already?}.
+Action={"click":{"name":"Save"}}|{"key":"ctrl+s"}|{"type":"Hello"}; без action — только проверка.
+Подстановки ${key} — строки, не код. Expect — assertion как act V2. Только своё живое окно,
+проверка ownership перед каждым шагом, никаких автофокуса/retry/resume. type требует
+сфокусированную цель, не очищает поле. Dry-run — planned, не прошедший тест; будущие
+предусловия могут не пройти без ввода. После ошибки — новое observe. Неизвестные поле,
+дерево или локатор не подтверждают результат.
+
+Запись: `capture start DEVICE --job JOB --run RUN --window EXACT --id UNIQUE --fps 10
+--max-seconds 300`, затем `capture status|stop ID`. Нужен ffmpeg на пульте; автоматически не устанавливается. Связана с точным
+живым run и его окном; пределы — 128 МиБ кадров + 128 МиБ видео / 18 000 кадров. Потеря связи,
+окна и 20 секунд без кадров дают частичный failed. MP4 и manifest содержат исходные временные
+метки. Для check: record={"window":"My App {run}","fps":10,"max_seconds":300}, только
+headless:false + launch; после готовности пишет окно, завершает запись и собирает evidence.
+Desktop lease нужна всю запись. Живой экран GUI — до 10 fps основного дисплея; ввод включается
+отдельно. Фактическая частота зависит от ОС/сети.
+
+`server --port 8080` — только 127.0.0.1, Bearer-токен в напечатанной ссылке, Host/Origin проверяются.
+По умолчанию read-only + export; --allow-actions разрешает resume/cancel существующих check.
+Нет LAN, shell API, установки агента или связывания. Токен не передавай другим. История и
+экспорты автоматически не удаляются. Перед передачей пакета проверь содержащиеся в нём данные проекта.
