@@ -91,6 +91,7 @@ ferry move win-10 458 390                # навести (hover)
 ferry scroll win-10 -3                   # колесо: больше нуля — вверх
 ferry type win-10 'Привет, мир'          # юникодом: раскладка не важна
 ferry key win-10 ctrl+a delete alt+f4    # комбинации по порядку
+ferry key win-10 ctrl+= ctrl+- ctrl++   # = и -; plus или + — Shift+= (ANSI)
 ferry key win-10 space --for 2           # держать 2 с и отпустить (до 60 с)
 ferry click win-10 300 200 --hold shift  # клик с зажатыми клавишами: shift/ctrl/cmd+клик
 ferry drag win-10 100 200 400 200        # перетащить левой кнопкой (тоже с --hold)
