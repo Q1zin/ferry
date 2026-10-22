@@ -1,0 +1,72 @@
+name: check
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: apps/ferry
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # Browser fixtures mock Tauri; they never inject input into the host desktop.
+      - run: bunx playwright-core install chromium
+        working-directory: apps/ferry
+      - run: bun run test:ui
+        working-directory: apps/ferry
+        env:
+          FERRY_UI_SHOTS: ${{ runner.temp }}/ferry-ui
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-failure
+          path: ${{ runner.temp }}/ferry-ui
+          if-no-files-found: ignore
+
+  windows-cross:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis libayatana-appindicator3-dev
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.11
+      - run: bun install --frozen-lockfile && bun run build
+        working-directory: apps/ferry
+      - run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings
+
+  windows-native:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # Headless unit suites only. No screen capture, keyboard/mouse injection, or installed ferry service.
+      - run: cargo test -p ferry-core --lib
+      - run: cargo test -p ferry --bin ferry
+      - run: cargo test -p ferry-net --lib
+      - run: cargo test -p ferry --test windows_headless
