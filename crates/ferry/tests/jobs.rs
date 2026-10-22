@@ -112,17 +112,12 @@ fn invalid_job_names_cannot_touch_state_or_other_jobs() {
 #[test]
 fn job_runs_in_background_and_records_its_exit() {
     let node = Node::new("exit");
-    let start = Instant::now();
-    assert!(
-        node.ferry(&["job", "t", "echo hi; pwd; sleep 1; exit 3"])
-            .status
-            .success()
-    );
-    assert!(
-        start.elapsed() < Duration::from_secs(1),
-        "запуск ждал задачу"
-    );
-    assert!(node.jobs().contains("работает"));
+    // The job cannot finish before the test releases it. This proves background
+    // execution without comparing scheduler latency to a one-second sleep.
+    let command = r#"echo hi; pwd; i=0; while [ ! -f release ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done; [ -f release ] || exit 97; exit 3"#;
+    assert!(node.ferry(&["job", "t", command]).status.success());
+    assert!(node.jobs().contains("работает"), "запуск ждал задачу");
+    fs::write(node.home.join("release"), "continue").unwrap();
 
     node.wait_until("код 3", |jobs| jobs.contains("завершилась, код 3"));
     let log = String::from_utf8(node.ferry(&["log", "t"]).stdout).unwrap();

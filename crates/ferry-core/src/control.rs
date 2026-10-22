@@ -299,6 +299,11 @@ pub fn ended_sessions(sessions: &[String]) -> io::Result<Vec<String>> {
     Ok(sessions
         .iter()
         .filter(|session| {
+            if session.starts_with("agent:") {
+                return crate::ferry_home()
+                    .and_then(|root| crate::session::ended(&root, session))
+                    .unwrap_or(false);
+            }
             session_pid(session).is_some_and(|pid| {
                 !table.iter().any(|(id, _, comm)| {
                     *id == pid && program_name(comm).eq_ignore_ascii_case("claude")
@@ -383,6 +388,23 @@ fn process_table() -> io::Result<Vec<(u32, u32, String)>> {
         }
         Ok(table)
     }
+}
+
+pub fn descendant_pids(root: u32) -> io::Result<Vec<u32>> {
+    let table = process_table()?;
+    let mut ids = vec![root];
+    for _ in 0..64 {
+        let more: Vec<_> = table
+            .iter()
+            .filter(|(id, parent, _)| !ids.contains(id) && ids.contains(parent))
+            .map(|(id, _, _)| *id)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        ids.extend(more);
+    }
+    Ok(ids)
 }
 
 /// Ближайший предок `pid` с программой `name` по таблице (pid, ppid, путь программы).

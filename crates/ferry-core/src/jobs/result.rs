@@ -32,7 +32,7 @@ impl JobResult {
     }
 }
 
-pub(crate) fn new_run_id() -> String {
+pub fn new_run_id() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -20,8 +20,10 @@ use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
 pub mod evidence;
+pub mod execution;
 mod history;
-pub(crate) use result::new_run_id as unique_id;
+pub mod probe;
+pub use result::new_run_id as unique_id;
 mod result;
 pub use result::{DEFAULT_BYTES, JobResult, MAX_BYTES, result_in};
 
@@ -118,6 +120,7 @@ pub fn start_in_shell(
     // Отклонить неподдерживаемую оболочку до остановки существующей задачи.
     shell_with(cmd, shell)?;
     let root = crate::ferry_home()?;
+    let _admission = evidence::guard(&root, "execution-admission")?;
     let _guard = evidence::guard(&root, name)?;
     let dir = dir(name)?;
     let supervisor = prepare_supervisor(&crate::ferry_home()?, supervisor)?;
@@ -125,14 +128,41 @@ pub fn start_in_shell(
         stop_job(name)?;
     }
     evidence::archive(&root, name)?;
-    fs::create_dir_all(&dir)?;
-    fs::write(dir.join("run-id"), result::new_run_id())?;
-    fs::write(dir.join("cmd"), cmd)?;
-    fs::write(dir.join("shell"), serde_json::to_vec(&shell)?)?;
-    fs::write(dir.join("cwd"), cwd.to_string_lossy().as_bytes())?;
-    fs::write(dir.join("started"), now().to_string())?;
-    fs::File::create(dir.join("log"))?;
+    launch(
+        &root,
+        name,
+        cmd,
+        cwd,
+        env,
+        &supervisor,
+        shell,
+        &result::new_run_id(),
+    )?;
+    Ok(format!("ferry: задача {name} запущена"))
+}
 
+#[allow(clippy::too_many_arguments)]
+fn launch(
+    root: &Path,
+    name: &str,
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    supervisor: &Path,
+    shell: Shell,
+    run_id: &str,
+) -> io::Result<()> {
+    let dir = root.join("jobs").join(name);
+    fs::create_dir_all(&dir)?;
+    crate::write_private(&dir.join("run-id"), run_id)?;
+    crate::write_private(&dir.join("cmd"), cmd)?;
+    crate::write_private_bytes(&dir.join("shell"), &serde_json::to_vec(&shell)?)?;
+    crate::write_private(&dir.join("cwd"), &cwd.to_string_lossy())?;
+    crate::write_private(&dir.join("started"), &now().to_string())?;
+    fs::File::create(dir.join("log"))?;
+    crate::write_private(&dir.join("supervisor-control"), "1")?;
+    execution::event(&dir, "accepted", serde_json::json!({}))?;
+    let supervisor = prepare_supervisor(root, supervisor)?;
     let mut supervisor = Command::new(supervisor);
     supervisor
         .args(["job-supervise", name])
@@ -140,20 +170,36 @@ pub fn start_in_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // После переноса exe в runners его собственный каталог больше не содержит CLI.
     crate::desk::ferry_path(&mut supervisor);
     detach(&mut supervisor);
     let pid = supervisor.spawn()?.id();
-    fs::write(dir.join("pid"), pid.to_string())?;
-    Ok(format!("ferry: задача {name} запущена"))
+    crate::write_private(&dir.join("pid"), &pid.to_string())?;
+    Ok(())
+}
+
+/// Publish only an already-held lock, so readers cannot see an unlocked startup file.
+fn supervisor_lock(dir: &Path) -> io::Result<fs::File> {
+    let starting = dir.join("lock-starting");
+    let published = dir.join("lock");
+    let lock = fs::File::create_new(&starting)?;
+    lock.lock()?;
+    // create_new serializes simultaneous publishers; check after taking that claim.
+    if published.exists() {
+        drop(lock);
+        fs::remove_file(starting)?;
+        return Err(io::Error::other(
+            "надсмотрщик этого запуска уже был запущен",
+        ));
+    }
+    fs::rename(starting, published)?;
+    Ok(lock)
 }
 
 /// `ferry job-supervise <имя>`: запустить команду задачи, дождаться, записать код выхода.
 pub fn supervise(name: &str) -> io::Result<i32> {
     let dir = dir(name)?;
     // Держать до конца: по ней [`running`] знает, что надсмотрщик жив.
-    let lock = fs::File::create(dir.join("lock"))?;
-    lock.lock()?;
+    let lock = supervisor_lock(&dir)?;
     let cmd = fs::read_to_string(dir.join("cmd"))?;
     let cwd = fs::read_to_string(dir.join("cwd"))?;
     // Лог создан пустым при запуске, пишет только надсмотрщик — хватит обычной записи.
@@ -166,6 +212,10 @@ pub fn supervise(name: &str) -> io::Result<i32> {
         Err(e) => return Err(e),
     };
     let mut command = shell_with(&cmd, choice)?;
+    crate::write_private(
+        &dir.join("shell-program"),
+        &command.get_program().to_string_lossy(),
+    )?;
     command
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -175,16 +225,65 @@ pub fn supervise(name: &str) -> io::Result<i32> {
         Ok(mut child) => {
             let _tree = crate::desk::Tree::track(child.id());
             fs::write(dir.join("child"), child.id().to_string())?;
-            exit_code(child.wait()?)
+            execution::event(
+                &dir,
+                "process-started",
+                serde_json::json!({"pid":child.id()}),
+            )?;
+            let timeout = fs::read(dir.join("execution.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<execution::StartRequest>(&bytes).ok())
+                .and_then(|request| request.timeout_sec);
+            let deadline = timeout
+                .map(|seconds| std::time::Instant::now() + Duration::from_secs(seconds.into()));
+            loop {
+                let stopped = dir.join("stop-requested").exists();
+                let timed_out = deadline.is_some_and(|d| std::time::Instant::now() >= d);
+                if stopped || timed_out {
+                    if timed_out {
+                        crate::write_private(&dir.join("timed-out"), "true")?;
+                        execution::event(&dir, "timeout", serde_json::json!({"seconds":timeout}))?;
+                    }
+                    terminate_command(&mut child)?;
+                    crate::write_private(
+                        &dir.join("killed"),
+                        if timed_out { "timeout" } else { "stopped" },
+                    )?;
+                    break if timed_out { 124 } else { 143 };
+                }
+                if let Some(status) = child.try_wait()? {
+                    break exit_code(status);
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
         }
         Err(e) => {
             writeln!(&log, "ferry: не удалось запустить: {e}")?;
             127
         }
     };
+    execution::event(
+        &dir,
+        "process-exited",
+        serde_json::json!({"exit_code":code}),
+    )?;
+    crate::write_private(&dir.join("finished"), &now().to_string())?;
     crate::write_private(&dir.join("exit"), &code.to_string())?;
     drop(lock);
     Ok(code)
+}
+
+fn terminate_command(child: &mut std::process::Child) -> io::Result<()> {
+    let _ = kill_tree(child.id());
+    #[cfg(unix)]
+    {
+        // Keep the leader unreaped until KILL: its process-group id cannot be reused meanwhile.
+        thread::sleep(Duration::from_secs(2));
+        let _ = crate::desk::force_kill_tree(child.id());
+    }
+    let _ = child.kill();
+    let _ = child.wait()?;
+    Ok(())
 }
 
 /// Задача узла — для `ferry jobs` и приложения.
@@ -317,7 +416,19 @@ fn stop_at(name: &str, dir: &Path) -> io::Result<String> {
             state(dir)
         ));
     }
+    if dir.join("supervisor-control").exists() {
+        crate::write_private(&dir.join("stop-requested"), "stop")?;
+        execution::event(dir, "stop-requested", serde_json::json!({}))?;
+        for _ in 0..70 {
+            if !running(dir) {
+                return Ok(format!("ferry: задача {name} остановлена"));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        return Err(io::Error::other("надсмотрщик ещё не подтвердил остановку"));
+    }
     fs::write(dir.join("killed"), "")?;
+    execution::event(dir, "stop-requested", serde_json::json!({}))?;
     // Команда в своей группе (unix) или дереве (Windows); надсмотрщик запишет её код.
     // Если надсмотрщик ещё не успел её запустить — гасим его самого.
     let pid = read(dir, "child").or_else(|| read(dir, "pid"));
@@ -329,6 +440,18 @@ fn stop_at(name: &str, dir: &Path) -> io::Result<String> {
             return Ok(format!("ferry: задача {name} остановлена"));
         }
         thread::sleep(Duration::from_millis(100));
+    }
+    if let Some(pid) = read(dir, "child")
+        .or_else(|| read(dir, "pid"))
+        .and_then(|p| p.parse().ok())
+    {
+        let _ = crate::desk::force_kill_tree(pid);
+        for _ in 0..20 {
+            if !running(dir) {
+                return Ok(format!("ferry: задача {name} остановлена"));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
     }
     let why = match killed {
         Some(Err(e)) => e.to_string(),
@@ -543,6 +666,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn supervisor_publishes_an_already_held_lock() {
+        let dir = std::env::temp_dir().join(format!("ferry-lock-publish-{}", unique_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let held = supervisor_lock(&dir).unwrap();
+        assert!(!dir.join("lock-starting").exists());
+        let observed = fs::File::open(dir.join("lock")).unwrap();
+        assert!(matches!(
+            observed.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        assert!(running(&dir));
+        assert!(supervisor_lock(&dir).is_err());
+        assert!(running(&dir));
+        drop(held);
+        assert!(!running(&dir));
+        drop(observed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn supervisors_keep_their_build_and_verify_cached_bytes() {
         let root = std::env::temp_dir().join(format!("ferry-runners-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -587,5 +730,43 @@ mod tests {
             (jobs[2].started, jobs[2].label().as_str()),
             (None, "остановлена")
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod termination_tests {
+    use super::*;
+    #[test]
+    fn stopping_a_shell_also_kills_a_child_which_ignores_term() {
+        let file = std::env::temp_dir().join(format!("ferry-termination-{}", unique_id()));
+        let script = format!(
+            "trap 'exit 0' TERM; (trap '' TERM; while :; do sleep 1; done) & echo $! > {}; wait",
+            crate::sh_quote(&file.to_string_lossy())
+        );
+        let mut child = shell_with(&script, Shell::Bash)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        for _ in 0..100 {
+            if file.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let pid = fs::read_to_string(&file).unwrap();
+        terminate_command(&mut child).unwrap();
+        let status = Command::new("ps")
+            .args(["-p", pid.trim(), "-o", "stat="])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            state.trim().is_empty() || state.trim().starts_with('Z'),
+            "descendant still alive: {state}"
+        );
+        fs::remove_file(file).unwrap();
     }
 }
