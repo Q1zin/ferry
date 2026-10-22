@@ -12,8 +12,25 @@ use std::process::Command;
 use crate::exit_code;
 
 pub mod act;
+mod act_v2;
+pub mod elements;
 pub mod observe;
 static INPUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Visible windows belonging to an explicitly supplied process family.
+pub fn owned_windows(pids: &[u32], title: &str) -> io::Result<Vec<Window>> {
+    let title = title.to_lowercase();
+    Ok(os::windows()?
+        .into_iter()
+        .filter(|w| {
+            w.rect.is_some()
+                && u32::try_from(w.pid)
+                    .ok()
+                    .is_some_and(|pid| pids.contains(&pid))
+                && w.title.to_lowercase().contains(&title)
+        })
+        .collect())
+}
 
 /// Снимок всего экрана в PNG.
 pub fn screenshot(file: &str) -> io::Result<i32> {
@@ -679,6 +696,9 @@ mod none {
     pub fn ui(_: &str) -> io::Result<String> {
         unsupported()
     }
+    pub fn structured(_: &str) -> io::Result<super::elements::Tree> {
+        unsupported().map(|_| unreachable!())
+    }
     pub fn find(_: &str) -> io::Result<(i32, i32)> {
         Err(io::Error::other("окна и ввод — только на Windows и macOS"))
     }
@@ -1297,8 +1317,12 @@ mod mac {
         name: String,
         id: String,
         rect: (f64, f64, f64, f64),
-        enabled: bool,
-        focused: bool,
+        enabled: Option<bool>,
+        focused: Option<bool>,
+        value: Option<String>,
+        checked: Option<bool>,
+        selected: Option<bool>,
+        protected: bool,
     }
 
     impl Element {
@@ -1316,10 +1340,10 @@ mod mac {
             }
             let (x, y, width, height) = self.rect;
             text += &format!(" {},{} {}×{}", px(x), px(y), px(width), px(height));
-            if !self.enabled {
+            if self.enabled == Some(false) {
                 text += " выключен";
             }
-            if self.focused {
+            if self.focused == Some(true) {
                 text += " *фокус";
             }
             text
@@ -1405,7 +1429,11 @@ mod mac {
     /// дети; элементы вне окна (прокручены, свёрнуты) пропускаются вместе с детьми. Предел —
     /// 1500 элементов, как на Windows.
     fn elements(window: &CFType) -> Vec<Element> {
-        const NAMES: [&str; 10] = [
+        elements_limited(window, 1500, false).0
+    }
+
+    fn elements_limited(window: &CFType, limit: usize, containers: bool) -> (Vec<Element>, bool) {
+        const NAMES: [&str; 12] = [
             "AXRole",
             "AXTitle",
             "AXDescription",
@@ -1416,13 +1444,23 @@ mod mac {
             "AXEnabled",
             "AXFocused",
             "AXChildren",
+            "AXSelected",
+            "AXSubrole",
         ];
         let names = CFArray::from_CFTypes(&NAMES.map(CFString::new));
         let mut out = Vec::new();
+        let mut complete = true;
+        let mut visited = 0usize;
         let mut bounds = None;
         let mut stack = vec![(window.clone(), 0usize, 0usize)];
         while let Some((element, depth, level)) = stack.pop() {
-            if out.len() >= 1500 || level > 40 {
+            visited += 1;
+            if visited > 20000 || out.len() >= limit {
+                complete = false;
+                break;
+            }
+            if level > 40 {
+                complete = false;
                 continue;
             }
             let mut values: CFArrayRef = std::ptr::null();
@@ -1435,6 +1473,7 @@ mod mac {
                 )
             };
             if error != 0 || values.is_null() {
+                complete = false;
                 continue;
             }
             let values: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(values) };
@@ -1468,6 +1507,11 @@ mod mac {
                     .then_some((xy[0], xy[1]))
             };
             let (Some((x, y)), Some((width, height))) = (pair(5, 1), pair(6, 2)) else {
+                // Missing geometry prevents proving a complete visible subtree.
+                complete = false;
+                for child in items(get(9)).into_iter().rev() {
+                    stack.push((child, depth, level + 1));
+                }
                 continue;
             };
             let (left, top, right, bottom) = *bounds.get_or_insert((x, y, x + width, y + height));
@@ -1476,9 +1520,35 @@ mod mac {
             }
             let role = text(0);
             let role = role.strip_prefix("AX").unwrap_or(&role).to_string();
+            let protected = text(11) == "AXSecureTextField";
+            let value = if protected {
+                None
+            } else {
+                get(3)
+                    .and_then(|v| v.downcast_into::<CFString>())
+                    .map(|s| s.to_string())
+            };
+            let checked = if ["CheckBox", "RadioButton", "Switch"].contains(&role.as_str()) {
+                get(3)
+                    .and_then(|v| v.downcast_into::<CFNumber>())
+                    .and_then(|v| v.to_i64())
+                    .and_then(|n| match n {
+                        0 => Some(false),
+                        1 => Some(true),
+                        _ => None,
+                    })
+            } else {
+                None
+            };
             let name = [1, 2, 3]
-                .map(text)
                 .into_iter()
+                .filter(|i| {
+                    *i != 3
+                        || (!protected
+                            && !(containers
+                                && ["TextField", "TextArea", "ComboBox"].contains(&role.as_str())))
+                })
+                .map(text)
                 .find(|s| !s.is_empty())
                 .unwrap_or_default();
             let id = text(4);
@@ -1486,15 +1556,19 @@ mod mac {
                 && id.is_empty()
                 && ["Group", "ScrollArea", "SplitGroup", "LayoutArea", "Unknown"]
                     .contains(&role.as_str());
-            let next = if level == 0 || !noise {
+            let next = if containers || level == 0 || !noise {
                 out.push(Element {
                     depth,
                     role,
                     name,
                     id,
                     rect: (x, y, width, height),
-                    enabled: flag(7) != Some(false),
-                    focused: flag(8) == Some(true),
+                    enabled: flag(7),
+                    focused: flag(8),
+                    value,
+                    checked,
+                    selected: flag(10),
+                    protected,
                 });
                 depth + 1
             } else {
@@ -1505,7 +1579,44 @@ mod mac {
                 stack.push((child, next, level + 1));
             }
         }
-        out
+        (out, complete)
+    }
+
+    pub fn structured(filter: &str) -> io::Result<super::elements::Tree> {
+        let (window, _) = window(filter)?;
+        let (native, complete) = elements_limited(&window, 5000, true);
+        let k = scale();
+        let px = |v: f64| (v * k).round() as i64;
+        let mut parents = Vec::new();
+        let mut elements = Vec::new();
+        for e in native {
+            parents.truncate(e.depth);
+            let index = elements.len() as u32;
+            let parent = parents.last().copied();
+            parents.push(index);
+            let clip = |s: &str| crate::junit::clip(s, 512);
+            let name_truncated = e.name.len() > 512;
+            let id_truncated = e.id.len() > 512;
+            let value_truncated = e.value.as_ref().is_some_and(|v| v.len() > 512);
+            elements.push(super::elements::Element {
+                index,
+                parent,
+                role: e.role,
+                name: clip(&e.name),
+                id: clip(&e.id),
+                rect: Some((px(e.rect.0), px(e.rect.1), px(e.rect.2), px(e.rect.3))),
+                enabled: e.enabled,
+                focused: e.focused,
+                value: e.value.map(|v| clip(&v)),
+                checked: e.checked,
+                selected: e.selected,
+                protected: e.protected,
+                name_truncated,
+                id_truncated,
+                value_truncated,
+            });
+        }
+        Ok(super::elements::Tree { elements, complete })
     }
 
     pub fn ui(filter: &str) -> io::Result<String> {
@@ -2183,6 +2294,10 @@ mod win {
         automation(&["tree", window])
     }
 
+    pub fn structured(window: &str) -> io::Result<super::elements::Tree> {
+        serde_json::from_str(&automation(&["structured", window])?).map_err(io::Error::other)
+    }
+
     /// Центр видимого элемента в окне с фокусом: по имени (точно, иначе — часть имени) или по
     /// `#id` — у безымянных элементов, вроде поля Блокнота. Не нашёлся или их несколько —
     /// ошибка со списком кандидатов.
@@ -2271,6 +2386,62 @@ function Walk($e, $depth) {
     if ($depth -eq 0 -or -not $noise) { Line $e $depth; $script:count++; $next = $depth + 1 }
     $child = $walker.GetFirstChild($e)
     while ($child) { Walk $child $next; $child = $walker.GetNextSibling($child) }
+}
+
+if ($mode -eq 'structured') {
+    $script:rows = New-Object System.Collections.ArrayList
+    $script:complete = $true
+    $script:visited = 0
+    function Clip($text) {
+        if ($null -eq $text) { return $null }
+        if ([System.Text.Encoding]::UTF8.GetByteCount($text) -gt 512) {
+            $text = $text.Substring(0, [Math]::Min($text.Length, 512))
+            while ([System.Text.Encoding]::UTF8.GetByteCount($text) -gt 509) { $text = $text.Substring(0, $text.Length - 1) }
+            if ($text.Length -gt 0 -and [char]::IsHighSurrogate($text[$text.Length - 1])) { $text = $text.Substring(0, $text.Length - 1) }
+            return $text + '…'
+        }
+        return $text
+    }
+    function Structured($e, $parent, $depth) {
+        $script:visited++
+        if ($script:rows.Count -ge 5000 -or $script:visited -gt 20000 -or $depth -gt 40) { $script:complete = $false; return }
+        try {
+            $c = $e.Current
+            if ($depth -gt 0 -and $c.IsOffscreen) { return }
+            $index = $script:rows.Count
+            $r = $c.BoundingRectangle
+            $rect = $null
+            if (-not $r.IsEmpty) { $rect = @([long]($r.X - $screen.X), [long]($r.Y - $screen.Y), [long]$r.Width, [long]$r.Height) }
+            $value = $null; $checked = $null; $selected = $null; $pattern = $null; $valueTruncated = $false
+            if (-not $c.IsPassword -and $e.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { $rawValue = $pattern.Current.Value; $valueTruncated = [System.Text.Encoding]::UTF8.GetByteCount($rawValue) -gt 512; $value = Clip $rawValue }
+            $pattern = $null
+            if ($e.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)) {
+                if ($pattern.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::On) { $checked = $true }
+                elseif ($pattern.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::Off) { $checked = $false }
+            }
+            $pattern = $null
+            if ($e.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) { $selected = [bool]$pattern.Current.IsSelected }
+            $script:rows.Add(@{
+                index = [uint32]$index; parent = $parent
+                role = ($c.ControlType.ProgrammaticName -replace '^ControlType\.', '')
+                name = (Clip $c.Name); id = (Clip $c.AutomationId); rect = $rect
+                enabled = [bool]$c.IsEnabled; focused = [bool]$c.HasKeyboardFocus
+                value = $value; checked = $checked; selected = $selected; protected = [bool]$c.IsPassword
+                name_truncated = ([System.Text.Encoding]::UTF8.GetByteCount($c.Name) -gt 512)
+                id_truncated = ([System.Text.Encoding]::UTF8.GetByteCount($c.AutomationId) -gt 512)
+                value_truncated = $valueTruncated
+            }) | Out-Null
+            $child = $walker.GetFirstChild($e)
+            while ($child) {
+                Structured $child $index ($depth + 1)
+                if ($script:rows.Count -ge 5000 -or $script:visited -gt 20000) { $script:complete = $false; break }
+                $child = $walker.GetNextSibling($child)
+            }
+        } catch { $script:complete = $false }
+    }
+    Structured (Window $arg) $null 0
+    @{ elements = @($script:rows.ToArray()); complete = $script:complete } | ConvertTo-Json -Depth 10 -Compress
+    exit 0
 }
 
 if ($mode -eq 'tree') {
