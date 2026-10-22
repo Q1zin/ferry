@@ -130,6 +130,14 @@ pub enum Request {
     Update {
         device: Option<String>,
     },
+    UpdateFile {
+        device: Option<String>,
+        file: PathBuf,
+        signature: String,
+    },
+    UpdateStatus {
+        device: Option<String>,
+    },
     /// Снимок области `[x, y, ширина, высота]` в пикселях снимка — в файл `file`.
     ShotArea {
         device: String,
@@ -174,6 +182,7 @@ pub enum Request {
 #[serde(rename_all = "kebab-case")]
 pub enum Response {
     State(Snapshot),
+    UpdateStatus(crate::update::Status),
     Pairing(PairingInfo),
     Peer(PeerView),
     Done,
@@ -390,6 +399,9 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
         .and_then(|(port, token)| Some((port.parse::<u16>().ok()?, token.to_string())))
         .ok_or_else(|| io::Error::other(format!("испорчен {}", dir.join("app").display())))?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| not_running())?;
+    if matches!(&request, Request::UpdateStatus { .. }) {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    }
     let session = session();
     let envelope = Envelope {
         token,

@@ -387,6 +387,24 @@ async fn answer(
             close: true,
         } => Response::Message(agent.close_tunnel(&device, port)?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
+        Request::UpdateStatus { device } => Response::UpdateStatus(match device {
+            None => agent.update_status(),
+            Some(device) => agent.device(&device)?.update_status().await?,
+        }),
+        Request::UpdateFile {
+            device,
+            file,
+            signature,
+        } => Response::Message(match device {
+            // NSIS не может заменить работающий установленный ferry.exe (сам CLI).
+            None if cfg!(windows) => {
+                return Err(Fail::new(
+                    "обновляй эту Windows с другого устройства: работающий локальный CLI мешает установщику заменить ferry.exe",
+                ));
+            }
+            None => agent.update_file_self(file, signature).await?,
+            Some(device) => agent.device(&device)?.update_file(&file, signature).await?,
+        }),
         Request::Update { device: None } => Response::Message(agent.update_self().await?),
         Request::Update {
             device: Some(device),

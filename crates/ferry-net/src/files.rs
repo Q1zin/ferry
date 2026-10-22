@@ -42,14 +42,29 @@ pub async fn send_file(path: &Path, tx: &mpsc::Sender<Chunk>) -> Result<(), Fail
 /// Сначала во временный файл рядом: отказ или обрыв — прежний файл цел (последний удачный
 /// снимок экрана), огрызка не остаётся.
 pub async fn recv_file(rx: &mut mpsc::Receiver<Chunk>, path: &Path) -> Result<(), Fail> {
+    recv_file_limited(rx, path, u64::MAX).await
+}
+
+pub async fn recv_file_limited(
+    rx: &mut mpsc::Receiver<Chunk>,
+    path: &Path,
+    limit: u64,
+) -> Result<(), Fail> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
     let received = async {
         let mut file = tokio::fs::File::create(&part).await?;
+        let mut received = 0u64;
         loop {
             match rx.recv().await.map_err(crate::proto::lost)? {
-                Some(Chunk::Data(data)) => file.write_all(&data).await?,
+                Some(Chunk::Data(data)) => {
+                    received = received.saturating_add(data.len() as u64);
+                    if received > limit {
+                        return Err(Fail::new("пакет превышает допустимый размер"));
+                    }
+                    file.write_all(&data).await?;
+                }
                 Some(Chunk::End) => break,
                 Some(Chunk::Fail(fail)) => return Err(fail),
                 None => return Err(Fail::new("передача оборвалась")),
@@ -143,6 +158,29 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(root.join("out/.env")).unwrap(), "KEY=1");
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn oversized_and_interrupted_packages_leave_no_partial_file() {
+        for interrupted in [false, true] {
+            let root = std::env::temp_dir()
+                .join(format!("ferry-size-{}-{interrupted}", std::process::id()));
+            fs::create_dir_all(&root).unwrap();
+            let file = root.join("package");
+            let (tx, mut rx) = mpsc::channel(4);
+            tx.send(Chunk::Data(vec![1; 8])).await.unwrap();
+            if !interrupted {
+                tx.send(Chunk::End).await.unwrap();
+            }
+            drop(tx);
+            assert!(
+                recv_file_limited(&mut rx, &file, if interrupted { 10 } else { 7 })
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]
