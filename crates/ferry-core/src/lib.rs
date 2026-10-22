@@ -19,6 +19,7 @@ pub mod project;
 pub mod relay;
 pub mod screen;
 pub mod session;
+pub mod storage;
 pub mod sync;
 pub mod update;
 pub mod workspace;
