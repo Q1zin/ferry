@@ -125,7 +125,111 @@ fn same_request(a: &Operation, b: &Operation) -> bool {
         })
 }
 
+/// Queue plans pin code and the profile before choosing an available device.
+pub(crate) fn queue_prepare(
+    name: &str,
+    file: &Path,
+    home: bool,
+    no_sync: bool,
+    isolated: bool,
+    id: &str,
+) -> Result<Value, Fail> {
+    journal::valid_id(id)?;
+    if fs::metadata(file)?.len() > 128 * 1024 {
+        return Err(Fail::new("профили больше 128 КиБ"));
+    }
+    let config: Config = serde_json::from_slice(&fs::read(file)?).map_err(Fail::new)?;
+    let profile = config
+        .profiles
+        .get(name)
+        .ok_or_else(|| Fail::new("нет такого профиля"))?
+        .clone();
+    validate(name, &profile)?;
+    let project = devices::project(!no_sync, home)?.map(|p| Project {
+        root: p.repo.root,
+        name: p.repo.name,
+        prefix: p.repo.prefix,
+        snapshot: p.snapshot,
+    });
+    let isolated = isolated || project.as_ref().is_some_and(|p| p.snapshot.is_some());
+    if isolated && project.as_ref().is_none_or(|p| p.snapshot.is_none()) {
+        return Err(Fail::new("изоляция требует git-проект и синхронизацию"));
+    }
+    serde_json::to_value(Operation {
+        id: id.into(),
+        profile_name: name.into(),
+        profile,
+        cwd: if home {
+            ferry_core::home()?
+        } else {
+            std::env::current_dir()?
+        },
+        project,
+        isolated,
+        targets: Vec::new(),
+        parallel: 1,
+        created: ferry_core::now(),
+    })
+    .map_err(Fail::new)
+}
+
+pub(crate) fn queue_admit(
+    plan: &Value,
+    device: Option<String>,
+    status: Status,
+) -> Result<(), Fail> {
+    let mut op: Operation = serde_json::from_value(plan.clone()).map_err(Fail::new)?;
+    if !op.targets.is_empty() || op.parallel != 1 {
+        return Err(Fail::new(
+            "queue plan должен быть без назначенного устройства",
+        ));
+    }
+    validate(&op.profile_name, &op.profile)?;
+    let root = journal::root(&op.id)?;
+    fs::create_dir_all(&root)?;
+    let init = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("init.lock"))?;
+    init.lock()?;
+    op.targets = vec![(device, Some(status))];
+    let path = root.join("operation.json");
+    if path.exists() {
+        let old: Operation = journal::read(&path)?;
+        if !same_request(&old, &op) {
+            return Err(Fail::new("check id уже связан с другим планом/устройством"));
+        }
+    } else {
+        journal::write(&path, &op)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn queue_status(id: &str) -> Result<Value, Fail> {
+    journal::report(&journal::root(id)?)
+}
+pub(crate) fn queue_control(id: &str, cancel: bool) -> Result<(), Fail> {
+    let root = journal::root(id)?;
+    let _: Operation = journal::read(&root.join("operation.json"))?;
+    let status = journal::report(&root)?;
+    if cancel && !journal::terminal(status["state"].as_str().unwrap_or("")) {
+        ferry_core::write_private(&root.join("cancel"), "cancel requested")?;
+    }
+    if !journal::terminal(status["state"].as_str().unwrap_or("")) {
+        spawn(&root, id, false)?;
+    }
+    Ok(())
+}
+
 pub fn run(args: &[&str]) -> io::Result<i32> {
+    match args {
+        ["list", tail @ ..] => return history::list(tail),
+        ["compare", baseline, candidate] => return history::compare(baseline, candidate),
+        ["export", id, tail @ ..] => return export::run(id, tail),
+        _ => {}
+    }
     if let [
         action @ ("status" | "resume" | "collect" | "cancel" | "worker"),
         id,
@@ -167,12 +271,14 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
         mut home,
         mut no_sync,
         mut detached,
+        mut prepared,
         mut isolated,
         mut id,
     ) = (
         "ferry.checks.json",
         "local",
         2usize,
+        false,
         false,
         false,
         false,
@@ -203,6 +309,10 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
             }
             ["--no-sync", tail @ ..] => {
                 no_sync = true;
+                rest = tail;
+            }
+            ["--prepare", tail @ ..] => {
+                prepared = true;
                 rest = tail;
             }
             ["--detach", tail @ ..] => {
@@ -290,6 +400,12 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
             journal::write(&path, &op)?;
         }
         drop(init);
+        if prepared {
+            let mut report = journal::report(&root)?;
+            report["prepared"] = true.into();
+            println!("{report}");
+            return Ok(0);
+        }
         spawn(&root, &id, false)?;
         output(&root, !detached)
     })())

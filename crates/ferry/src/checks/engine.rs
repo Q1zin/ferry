@@ -531,6 +531,18 @@ impl Run<'_> {
                                 );
                             }
                             self.target.row["tests"] = t;
+                            if self.target.row["test_cases"]["file"].is_null() {
+                                self.target.row["test_cases"] = history::capture_cases(
+                                    self.root,
+                                    self.index,
+                                    &self.device,
+                                    &phase,
+                                    &artifact,
+                                )
+                                .unwrap_or_else(
+                                    |e| json!({"complete":false,"error":e.to_string()}),
+                                );
+                            }
                         }
                         Err(e) => error(&mut self.target, format!("JUnit: {e}")),
                     }
@@ -543,6 +555,59 @@ impl Run<'_> {
                 .into();
         }
         self.save()
+    }
+    fn start_recording(&mut self) -> Result<(), Fail> {
+        let Some(record) = &self.op.profile.record else {
+            return Ok(());
+        };
+        if self.collect_only {
+            return Ok(());
+        }
+        let phase = self
+            .target
+            .phases
+            .iter()
+            .find(|p| p.name == "launch")
+            .ok_or_else(|| Fail::new("нет launch для записи"))?;
+        let id = format!("check-{}", self.token());
+        let options = crate::capture::Options {
+            device: self.device.clone(),
+            job: phase.job.clone(),
+            run: phase
+                .run_id
+                .clone()
+                .ok_or_else(|| Fail::new("нет run_id записи"))?,
+            window: record.window.replace("{run}", &self.token()),
+            fps: record.fps,
+            max_seconds: record.max_seconds,
+        };
+        self.target.row["recording_id"] = id.clone().into();
+        self.save()?;
+        let value = crate::capture::start(&id, options)?;
+        let recording = value["state"] == "recording" && value["frames"].as_u64().unwrap_or(0) > 0;
+        self.target.row["recording"] = value;
+        self.save()?;
+        if !recording {
+            return Err(Fail::new("запись своего окна не началась; см. recording"));
+        }
+        Ok(())
+    }
+    fn stop_recording(&mut self) {
+        if let Some(id) = self.target.row["recording_id"].as_str().map(str::to_string) {
+            match crate::capture::stop(&id) {
+                Ok(v) => {
+                    if v["complete"] != true {
+                        error(&mut self.target, "запись неполная; см. recording");
+                    }
+                    self.target.row["recording"] = v;
+                }
+                Err(e) => {
+                    error(&mut self.target, format!("остановить запись: {e}"));
+                    self.target.row["recording"] =
+                        json!({"id":id,"complete":false,"error":e.to_string()});
+                }
+            }
+        }
     }
     fn finish(&mut self) -> Result<(), Fail> {
         if self.target.outcome.as_deref() == Some("succeeded") {
@@ -580,6 +645,8 @@ impl Run<'_> {
                 self.save()?;
             }
         }
+        self.stop_recording();
+        self.save()?;
         self.cleanup()?;
         if self.target.cleanup_pending {
             return Ok(());
@@ -624,6 +691,7 @@ impl Run<'_> {
             self.target.row["diagnostics"] = diagnosis;
         }
         self.target.state = outcome;
+        self.target.finished_at = Some(ferry_core::now());
         self.save()
     }
     fn execute(&mut self, status: Option<Status>) -> Result<(), Fail> {
@@ -652,6 +720,10 @@ impl Run<'_> {
         if ok && let Some(launch) = self.spec.launch.clone() {
             let i = self.phase("launch", &launch)?;
             ok = self.wait(i, true, true)?;
+        }
+        if ok && let Err(e) = self.start_recording() {
+            error(&mut self.target, e);
+            ok = false;
         }
         if ok {
             let i = self.phase("test", &self.spec.command.clone())?;
@@ -717,6 +789,7 @@ fn one(root: &Path, op: &Operation, index: usize, collect_only: bool) -> Result<
     {
         let mut target = target;
         target.state = "unavailable".into();
+        target.finished_at = Some(ferry_core::now());
         error(&mut target, "нет команды для этой платформы");
         save(root, index, &target)?;
         return Ok(());

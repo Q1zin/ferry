@@ -29,12 +29,23 @@ fn selection(listing: &Value, selected: &[String]) -> Result<Vec<Value>, Fail> {
     Ok(result)
 }
 
-pub(super) fn collect(
+pub(crate) fn collect(
     device: &Option<String>,
     value: &mut Value,
     report: &Path,
     selected: &[String],
 ) -> Result<(), Fail> {
+    collect_budget(device, value, report, selected, TOTAL_BYTES)
+}
+
+pub(crate) fn collect_budget(
+    device: &Option<String>,
+    value: &mut Value,
+    report: &Path,
+    selected: &[String],
+    budget: u64,
+) -> Result<(), Fail> {
+    let budget = budget.min(TOTAL_BYTES);
     let dir = report
         .parent()
         .ok_or_else(|| Fail::new("нет каталога отчёта"))?;
@@ -54,7 +65,10 @@ pub(super) fn collect(
         let bytes = item["bytes"].as_u64();
         let outcome = (|| -> Result<Value, Fail> {
             let bytes = bytes.ok_or_else(|| Fail::new("размер неизвестен"))?;
-            if copied.len() >= MAX_FILES || bytes > FILE_BYTES || bytes > TOTAL_BYTES - total {
+            if copied.len() >= MAX_FILES
+                || bytes > FILE_BYTES
+                || bytes > budget.saturating_sub(total)
+            {
                 return Err(Fail::new(
                     "предел пакета: 32 файла, 64 МиБ на файл, 128 МиБ всего",
                 ));
@@ -97,7 +111,7 @@ pub(super) fn collect(
         value["observation"]["screenshot"] = "window.png".into();
     }
     value["bundle"] = json!({"complete":errors.is_empty(),"files":copied,"bytes":total,
-        "errors":errors,"path_base":"report_directory","limits":{"files":MAX_FILES,"file_bytes":FILE_BYTES,"total_bytes":TOTAL_BYTES}});
+        "errors":errors,"path_base":"report_directory","limits":{"files":MAX_FILES,"file_bytes":FILE_BYTES,"total_bytes":budget}});
     ferry_core::write_private(
         report,
         &serde_json::to_string_pretty(value).map_err(|e| Fail::new(e.to_string()))?,

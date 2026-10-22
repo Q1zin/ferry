@@ -34,6 +34,8 @@ struct Profile {
     #[serde(default)]
     headless: bool,
     #[serde(default)]
+    record: Option<Recording>,
+    #[serde(default)]
     ready_http: Option<HttpReady>,
     #[serde(default)]
     ready_window: Option<String>,
@@ -49,6 +51,18 @@ struct Profile {
     artifacts: Vec<String>,
     #[serde(default)]
     window: Option<String>,
+}
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct Recording {
+    window: String,
+    #[serde(default = "record_fps")]
+    fps: u32,
+    #[serde(default = "default_timeout")]
+    max_seconds: u32,
+}
+fn record_fps() -> u32 {
+    10
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +142,18 @@ fn validate(name: &str, p: &Profile) -> Result<(), Fail> {
                 "артефакты: относительные пути внутри {output}, без .. и обратных слешей",
             ));
         }
+    }
+    if let Some(record) = &p.record
+        && (p.headless
+            || record.window.trim().is_empty()
+            || record.window.len() > 256
+            || !(1..=20).contains(&record.fps)
+            || !(1..=3600).contains(&record.max_seconds)
+            || p.platforms.values().any(|s| s.launch.is_none()))
+    {
+        return Err(Fail::new(
+            "record требует desktop launch, точное окно, fps 1..20 и max_seconds 1..3600",
+        ));
     }
     for (os, s) in &p.platforms {
         if !["macos", "windows", "all"].contains(&os.as_str())
@@ -243,8 +269,11 @@ fn preflight(
 }
 mod cli;
 mod engine;
+mod export;
+mod history;
 mod journal;
 pub use cli::run;
+pub(crate) use cli::{queue_admit, queue_control, queue_prepare, queue_status};
 
 fn tests_pass(t: &Value) -> bool {
     t["tests"].as_u64().unwrap_or(0) > 0

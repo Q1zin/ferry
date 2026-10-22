@@ -11,7 +11,7 @@ use ferry_core::{
 use serde_json::{Value, json};
 use std::{io, path::PathBuf};
 
-mod bundle;
+pub(crate) mod bundle;
 
 pub(crate) fn evidence(
     device: &Option<String>,
