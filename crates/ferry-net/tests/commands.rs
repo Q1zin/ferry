@@ -578,3 +578,87 @@ async fn agent_reports_respect_modes_without_desktop_input() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn durable_admission_respects_headless_modes_and_keeps_request_identity() {
+    use ferry_core::{
+        desk::Shell,
+        jobs::execution::{Resource, StartRequest},
+    };
+    let a = agent("durable-ctl").await;
+    let mut options = options("durable-node");
+    options.supervisor = "/usr/bin/true".into();
+    let b = agent_with("durable-node", options).await;
+    pair(&a, &b).await;
+    let node = a.device("durable-node").unwrap();
+    b.set_mode(Mode::NoDesktop).unwrap();
+    let request = StartRequest {
+        request_id: "request-one".into(),
+        name: "durable-job".into(),
+        command: "exit 0".into(),
+        dir: Dir::Home,
+        shell: Shell::Default,
+        resource: Resource::Headless,
+        source: None,
+        session: "integration".into(),
+        keep: true,
+        timeout_sec: Some(30),
+    };
+    let first = node.atomic_start(request.clone()).await.unwrap();
+    let repeated = node.atomic_start(request.clone()).await.unwrap();
+    assert!(repeated.reused);
+    assert_eq!(first.run_id, repeated.run_id);
+    assert_eq!(
+        node.execution_lookup("request-one".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .run_id,
+        first.run_id
+    );
+    let mut conflict = request.clone();
+    conflict.command = "echo different".into();
+    assert!(
+        node.atomic_start(conflict)
+            .await
+            .unwrap_err()
+            .message
+            .contains("другими параметрами")
+    );
+    let mut desktop = request.clone();
+    desktop.request_id = "desktop".into();
+    desktop.name = "desktop".into();
+    desktop.resource = Resource::Desktop;
+    assert_eq!(node.atomic_start(desktop).await.unwrap_err().code, 75);
+    let presence = node
+        .human(ferry_core::human::Request::Presence, "test")
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&presence).unwrap()["available"],
+        false
+    );
+    assert_eq!(
+        node.human(
+            ferry_core::human::Request::Ask {
+                id: "question".into(),
+                text: "test".into(),
+                timeout: 60
+            },
+            "test"
+        )
+        .await
+        .unwrap_err()
+        .code,
+        75
+    );
+    b.set_mode(Mode::Paused).unwrap();
+    assert_eq!(
+        node.atomic_start(request.clone()).await.unwrap_err().code,
+        75
+    );
+    b.set_mode(Mode::Active).unwrap();
+    b.set_role(None, Role::Console).await.unwrap();
+    assert_eq!(node.atomic_start(request).await.unwrap_err().code, 75);
+}

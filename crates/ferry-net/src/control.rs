@@ -24,6 +24,7 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
     ferry_core::write_private(&dir.join("app"), &format!("{port} {token}\n"))?;
     let sessions = std::sync::Arc::new(Sessions::default());
     tokio::spawn(sessions.clone().watch(agent.clone()));
+    tokio::spawn(crate::ownership::watch(agent.clone()));
     loop {
         let (stream, _) = listener.accept().await?;
         let sessions = sessions.clone();
@@ -69,7 +70,7 @@ impl Sessions {
     }
 
     fn track(&self, device: iroh::EndpointId, session: &str, secs: u32) {
-        if ferry_core::control::session_pid(session).is_none() {
+        if !ferry_core::session::managed(session) {
             return;
         }
         let until = Instant::now() + Duration::from_secs(secs.into());
@@ -104,6 +105,11 @@ impl Sessions {
             };
             for ((id, session), until) in tracked {
                 if !ended.contains(&session) {
+                    continue;
+                }
+                if id == agent.id() {
+                    let _ = agent.desk_self(&session, DeskAction::Free);
+                    self.0.lock().unwrap().remove(&(id, session));
                     continue;
                 }
                 let Ok(device) = agent.device(&id.to_string()) else {
@@ -222,6 +228,225 @@ async fn answer(
     };
     let response = match request {
         Request::RunShell { .. } | Request::StartShell { .. } => unreachable!(),
+        Request::Storage { device, request } => Response::Report(match device {
+            Some(who) => agent.device(&who)?.storage(request).await?,
+            None => agent.storage_self(request).await?,
+        }),
+        Request::Human { device, request } => Response::Report(match device {
+            Some(who) => agent.device(&who)?.human(request, session).await?,
+            None => agent.human_self(request, session).await?,
+        }),
+        Request::DeskNote {
+            device,
+            minutes,
+            note,
+        } => {
+            let action = DeskAction::HoldNote {
+                seconds: minutes.saturating_mul(60),
+                note,
+            };
+            let message = if device == "local" {
+                sessions.track(agent.id(), session, minutes.saturating_mul(60));
+                agent.desk_self(session, action)?
+            } else {
+                let target = agent.device(&device)?;
+                let said = target.desk(session, action).await?;
+                sessions.track(target.id, session, minutes.saturating_mul(60));
+                said
+            };
+            Response::Message(message)
+        }
+        Request::Session { request } => Response::Report(
+            ferry_core::session::execute(&ferry_core::ferry_home()?, request)?.to_string(),
+        ),
+        Request::OwnedTunnel {
+            device,
+            port,
+            close,
+            keep,
+        } => {
+            if close {
+                if session.is_empty() {
+                    Response::Message(agent.close_tunnel(&device, port)?)
+                } else {
+                    let target = agent.device(&device)?;
+                    if !agent.close_tunnel_owned(&target.name, port, session)? {
+                        return Err(Fail::refused(
+                            "туннель не принадлежит этой сессии или уже закрыт",
+                        ));
+                    }
+                    Response::Message(format!("ferry: туннель {}:{port} закрыт", target.name))
+                }
+            } else {
+                let owner = if keep || session.is_empty() {
+                    None
+                } else {
+                    crate::ownership::validate(session)?;
+                    Some(session.to_string())
+                };
+                let target = agent.device(&device)?;
+                let message = agent
+                    .open_tunnel_owned(&target.name, port, owner.clone())
+                    .await?;
+                if owner.is_some() {
+                    crate::ownership::tunnel(target.name, session, port)?;
+                }
+                Response::Message(message)
+            }
+        }
+        Request::AtomicStart {
+            device,
+            mut request,
+            local_cwd,
+        } => {
+            if request.session.is_empty() {
+                request.session = session.into();
+            }
+            if !request.keep {
+                let owner_device = device
+                    .as_ref()
+                    .map(|who| agent.device(who).map(|d| d.id.to_string()))
+                    .transpose()?;
+                crate::ownership::job(owner_device, &request.session, &request.request_id)?;
+            }
+            let desktop = request.resource == ferry_core::jobs::execution::Resource::Desktop;
+            let result = match device {
+                Some(who) => {
+                    if local_cwd.is_some() {
+                        return Err(Fail::new("remote start не принимает local_cwd"));
+                    }
+                    let target = agent.device(&who)?;
+                    if desktop {
+                        sessions.hold(&target, &request.session).await?;
+                    }
+                    target.atomic_start(request).await?
+                }
+                None => {
+                    if desktop {
+                        agent.desk_self(
+                            &request.session,
+                            DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
+                        )?;
+                        sessions.track(
+                            agent.id(),
+                            &request.session,
+                            crate::desk::HOLD.as_secs() as u32,
+                        );
+                    }
+                    agent.atomic_start_self(request, local_cwd).await?
+                }
+            };
+            Response::Report(serde_json::to_string(&result).map_err(Fail::new)?)
+        }
+        Request::ExecutionCancel { device, request_id } => Response::Report(match device {
+            Some(who) => {
+                agent
+                    .device(&who)?
+                    .execution_cancel(request_id, session.into())
+                    .await?
+            }
+            None => {
+                agent
+                    .execution_cancel_self(request_id, session.into())
+                    .await?
+            }
+        }),
+        Request::ExecutionLookup { device, request_id } => {
+            let result = match device {
+                Some(who) => agent.device(&who)?.execution_lookup(request_id).await?,
+                None => agent.execution_lookup_self(request_id).await?,
+            };
+            Response::Report(serde_json::json!({"started":result}).to_string())
+        }
+        Request::WorkspaceSync {
+            device,
+            root,
+            project,
+            id,
+            commit,
+            tree,
+        } => {
+            let source = ferry_core::workspace::source(&project, &id, &commit, &tree)?;
+            let state = ferry_core::ferry_home()?;
+            let workspace = source.workspace.clone();
+            let _guard = tokio::task::spawn_blocking(move || {
+                ferry_core::workspace::lock(&state, &workspace)
+            })
+            .await
+            .map_err(Fail::new)??;
+            let extra: Vec<PathBuf> = ferry_core::project::load(&project)?
+                .files
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+            let result = match device {
+                Some(who) => {
+                    let target = agent.device(&who)?;
+                    let status = target
+                        .workspace(ferry_core::workspace::Request {
+                            source: source.clone(),
+                            action: ferry_core::workspace::Action::Prepare,
+                        })
+                        .await?;
+                    let status: serde_json::Value =
+                        serde_json::from_str(&status).map_err(Fail::new)?;
+                    if status["ready"] == true {
+                        status.to_string()
+                    } else {
+                        target
+                            .sync(&root, &source.workspace, &commit, &tree, &extra)
+                            .await?;
+                        target
+                            .workspace(ferry_core::workspace::Request {
+                                source: source.clone(),
+                                action: ferry_core::workspace::Action::Seal,
+                            })
+                            .await?
+                    }
+                }
+                None => {
+                    let home = ferry_core::home()?;
+                    let value =
+                        ferry_core::workspace::prepare_local(&home, &root, &source, &extra)?;
+                    value.to_string()
+                }
+            };
+            Response::Report(result)
+        }
+        Request::WorkspacePatch {
+            device,
+            root,
+            source,
+            apply,
+        } => {
+            ferry_core::workspace::validate(&source)?;
+            let saved = match device {
+                Some(who) => agent.device(&who)?.workspace_patch(&source).await?,
+                None => {
+                    let home = ferry_core::home()?;
+                    let cwd = home.join("ferry").join(&source.workspace);
+                    ferry_core::workspace::verify(&cwd, &source)?;
+                    let script = ferry_core::sync::changes_script(&source.workspace, "");
+                    let output = ferry_core::desk::shell(&script)
+                        .current_dir(&home)
+                        .output()?;
+                    if !output.status.success() {
+                        return Err(Fail::new(String::from_utf8_lossy(&output.stderr)));
+                    }
+                    let path = ferry_core::ferry_home()?.join("patches").join(format!(
+                        "{}-{}.patch",
+                        source.workspace,
+                        ferry_core::jobs::unique_id()
+                    ));
+                    std::fs::create_dir_all(path.parent().unwrap())?;
+                    std::fs::write(&path, output.stdout)?;
+                    path
+                }
+            };
+            Response::Report(
+                ferry_core::workspace::patch(&root, &saved, apply.as_deref())?.to_string(),
+            )
+        }
         Request::State => Response::State(agent.snapshot()),
         Request::OpenPairing => Response::Pairing(agent.open_pairing()),
         Request::Pair { code } => {
@@ -335,16 +560,20 @@ async fn answer(
             let action = match action.as_str() {
                 "take" => DeskAction::Hold(minutes.saturating_mul(60)),
                 "free" => DeskAction::Free,
+                "release-owned" => DeskAction::ReleaseOwned,
                 "force" => DeskAction::ForceFree,
                 _ => DeskAction::Show,
             };
             if device == "local" {
+                if let DeskAction::Hold(secs) = &action {
+                    sessions.track(agent.id(), session, *secs);
+                }
                 return Ok(Answer::Once(Box::new(Response::Message(
                     agent.desk_self(session, action)?,
                 ))));
             }
             let device = agent.device(&device)?;
-            let message = device.desk(session, action).await?;
+            let message = device.desk(session, action.clone()).await?;
             if let DeskAction::Hold(secs) = action {
                 sessions.track(device.id, session, secs);
             }
@@ -392,6 +621,63 @@ async fn answer(
             close: true,
         } => Response::Message(agent.close_tunnel(&device, port)?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
+        Request::ActV2 {
+            device,
+            request,
+            file,
+        } => {
+            let (mut result, lease) = match device {
+                Some(who) => {
+                    let device = agent.device(&who)?;
+                    sessions.hold(&device, session).await?;
+                    let lease = device.desk(session, DeskAction::Show).await?;
+                    (device.act_v2(*request).await?, lease)
+                }
+                None => {
+                    agent.desk_self(
+                        session,
+                        DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
+                    )?;
+                    sessions.track(agent.id(), session, crate::desk::HOLD.as_secs() as u32);
+                    (
+                        agent.act_v2_self(*request).await?,
+                        agent.desk_self(session, DeskAction::Show)?,
+                    )
+                }
+            };
+            let observation = result.observation.take();
+            let mut value = serde_json::to_value(result).map_err(|e| Fail::new(e.to_string()))?;
+            if let Some(o) = observation {
+                value["observation"] = observation_v2_value(o, &file, lease)?;
+            }
+            Response::Report(value.to_string())
+        }
+        Request::ObserveV2 {
+            device,
+            request,
+            file,
+        } => {
+            let (observation, lease) = match device {
+                Some(who) => {
+                    let device = agent.device(&who)?;
+                    sessions.hold(&device, session).await?;
+                    let lease = device.desk(session, DeskAction::Show).await?;
+                    (device.observe_v2(request).await?, lease)
+                }
+                None => {
+                    agent.desk_self(
+                        session,
+                        DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
+                    )?;
+                    sessions.track(agent.id(), session, crate::desk::HOLD.as_secs() as u32);
+                    (
+                        agent.observe_v2_self(request).await?,
+                        agent.desk_self(session, DeskAction::Show)?,
+                    )
+                }
+            };
+            Response::Report(observation_v2_value(observation, &file, lease)?.to_string())
+        }
         Request::Act {
             device,
             request,
@@ -409,6 +695,7 @@ async fn answer(
                         session,
                         DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
                     )?;
+                    sessions.track(agent.id(), session, crate::desk::HOLD.as_secs() as u32);
                     (
                         agent.act_self(request).await?,
                         agent.desk_self(session, DeskAction::Show)?,
@@ -439,6 +726,7 @@ async fn answer(
                         session,
                         DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
                     )?;
+                    sessions.track(agent.id(), session, crate::desk::HOLD.as_secs() as u32);
                     (
                         agent.observe_self(request).await?,
                         agent.desk_self(session, DeskAction::Show)?,
@@ -674,13 +962,31 @@ async fn stream(mut rx: mpsc::Receiver<Output>, out: &mut Lines, gone: impl Futu
     }
 }
 
+fn observation_v2_value(
+    mut observation: ferry_core::screen::observe::ObservationV2,
+    file: &std::path::Path,
+    lease: String,
+) -> Result<serde_json::Value, Fail> {
+    let png = std::mem::take(&mut observation.png);
+    let value = serde_json::to_value(observation).map_err(Fail::new)?;
+    save_observation(value, png, file, lease)
+}
+
 fn observation_value(
     mut observation: ferry_core::screen::observe::Observation,
     file: &std::path::Path,
     lease: String,
 ) -> Result<serde_json::Value, Fail> {
     let png = std::mem::take(&mut observation.png);
-    let mut value = serde_json::to_value(observation).map_err(|e| Fail::new(e.to_string()))?;
+    let value = serde_json::to_value(observation).map_err(|e| Fail::new(e.to_string()))?;
+    save_observation(value, png, file, lease)
+}
+fn save_observation(
+    mut value: serde_json::Value,
+    png: Vec<u8>,
+    file: &std::path::Path,
+    lease: String,
+) -> Result<serde_json::Value, Fail> {
     value.as_object_mut().unwrap().remove("png");
     value["coordinates"] = serde_json::json!({"ui":"desktop physical pixels", "ocr":"window screenshot pixels", "window_rect":"x,y,width,height in desktop physical pixels"});
     value["desk"] = lease.into();

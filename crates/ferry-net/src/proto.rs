@@ -239,7 +239,7 @@ pub struct Desk {
     pub action: DeskAction,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum DeskAction {
     /// Занять (или продлить свою) на столько секунд.
     Hold(u32),
@@ -248,6 +248,12 @@ pub enum DeskAction {
     /// Снять любую — человек вправе.
     ForceFree,
     Show,
+    HoldNote {
+        seconds: u32,
+        note: String,
+    },
+    /// Release only this owner; a different owner is already clean.
+    ReleaseOwned,
 }
 
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.
@@ -361,7 +367,57 @@ pub enum DeviceProtocol {
     Capabilities(Capabilities),
     #[rpc(tx = oneshot::Sender<Reply<ferry_core::screen::act::Report>>)]
     Act(Act),
+    /// Durable execution and structured GUI since 0.1.23. Append-only wire variants.
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::jobs::execution::Started>>)]
+    AtomicStart(AtomicStart),
+    #[rpc(tx = oneshot::Sender<Reply<Option<ferry_core::jobs::execution::Started>>>)]
+    ExecutionLookup(ExecutionLookup),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Workspace(Workspace),
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::screen::observe::ObservationV2>>)]
+    ObserveV2(ObserveV2),
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::screen::act::ReportV2>>)]
+    ActV2(ActV2),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Human(Human),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Storage(Storage),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    ExecutionCancel(ExecutionCancel),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    ExecutionCancelOwned(ExecutionCancelOwned),
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Storage(pub ferry_core::storage::Request);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Human {
+    pub session: String,
+    pub request: ferry_core::human::Request,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AtomicStart {
+    pub request: ferry_core::jobs::execution::StartRequest,
+    pub trust: Vec<String>,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecutionCancel {
+    pub request_id: String,
+    pub session: String,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecutionLookup(pub String);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExecutionCancelOwned {
+    pub request_id: String,
+    pub session: String,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Workspace(pub ferry_core::workspace::Request);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ObserveV2(pub ferry_core::screen::observe::RequestV2);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ActV2(pub Box<ferry_core::screen::act::RequestV2>);
 
 /// Клиент протокола поверх одного соединения с устройством.
 #[derive(Clone, Debug)]
