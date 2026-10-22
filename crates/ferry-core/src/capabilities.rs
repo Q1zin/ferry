@@ -131,9 +131,90 @@ pub fn collect(request: Request) -> io::Result<Capabilities> {
     }
     Ok(report)
 }
+/// Только известные version-команды, общий предел времени и вывода.
+pub fn versions(shell: Shell, tools: Vec<String>) -> io::Result<serde_json::Value> {
+    use std::io::Read;
+    validate(&Request {
+        shell,
+        tools: tools.clone(),
+        desktop: false,
+    })?;
+    let supported = [
+        "git", "cargo", "rustc", "node", "bun", "npm", "python", "python3", "dotnet",
+    ];
+    let mut script = String::new();
+    let mut skipped = Vec::new();
+    for tool in tools {
+        if !supported.contains(&tool.as_str()) {
+            skipped.push(tool);
+            continue;
+        }
+        script += &match shell {
+            Shell::Powershell => format!("Write-Output '--- {tool}'; & {tool} --version; "),
+            Shell::Cmd => format!("echo --- {tool} & {tool} --version & "),
+            _ => format!("printf '%s\\n' '--- {tool}'; {tool} --version; "),
+        };
+    }
+    script += if shell == Shell::Cmd {
+        "exit /b 0"
+    } else {
+        "exit 0"
+    };
+    let mut command = desk::shell_with(&script, shell)?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        tx.send(stdout.take(8193).read_to_end(&mut bytes).map(|_| bytes))
+            .ok();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut timed_out = false;
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            desk::kill_tree(child.id()).ok();
+            child.kill().ok();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait().ok();
+    let bytes = match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+    {
+        Ok(bytes) => bytes?,
+        Err(_) => {
+            desk::kill_tree(child.id()).ok();
+            return Err(io::Error::other("версии: вывод не завершился за 10 с"));
+        }
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(
+        serde_json::json!({"shell":shell,"text":crate::junit::clip(&text,8192),"truncated":bytes.len()>8192,"timed_out":timed_out,"unsupported":skipped,"note":"Пустой ответ команды означает неизвестную версию"}),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn versions_skip_unknown_commands_and_reject_injection() {
+        let report = versions(Shell::Default, vec!["not-a-version-command".into()]).unwrap();
+        assert_eq!(
+            report["unsupported"],
+            serde_json::json!(["not-a-version-command"])
+        );
+        assert_eq!(report["timed_out"], false);
+        assert!(versions(Shell::Default, vec!["git;whoami".into()]).is_err());
+    }
     #[test]
     fn rejects_shell_injection_and_reports_missing_tool() {
         let r = |tool: &str| Request {
