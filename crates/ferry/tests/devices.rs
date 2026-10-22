@@ -569,13 +569,19 @@ async fn cli_drives_devices_through_the_app() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(replies.len(), 3, "на уведомление не отвечают: {replies:?}");
-    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "ferry");
-    let listed = replies[1]["result"]["content"][0]["text"].as_str().unwrap();
+    let reply = |id| {
+        replies
+            .iter()
+            .find(|reply| reply["id"].as_u64() == Some(id))
+            .unwrap_or_else(|| panic!("нет ответа на запрос {id}: {replies:?}"))
+    };
+    assert_eq!(reply(1)["result"]["serverInfo"]["name"], "ferry");
+    let listed = reply(2)["result"]["content"][0]["text"].as_str().unwrap();
     assert!(
         listed.contains("\"win\"") && listed.contains("(код 0)"),
         "{listed}"
     );
-    let ran = &replies[2]["result"];
+    let ran = &reply(3)["result"];
     assert_eq!(ran["isError"], true);
     let said = ran["content"][0]["text"].as_str().unwrap();
     assert!(
