@@ -256,16 +256,28 @@ fn next(item: &Item, report: Option<&Value>) -> Next {
         Next::Interrupted
     }
 }
+fn update_current(
+    root: &Path,
+    id: &str,
+    revision: u64,
+    change: impl FnOnce(&mut Item),
+) -> Result<bool, Fail> {
+    let mut applied = false;
+    store::edit(root, id, |item| {
+        if item.revision == revision {
+            change(item);
+            applied = true;
+        }
+    })?;
+    Ok(applied)
+}
 fn interrupted(
     root: &Path,
     id: &str,
     revision: u64,
     error: impl std::fmt::Display,
 ) -> Result<(), Fail> {
-    store::edit(root, id, |item| {
-        if item.revision != revision {
-            return;
-        }
+    update_current(root, id, revision, |item| {
         item.state = "interrupted".into();
         item.resume_requested = false;
         if item.cancel_requested {
@@ -298,7 +310,7 @@ fn assigned(root: &Path, id: &str) -> Result<(), Fail> {
     }
     match decision {
         Next::Complete(state) => {
-            store::edit(root, id, |item| {
+            update_current(root, id, item.revision, |item| {
                 item.state = state;
                 item.resume_requested = false;
             })?;
@@ -306,16 +318,16 @@ fn assigned(root: &Path, id: &str) -> Result<(), Fail> {
         Next::Observe => {
             // Cancellation is safe while the check worker is alive; its marker is durable.
             if item.cancel_requested && (!item.cancel_attempted || item.resume_requested) {
-                store::edit(root, id, |i| {
+                let apply = update_current(root, id, item.revision, |i| {
                     i.cancel_attempted = true;
                     i.resume_requested = false;
                     i.state = "cancelling".into();
                 })?;
-                if let Err(error) = checks::queue_control(&item.operation_id, true) {
+                if apply && let Err(error) = checks::queue_control(&item.operation_id, true) {
                     interrupted(root, id, item.revision, error)?;
                 }
             } else {
-                store::edit(root, id, |i| {
+                update_current(root, id, item.revision, |i| {
                     i.state = if i.cancel_requested {
                         "cancelling"
                     } else {
@@ -335,12 +347,12 @@ fn assigned(root: &Path, id: &str) -> Result<(), Fail> {
             )?;
         }
         Next::Cancel => {
-            store::edit(root, id, |i| {
+            let apply = update_current(root, id, item.revision, |i| {
                 i.cancel_attempted = true;
                 i.resume_requested = false;
                 i.state = "cancelling".into();
             })?;
-            if let Err(error) = checks::queue_control(&item.operation_id, true) {
+            if apply && let Err(error) = checks::queue_control(&item.operation_id, true) {
                 interrupted(root, id, item.revision, error)?;
             }
         }
@@ -358,7 +370,7 @@ fn assigned(root: &Path, id: &str) -> Result<(), Fail> {
                 return Ok(());
             }
             let mut launch = false;
-            store::edit(root, id, |i| {
+            update_current(root, id, item.revision, |i| {
                 if !i.cancel_requested && (!i.start_attempted || i.resume_requested) {
                     i.start_attempted = true;
                     i.resume_requested = false;
@@ -470,6 +482,35 @@ pub(super) fn run(root: &Path) -> Result<i32, Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_observation_and_cancel_cannot_consume_a_new_control_request() {
+        let root =
+            std::env::temp_dir().join(format!("ferry-queue-{}", ferry_core::jobs::unique_id()));
+        fs::create_dir_all(root.join("items")).unwrap();
+        let mut item = store::tests::fixture();
+        item.revision = 2;
+        item.resume_requested = true;
+        item.cancel_requested = true;
+        store::write(&root, &item).unwrap();
+        let applied = update_current(&root, &item.id, 1, |current| {
+            current.resume_requested = false;
+            current.cancel_attempted = true;
+            current.state = "running".into();
+        })
+        .unwrap();
+        assert!(!applied, "stale worker must not issue its control call");
+        let saved = store::read(&root, &item.id).unwrap();
+        assert!(saved.resume_requested);
+        assert!(!saved.cancel_attempted);
+        assert_eq!(saved.state, "waiting");
+        assert!(
+            update_current(&root, &item.id, 2, |current| current.resume_requested =
+                false)
+            .unwrap()
+        );
+        assert!(!store::read(&root, &item.id).unwrap().resume_requested);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn stale_worker_result_cannot_erase_a_new_resume_request() {
         let root =

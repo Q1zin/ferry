@@ -283,7 +283,7 @@ pub(super) fn compare(baseline: &str, candidate: &str) -> io::Result<i32> {
             let project = |op: &Operation| {
                 op.project
                     .as_ref()
-                    .map(|p| (p.name.clone(), p.prefix.clone()))
+                    .map(|p| (p.root.clone(), p.name.clone(), p.prefix.clone()))
             };
             if project(&oa) != project(&ob) || (oa.project.is_none() && oa.cwd != ob.cwd) {
                 return Err(Fail::new(
