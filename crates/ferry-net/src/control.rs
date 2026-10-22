@@ -110,7 +110,41 @@ fn acts(args: &[String]) -> bool {
 }
 
 async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer, Fail> {
+    let (request, shell) = match request {
+        Request::RunShell {
+            device,
+            cmd,
+            dir,
+            desk,
+            shell,
+        } => (
+            Request::Run {
+                device,
+                cmd,
+                dir,
+                desk,
+            },
+            shell,
+        ),
+        Request::StartShell {
+            device,
+            name,
+            cmd,
+            dir,
+            shell,
+        } => (
+            Request::Start {
+                device,
+                name,
+                cmd,
+                dir,
+            },
+            shell,
+        ),
+        request => (request, ferry_core::desk::Shell::Default),
+    };
     let response = match request {
+        Request::RunShell { .. } | Request::StartShell { .. } => unreachable!(),
         Request::State => Response::State(agent.snapshot()),
         Request::OpenPairing => Response::Pairing(agent.open_pairing()),
         Request::Pair { code } => {
@@ -153,10 +187,12 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
         } => {
             let device = agent.device(&device)?;
             if !desk {
-                return Ok(Answer::Stream(device.run(&cmd, dir, false).await?));
+                return Ok(Answer::Stream(
+                    device.run_shell(&cmd, dir, false, shell).await?,
+                ));
             }
             device.hold(session).await?;
-            let rx = device.run(&cmd, dir, true).await?;
+            let rx = device.run_shell(&cmd, dir, true, shell).await?;
             return Ok(Answer::Stream(holding(device, session.into(), rx)));
         }
         Request::Log {
@@ -184,7 +220,7 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
             // Задача может открыть окна — она тоже под бронью.
             let device = agent.device(&device)?;
             device.hold(session).await?;
-            Response::Message(device.start(&name, &cmd, dir).await?)
+            Response::Message(device.start_shell(&name, &cmd, dir, shell).await?)
         }
         Request::Jobs { device } => Response::Jobs(agent.device(&device)?.jobs().await?),
         Request::Kill { device, name } => {

@@ -95,6 +95,55 @@ async fn cli_drives_devices_through_the_app() {
     }
     let outside = root("ctl");
 
+    // Явная оболочка проходит CLI, локальный JSON и сетевой протокол без потери кавычек.
+    let out = ferry(
+        &outside,
+        &[
+            "run",
+            "win",
+            "--home",
+            "--shell",
+            "bash",
+            "--",
+            "[[ -n $BASH_VERSION ]] || exit 9; printf '%s' 'a \"b\" $HOME Привет'; exit 7",
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(7), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "a \"b\" $HOME Привет");
+    let out = ferry(
+        &outside,
+        &["run", "win", "--shell", "unknown", "echo never"],
+    )
+    .await;
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("--shell"));
+    let out = ferry(&outside, &["run", "win", "--shell"]).await;
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("--shell"));
+    win.set_mode(Mode::Paused).unwrap();
+    let out = ferry(
+        &outside,
+        &["run", "win", "--home", "--shell", "bash", "echo never"],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(75), "{}", text(&out.stderr));
+    let out = ferry(
+        &outside,
+        &[
+            "start",
+            "win",
+            "shell-test",
+            "--home",
+            "--shell",
+            "bash",
+            "echo never",
+        ],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(75), "{}", text(&out.stderr));
+    win.set_mode(Mode::Active).unwrap();
+
     let out = ferry(&outside, &["devices"]).await;
     let list = text(&out.stdout);
     assert!(

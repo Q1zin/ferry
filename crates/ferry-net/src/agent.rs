@@ -978,6 +978,18 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
             .collect::<String>()
     };
     Some(match msg {
+        DeviceMessage::RunShell(m) => (
+            format!("команда: {}", line(&m.inner.run.cmd)),
+            m.inner.run.desk,
+        ),
+        DeviceMessage::StartShell(m) => (
+            format!(
+                "задача {}: {}",
+                m.inner.start.name,
+                line(&m.inner.start.cmd)
+            ),
+            true,
+        ),
         DeviceMessage::Run(m) => (format!("команда: {}", line(&m.inner.cmd)), m.inner.desk),
         DeviceMessage::Start(m) => (
             format!("задача {}: {}", m.inner.name, line(&m.inner.cmd)),

@@ -45,6 +45,20 @@ pub struct SetRole(pub Role);
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Rename(pub String);
 
+pub use ferry_core::desk::Shell;
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RunShell {
+    pub run: Run,
+    pub shell: Shell,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct StartShell {
+    pub start: Start,
+    pub shell: Shell,
+}
+
 /// Команда шеллу устройства. `desk` — с окнами (GUI, тесты): в режиме «не трогать рабочий
 /// стол» такие отклоняются.
 #[derive(Serialize, Deserialize, Debug)]
@@ -302,6 +316,11 @@ pub enum DeviceProtocol {
     /// С 0.1.16.
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     Desk(Desk),
+    /// Выбор оболочки с 0.1.18; старые Run/Start остаются побайтно совместимыми.
+    #[rpc(tx = mpsc::Sender<Output>)]
+    RunShell(RunShell),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    StartShell(StartShell),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

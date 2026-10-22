@@ -29,13 +29,37 @@ impl Device {
     /// Команда шеллу устройства: вывод потоком, в конце — код выхода. Бросил приёмник — команда
     /// на устройстве останавливается.
     pub async fn run(&self, cmd: &str, dir: Dir, desk: bool) -> Reply<mpsc::Receiver<Output>> {
+        self.run_shell(cmd, dir, desk, Shell::Default).await
+    }
+
+    pub async fn run_shell(
+        &self,
+        cmd: &str,
+        dir: Dir,
+        desk: bool,
+        shell: Shell,
+    ) -> Reply<mpsc::Receiver<Output>> {
         let run = Run {
             cmd: cmd.into(),
             dir,
             desk,
             trust: self.trust(),
         };
-        self.client.0.server_streaming(run, 64).await.map_err(lost)
+        if shell == Shell::Default {
+            self.client.0.server_streaming(run, 64).await.map_err(lost)
+        } else {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.18",
+                "выбор оболочки",
+            )?;
+            self.client
+                .0
+                .server_streaming(RunShell { run, shell }, 64)
+                .await
+                .map_err(lost)
+        }
     }
 
     pub async fn log(&self, name: &str, follow: bool) -> Reply<mpsc::Receiver<Output>> {
@@ -55,14 +79,33 @@ impl Device {
     }
 
     pub async fn start(&self, name: &str, cmd: &str, dir: Dir) -> Reply<String> {
-        self.client
-            .ask(Start {
-                name: name.into(),
-                cmd: cmd.into(),
-                dir,
-                trust: self.trust(),
-            })
-            .await
+        self.start_shell(name, cmd, dir, Shell::Default).await
+    }
+
+    pub async fn start_shell(
+        &self,
+        name: &str,
+        cmd: &str,
+        dir: Dir,
+        shell: Shell,
+    ) -> Reply<String> {
+        let start = Start {
+            name: name.into(),
+            cmd: cmd.into(),
+            dir,
+            trust: self.trust(),
+        };
+        if shell == Shell::Default {
+            self.client.ask(start).await
+        } else {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.18",
+                "выбор оболочки",
+            )?;
+            self.client.ask(StartShell { start, shell }).await
+        }
     }
 
     pub async fn kill(&self, name: &str) -> Reply<String> {

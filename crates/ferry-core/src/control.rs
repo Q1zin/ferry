@@ -19,6 +19,20 @@ use crate::jobs::Job;
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     State,
+    RunShell {
+        device: String,
+        cmd: String,
+        dir: Dir,
+        desk: bool,
+        shell: crate::desk::Shell,
+    },
+    StartShell {
+        device: String,
+        name: String,
+        cmd: String,
+        dir: Dir,
+        shell: crate::desk::Shell,
+    },
     OpenPairing,
     Pair {
         code: String,
