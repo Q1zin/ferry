@@ -115,6 +115,14 @@ impl Node {
         Ok(())
     }
 
+    pub async fn capabilities(
+        &self,
+        request: ferry_core::capabilities::Request,
+    ) -> Reply<ferry_core::capabilities::Capabilities> {
+        self.check(false)?;
+        blocking(move || ferry_core::capabilities::collect(request)).await
+    }
+
     fn resolve(&self, dir: &Dir) -> Reply<PathBuf> {
         match dir {
             Dir::Home => Ok(self.home.clone()),
@@ -256,11 +264,7 @@ impl Node {
                 tx.send(self.evidence(inner.0, true).await).await.ok();
             }
             DeviceMessage::Capabilities(WithChannels { inner, tx, .. }) => {
-                let result = match self.check(false) {
-                    Ok(()) => blocking(move || ferry_core::capabilities::collect(inner.0)).await,
-                    Err(e) => Err(e),
-                };
-                tx.send(result).await.ok();
+                tx.send(self.capabilities(inner.0).await).await.ok();
             }
             DeviceMessage::Jobs(WithChannels { tx, .. }) => {
                 let result = match self.check(false) {

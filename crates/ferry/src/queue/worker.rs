@@ -152,16 +152,12 @@ fn eligible(item: &Item, candidate: &Candidate, reserved: &[String]) -> Result<(
         desktop,
     };
     let device = candidate.device.as_deref().unwrap_or("local");
-    let capabilities = if candidate.device.is_none() {
-        ferry_core::capabilities::collect(request)?
-    } else {
-        match ask(Request::Capabilities {
-            device: device.into(),
-            request,
-        })? {
-            Response::Capabilities(value) => value,
-            _ => return Err(Fail::new("неожиданный ответ capabilities")),
-        }
+    let capabilities = match ask(Request::Capabilities {
+        device: device.into(),
+        request,
+    })? {
+        Response::Capabilities(value) => value,
+        _ => return Err(Fail::new("неожиданный ответ capabilities")),
     };
     if !capabilities.shell_available
         || !capabilities.missing_tools.is_empty()
