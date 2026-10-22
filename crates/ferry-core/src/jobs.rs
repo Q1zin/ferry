@@ -38,17 +38,15 @@ pub fn start_in(
     env: &[(String, String)],
     supervisor: &Path,
 ) -> io::Result<String> {
-    let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
-    if name.is_empty() || name.starts_with('-') || !name.chars().all(alias) {
-        return Err(io::Error::other(format!(
-            "недопустимое имя задачи: {name:?}"
-        )));
-    }
     let dir = dir(name)?;
     if running(&dir) {
         stop_job(name)?;
     }
-    let _ = fs::remove_dir_all(&dir);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("cmd"), cmd)?;
     fs::write(dir.join("cwd"), cwd.to_string_lossy().as_bytes())?;
@@ -385,6 +383,28 @@ fn detach(command: &mut Command) {
 }
 
 fn dir(name: &str) -> io::Result<PathBuf> {
+    let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+    // Имена переносимы на Windows; точка в конце и имена устройств там имеют особый смысл.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+        || ["COM", "LPT"].iter().any(|prefix| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+        });
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.ends_with('.')
+        || !name.chars().all(alias)
+        || reserved
+    {
+        return Err(io::Error::other(format!(
+            "недопустимое имя задачи: {name:?}"
+        )));
+    }
     Ok(crate::ferry_home()?.join("jobs").join(name))
 }
 
