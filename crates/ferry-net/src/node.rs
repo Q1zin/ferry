@@ -21,6 +21,58 @@ use crate::proto::*;
 /// pipe открытым — их конца не ждём (как старый демон рабочего стола и ssh).
 const TAIL: Duration = Duration::from_millis(500);
 
+fn capture_frames(
+    permit: tokio::sync::SemaphorePermit<'static>,
+    fps: u32,
+    mut capture: impl FnMut(u64) -> Reply<screen::live::Frame> + Send + 'static,
+) -> tokio::sync::mpsc::Receiver<Reply<screen::live::Frame>> {
+    let (frames, receive) = tokio::sync::mpsc::channel(1);
+    tokio::task::spawn_blocking(move || {
+        // Native capture cannot be cancelled: keep its slot even after the client leaves.
+        let _permit = permit;
+        let interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+        for sequence in 0.. {
+            if frames.is_closed() {
+                break;
+            }
+            let started = std::time::Instant::now();
+            let frame = capture(sequence);
+            let failed = frame.is_err();
+            if frames.blocking_send(frame).is_err() || failed {
+                break;
+            }
+            std::thread::sleep(interval.saturating_sub(started.elapsed()));
+        }
+    });
+    receive
+}
+
+async fn relay_screen_frames(
+    mut receive: tokio::sync::mpsc::Receiver<Reply<screen::live::Frame>>,
+    tx: mpsc::Sender<Reply<screen::live::Frame>>,
+    idle: Duration,
+) {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = tx.closed() => return,
+            next = tokio::time::timeout(idle, receive.recv()) => match next {
+                Ok(Some(frame)) => frame,
+                Ok(None) => return,
+                Err(_) => Err(Fail::new("нативный захват не вернул кадр за 20 секунд; поток закрыт, незавершённый вызов ОС продолжает занимать слот")),
+            },
+        };
+        let failed = frame.is_err();
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), tx.send(frame)).await,
+            Ok(Ok(()))
+        ) || failed
+        {
+            return;
+        }
+    }
+}
+
 pub(crate) struct Node {
     /// `~/.ferry`: временные файлы, снимки.
     pub dir: PathBuf,
@@ -646,42 +698,23 @@ impl Node {
         tx: mpsc::Sender<Reply<screen::live::Frame>>,
     ) {
         static CAPTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-        let Ok(_permit) = CAPTURES.try_acquire() else {
-            let _ = tx
-                .send(Err(Fail::new("устройство уже передаёт два потока экрана")))
-                .await;
+        let Ok(permit) = CAPTURES.try_acquire() else {
+            let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Err(Fail::new(
+                "оба слота захвата заняты: активным потоком или незавершённым вызовом ОС; зависший вызов удерживает слот до возврата или ручного перезапуска ferry",
+            )))).await;
             return;
         };
         if let Err(e) = request.validate() {
-            let _ = tx.send(Err(e.into())).await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Err(e.into()))).await;
             return;
         }
         let node = self.clone();
-        let (frames, mut receive) = tokio::sync::mpsc::channel(1);
-        tokio::task::spawn_blocking(move || {
-            let interval = Duration::from_secs_f64(1.0 / f64::from(request.fps));
-            for sequence in 0.. {
-                let started = std::time::Instant::now();
-                let frame = node.check(true).and_then(|()| {
-                    screen::live::frame(&node.dir, &request, sequence).map_err(Fail::from)
-                });
-                let failed = frame.is_err();
-                if frames.blocking_send(frame).is_err() || failed {
-                    break;
-                }
-                std::thread::sleep(interval.saturating_sub(started.elapsed()));
-            }
+        let receive = capture_frames(permit, request.fps, move |sequence| {
+            node.check(true).and_then(|()| {
+                screen::live::frame(&node.dir, &request, sequence).map_err(Fail::from)
+            })
         });
-        while let Some(frame) = receive.recv().await {
-            let failed = frame.is_err();
-            if !matches!(
-                tokio::time::timeout(Duration::from_secs(5), tx.send(frame)).await,
-                Ok(Ok(()))
-            ) || failed
-            {
-                break;
-            }
-        }
+        relay_screen_frames(receive, tx, Duration::from_secs(20)).await;
     }
 
     pub async fn storage(
@@ -1037,4 +1070,56 @@ pub(crate) async fn pipe(
         }
     };
     tokio::join!(up, down);
+}
+
+#[cfg(test)]
+mod screen_stream_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_capture_reports_failure_and_drops_frame_receiver() {
+        let (frames, receive) = tokio::sync::mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            relay_screen_frames(receive, tx, Duration::from_millis(20)),
+        )
+        .await
+        .unwrap();
+        let error = rx.recv().await.unwrap().unwrap().unwrap_err();
+        assert!(error.to_string().contains("нативный захват"));
+        assert!(rx.recv().await.unwrap().is_none());
+        assert!(frames.is_closed());
+    }
+
+    #[tokio::test]
+    async fn disconnect_is_prompt_but_hung_native_call_keeps_its_slot() {
+        static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let mut started = Some(started);
+        let receive = capture_frames(SLOTS.try_acquire().unwrap(), 10, move |_| {
+            started.take().unwrap().send(()).unwrap();
+            let _ = blocked.recv_timeout(Duration::from_secs(2));
+            Err(Fail::new("fixture finished"))
+        });
+        ready.await.unwrap();
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            relay_screen_frames(receive, tx, Duration::from_secs(20)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            SLOTS.try_acquire().is_err(),
+            "a disconnected native call must retain its slot"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), SLOTS.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
