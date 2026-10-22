@@ -55,24 +55,25 @@ impl Mode {
 pub const REFUSED: i32 = 75;
 
 pub fn current() -> Mode {
-    crate::ferry_home().map_or(Mode::Active, |dir| current_in(&dir))
+    crate::ferry_home().map_or(Mode::Paused, |dir| current_in(&dir))
 }
 
 pub fn set(mode: Mode) -> io::Result<()> {
     set_in(&crate::ferry_home()?, mode)
 }
 
-/// Режим из `<dir>/mode`; нет файла — работаем.
+/// Первый запуск — работаем; повреждённый или недоступный режим не разрешает управление.
 pub fn current_in(dir: &Path) -> Mode {
-    fs::read_to_string(dir.join("mode"))
-        .ok()
-        .and_then(|text| Mode::parse(text.trim()))
-        .unwrap_or(Mode::Active)
+    match fs::read_to_string(dir.join("mode")) {
+        Ok(text) => Mode::parse(text.trim()).unwrap_or(Mode::Paused),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Mode::Active,
+        Err(_) => Mode::Paused,
+    }
 }
 
 pub fn set_in(dir: &Path, mode: Mode) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    fs::write(dir.join("mode"), format!("{}\n", mode.name()))
+    crate::write_private(&dir.join("mode"), &format!("{}\n", mode.name()))
 }
 
 /// `ferry mode [<режим>]` на узле.
@@ -100,5 +101,25 @@ mod tests {
             assert_eq!(Mode::parse(mode.name()), Some(mode));
         }
         assert_eq!(Mode::parse("paused\n"), None);
+    }
+
+    #[test]
+    fn broken_mode_never_enables_remote_control() {
+        let dir = std::env::temp_dir().join(format!("ferry-mode-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(current_in(&dir), Mode::Active);
+        for mode in Mode::ALL {
+            set_in(&dir, mode).unwrap();
+            assert_eq!(current_in(&dir), mode);
+        }
+        for broken in ["", "broken", "act", "paused\nactive"] {
+            fs::write(dir.join("mode"), broken).unwrap();
+            assert_eq!(current_in(&dir), Mode::Paused);
+        }
+        fs::remove_file(dir.join("mode")).unwrap();
+        fs::create_dir(dir.join("mode")).unwrap();
+        assert_eq!(current_in(&dir), Mode::Paused);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
