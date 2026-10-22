@@ -593,6 +593,13 @@ impl Agent {
         self.inner.node.logs(lines)
     }
 
+    pub async fn job_result_self(
+        &self,
+        request: crate::proto::JobResult,
+    ) -> Result<ferry_core::jobs::JobResult, Fail> {
+        self.inner.node.job_result(request, false).await
+    }
+
     pub async fn update_self(&self) -> Result<String, Fail> {
         self.inner.node.update().await
     }

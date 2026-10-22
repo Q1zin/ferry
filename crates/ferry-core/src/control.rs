@@ -126,6 +126,13 @@ pub enum Request {
         close: bool,
     },
     Tunnels,
+    JobResult {
+        device: Option<String>,
+        name: String,
+        cursor: Option<String>,
+        max_bytes: u32,
+        wait: u32,
+    },
     /// Обновить ferry из релиза: на устройстве или (`device` пуст) на этой машине.
     Update {
         device: Option<String>,
@@ -195,6 +202,7 @@ pub enum Response {
     /// Код выхода — последняя строка потока.
     Exit(i32),
     Jobs(Vec<Job>),
+    JobResult(crate::jobs::JobResult),
     Info(Vec<(String, String)>),
     /// Что легло на диск.
     Files(Vec<String>),
@@ -401,6 +409,11 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| not_running())?;
     if matches!(&request, Request::UpdateStatus { .. }) {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    }
+    if let Request::JobResult { wait, .. } = &request {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(
+            u64::from((*wait).min(60)) + 10,
+        )))?;
     }
     let session = session();
     let envelope = Envelope {

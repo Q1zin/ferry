@@ -76,6 +76,14 @@ pub struct Info;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Jobs;
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JobResult {
+    pub name: String,
+    pub cursor: Option<String>,
+    pub max_bytes: u32,
+    pub wait: u32,
+}
+
 /// Фоновая задача: живёт после вызова, пишет лог.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Start {
@@ -333,6 +341,9 @@ pub enum DeviceProtocol {
     UpdateFile(UpdateFile),
     #[rpc(tx = oneshot::Sender<Reply<ferry_core::update::Status>>)]
     UpdateStatus(UpdateStatus),
+    /// Ограниченные результаты с курсором с 0.1.20.
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::jobs::JobResult>>)]
+    JobResult(JobResult),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.

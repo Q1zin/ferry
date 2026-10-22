@@ -74,6 +74,19 @@ impl Device {
         self.client.ask(Info).await
     }
 
+    pub async fn job_result(&self, request: JobResult) -> Reply<ferry_core::jobs::JobResult> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.20",
+            "ferry result",
+        )?;
+        let deadline = std::time::Duration::from_secs(u64::from(request.wait.min(60)) + 5);
+        tokio::time::timeout(deadline, self.client.ask(request))
+            .await
+            .map_err(|_| Fail::new("устройство не ответило; повтори result с тем же курсором"))?
+    }
+
     pub async fn jobs(&self) -> Reply<Vec<Job>> {
         self.client.ask(Jobs).await
     }

@@ -419,3 +419,118 @@ async fn local_update_streams_package_and_respects_modes() {
             .contains("пакет для")
     );
 }
+
+#[tokio::test]
+async fn job_results_wait_for_output_finish_or_deadline_and_respect_modes() {
+    use ferry_net::proto::JobResult;
+    let (a, b) = paired("result-ctl", "result-node").await;
+    let dir = path("result-node").join("jobs/build");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (file, value) in [("run-id", "run1"), ("cmd", "build"), ("log", "first")] {
+        std::fs::write(dir.join(file), value).unwrap();
+    }
+    let lock = std::fs::File::create(dir.join("lock")).unwrap();
+    lock.lock().unwrap();
+    let node = a.device("result-node").unwrap();
+    let request = JobResult {
+        name: "build".into(),
+        cursor: None,
+        max_bytes: 64,
+        wait: 0,
+    };
+    let first = node.job_result(request.clone()).await.unwrap();
+    assert_eq!(first.state, "running");
+    assert_eq!(first.log, "first");
+    let next = JobResult {
+        cursor: Some(first.cursor.clone()),
+        wait: 2,
+        ..request.clone()
+    };
+    let writer = dir.clone();
+    let write = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(writer.join("log"))
+            .unwrap()
+            .write_all(" Привет".as_bytes())
+            .unwrap();
+    });
+    assert_eq!(node.job_result(next.clone()).await.unwrap().log, " Привет");
+    write.await.unwrap();
+    let start = std::time::Instant::now();
+    let waiting = node
+        .job_result(JobResult {
+            wait: 1,
+            ..request.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(waiting.state, "running");
+    assert!(start.elapsed() >= Duration::from_millis(900));
+    let writer = dir.clone();
+    let finish = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(writer.join("log"))
+            .unwrap()
+            .write_all(b" final")
+            .unwrap();
+        ferry_core::write_private(&writer.join("exit"), "9").unwrap();
+    });
+    let finished = node
+        .job_result(JobResult {
+            wait: 2,
+            ..request.clone()
+        })
+        .await
+        .unwrap();
+    finish.await.unwrap();
+    assert_eq!(finished.state, "failed");
+    assert_eq!(finished.exit_code, Some(9));
+    assert!(finished.log.ends_with(" final"));
+    b.set_mode(Mode::NoDesktop).unwrap();
+    assert!(node.job_result(request.clone()).await.is_ok());
+    b.set_mode(Mode::Paused).unwrap();
+    assert_eq!(node.job_result(request.clone()).await.unwrap_err().code, 75);
+    b.set_mode(Mode::Active).unwrap();
+    std::fs::remove_file(dir.join("exit")).unwrap();
+    let writer = dir.clone();
+    let restart = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::write(writer.join("run-id"), "run2").unwrap();
+    });
+    assert!(
+        node.job_result(JobResult {
+            wait: 2,
+            ..request.clone()
+        })
+        .await
+        .unwrap_err()
+        .message
+        .contains("перезапущена")
+    );
+    restart.await.unwrap();
+    assert!(
+        node.job_result(JobResult {
+            wait: 61,
+            ..request.clone()
+        })
+        .await
+        .is_err()
+    );
+    assert!(
+        node.job_result(JobResult {
+            max_bytes: u32::MAX,
+            ..request
+        })
+        .await
+        .is_err()
+    );
+    drop(lock);
+    a.shutdown().await;
+    b.shutdown().await;
+}
