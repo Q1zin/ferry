@@ -593,6 +593,50 @@ impl Agent {
         self.inner.node.logs(lines)
     }
 
+    pub fn desk_self(
+        &self,
+        session: &str,
+        action: crate::proto::DeskAction,
+    ) -> Result<String, Fail> {
+        self.inner
+            .desk
+            .lock()
+            .unwrap()
+            .apply(
+                self.id(),
+                session,
+                action,
+                std::time::Instant::now(),
+                |id| {
+                    if id == self.id() {
+                        self.snapshot().me.name
+                    } else {
+                        self.inner
+                            .store
+                            .lock()
+                            .unwrap()
+                            .peer(id)
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| id.fmt_short().to_string())
+                    }
+                },
+            )
+            .map_err(Fail::refused)
+    }
+
+    pub async fn observe_self(
+        &self,
+        request: ferry_core::screen::observe::Request,
+    ) -> Result<ferry_core::screen::observe::Observation, Fail> {
+        self.inner.node.observe(request, false).await
+    }
+    pub async fn evidence_self(
+        &self,
+        query: ferry_core::jobs::evidence::Query,
+    ) -> Result<String, Fail> {
+        self.inner.node.evidence(query, false).await
+    }
+
     pub async fn job_result_self(
         &self,
         request: crate::proto::JobResult,
@@ -1035,6 +1079,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
             Some("text") => ("текст с экрана".into(), true),
             _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
         },
+        DeviceMessage::Observe(_) => ("наблюдение окна".into(), true),
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
         DeviceMessage::ShotArea(_) => ("снимок части экрана".into(), true),
         DeviceMessage::ShotWindow(m) => (format!("снимок окна {}", m.inner.name), true),

@@ -338,6 +338,11 @@ async fn answer(
                 "force" => DeskAction::ForceFree,
                 _ => DeskAction::Show,
             };
+            if device == "local" {
+                return Ok(Answer::Once(Box::new(Response::Message(
+                    agent.desk_self(session, action)?,
+                ))));
+            }
             let device = agent.device(&device)?;
             let message = device.desk(session, action).await?;
             if let DeskAction::Hold(secs) = action {
@@ -387,6 +392,60 @@ async fn answer(
             close: true,
         } => Response::Message(agent.close_tunnel(&device, port)?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
+        Request::Observe {
+            device,
+            request,
+            file,
+        } => {
+            let (mut observation, lease) = match device {
+                Some(who) => {
+                    let device = agent.device(&who)?;
+                    sessions.hold(&device, session).await?;
+                    let lease = device.desk(session, DeskAction::Show).await?;
+                    (device.observe(request).await?, lease)
+                }
+                None => {
+                    agent.desk_self(
+                        session,
+                        DeskAction::Hold(crate::desk::HOLD.as_secs() as u32),
+                    )?;
+                    (
+                        agent.observe_self(request).await?,
+                        agent.desk_self(session, DeskAction::Show)?,
+                    )
+                }
+            };
+            let png = std::mem::take(&mut observation.png);
+            let mut value =
+                serde_json::to_value(observation).map_err(|e| Fail::new(e.to_string()))?;
+            value.as_object_mut().unwrap().remove("png");
+            value["coordinates"] = serde_json::json!({"ui":"desktop physical pixels", "ocr":"window screenshot pixels", "window_rect":"x,y,width,height in desktop physical pixels"});
+            value["desk"] = lease.into();
+            value["screenshot"] = serde_json::Value::Null;
+            if !png.is_empty() {
+                if let Some(parent) = file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                use std::io::Write;
+                options.open(&file)?.write_all(&png)?;
+                value["screenshot"] = file.to_string_lossy().into_owned().into();
+            }
+            Response::Report(value.to_string())
+        }
+        Request::Evidence { device, query } => Response::Report(match device {
+            Some(who) => agent.device(&who)?.evidence(query).await?,
+            None => agent.evidence_self(query).await?,
+        }),
+        Request::Capabilities { device, request } => {
+            Response::Capabilities(agent.device(&device)?.capabilities(request).await?)
+        }
         Request::JobResult {
             device,
             name,

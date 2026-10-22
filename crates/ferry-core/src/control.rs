@@ -19,6 +19,19 @@ use crate::jobs::Job;
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     State,
+    Observe {
+        device: Option<String>,
+        request: crate::screen::observe::Request,
+        file: PathBuf,
+    },
+    Evidence {
+        device: Option<String>,
+        query: crate::jobs::evidence::Query,
+    },
+    Capabilities {
+        device: String,
+        request: crate::capabilities::Request,
+    },
     RunShell {
         device: String,
         cmd: String,
@@ -189,6 +202,8 @@ pub enum Request {
 #[serde(rename_all = "kebab-case")]
 pub enum Response {
     State(Snapshot),
+    Report(String),
+    Capabilities(crate::capabilities::Capabilities),
     UpdateStatus(crate::update::Status),
     Pairing(PairingInfo),
     Peer(PeerView),
@@ -414,6 +429,12 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(
             u64::from((*wait).min(60)) + 10,
         )))?;
+    }
+    if matches!(
+        &request,
+        Request::Observe { .. } | Request::Evidence { .. } | Request::Capabilities { .. }
+    ) {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(90)))?;
     }
     let session = session();
     let envelope = Envelope {

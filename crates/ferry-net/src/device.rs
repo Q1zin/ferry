@@ -87,6 +87,51 @@ impl Device {
             .map_err(|_| Fail::new("устройство не ответило; повтори result с тем же курсором"))?
     }
 
+    pub async fn observe(
+        &self,
+        request: ferry_core::screen::observe::Request,
+    ) -> Reply<ferry_core::screen::observe::Observation> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.21",
+            "ferry observe",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(75),
+            self.client.ask(Observe(request)),
+        )
+        .await
+        .map_err(|_| Fail::new("observe: устройство не ответило за 75 с"))?
+    }
+    pub async fn evidence(&self, query: ferry_core::jobs::evidence::Query) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.21",
+            "артефакты и история запусков",
+        )?;
+        tokio::time::timeout(std::time::Duration::from_secs(60), self.client.ask(Evidence(query))).await
+            .map_err(|_| Fail::new("артефакты: устройство не ответило за 60 с; проверь список перед повторным добавлением"))?
+    }
+    pub async fn capabilities(
+        &self,
+        request: ferry_core::capabilities::Request,
+    ) -> Reply<ferry_core::capabilities::Capabilities> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.21",
+            "ferry select",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            self.client.ask(Capabilities(request)),
+        )
+        .await
+        .map_err(|_| Fail::new("проверка устройства не ответила за 20 с"))?
+    }
+
     pub async fn jobs(&self) -> Reply<Vec<Job>> {
         self.client.ask(Jobs).await
     }

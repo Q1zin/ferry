@@ -15,7 +15,7 @@ use ferry_core::control::{self, Request, Response};
 use ferry_core::device::{Dir, Fail, PeerView, Role, Snapshot};
 use ferry_core::sync;
 
-fn ask(request: Request) -> Result<Response, Fail> {
+pub(crate) fn ask(request: Request) -> Result<Response, Fail> {
     match control::call(request)? {
         Response::Error(fail) => Err(fail),
         response => Ok(response),
@@ -26,7 +26,7 @@ fn unexpected() -> Fail {
     Fail::new("приложение ответило не то — версии приложения и CLI разные?")
 }
 
-fn state() -> Result<Snapshot, Fail> {
+pub(crate) fn state() -> Result<Snapshot, Fail> {
     match ask(Request::State)? {
         Response::State(snap) => Ok(snap),
         _ => Err(unexpected()),
@@ -34,7 +34,7 @@ fn state() -> Result<Snapshot, Fail> {
 }
 
 /// Ошибка устройства — сообщением и её кодом (75 — отказ по режиму или роли).
-fn finish(result: Result<i32, Fail>) -> io::Result<i32> {
+pub(crate) fn finish(result: Result<i32, Fail>) -> io::Result<i32> {
     Ok(result.unwrap_or_else(|fail| {
         eprintln!("ferry: {fail}");
         fail.code
