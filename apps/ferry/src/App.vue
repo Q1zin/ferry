@@ -17,6 +17,7 @@ import Device from './components/Device.vue'
 import Pairing from './components/Pairing.vue'
 import PermissionsView from './components/Permissions.vue'
 import Settings from './components/Settings.vue'
+import HumanQuestions from './components/HumanQuestions.vue'
 
 type View =
   | { kind: 'home' }
@@ -77,6 +78,7 @@ onUnmounted(() => unlisten.forEach((f) => f()))
 
 <template>
   <div class="app">
+    <HumanQuestions @say="say" />
     <aside>
       <button class="brand" @click="view = { kind: 'home' }">
         <img :src="logo" alt="" />

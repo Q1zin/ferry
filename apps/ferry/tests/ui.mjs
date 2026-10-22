@@ -42,6 +42,7 @@ const screen = new Resvg(
 ).render().asPng()
 
 const fixtures = {
+  questions: [],
   state: snapshot,
   detail: {
     properties: [
@@ -136,6 +137,31 @@ try {
     await page.getByText('Windows · узел · не трогать рабочий стол').waitFor()
     assert.equal((await calls()).filter(([c]) => c === 'state').length, 1, 'state опрашивается')
     await emit('state', snapshot)
+
+    // Вопрос человеку — виден поверх любой страницы, текст не исполняется как HTML.
+    const question = { id: 'help-one', from: 'MacBook · agent:test', text: 'Подтвердите вход в тестовое приложение\n<script>throw 1</script>', expires_at: 1893456000, state: 'pending' }
+    await emit('human-questions', [question])
+    const help = page.getByRole('dialog', { name: 'Агенту нужна ваша помощь' })
+    await help.waitFor()
+    assert.ok(await help.evaluate((el) => el.matches(':modal') && el.contains(document.activeElement)))
+    await page.keyboard.press('Escape')
+    assert.ok(await help.isVisible(), 'Escape не должен превращаться в ответ')
+    assert.equal(await help.locator('script').count(), 0)
+    assert.ok((await help.innerText()).includes('<script>throw 1</script>'))
+    const bounds = await help.boundingBox()
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width)
+    await shot('human-help')
+    await help.getByRole('button', { name: 'Не могу выполнить' }).click()
+    await help.waitFor({ state: 'hidden' })
+    assert.deepEqual((await calls()).find(([c]) => c === 'answer'), ['answer', { id: 'help-one', answer: 'declined' }])
+    await emit('human-questions', [{ ...question, id: 'help-two', text: 'Откройте тестовое окно' }])
+    await help.getByRole('button', { name: 'Готово', exact: true }).click()
+    await help.waitFor({ state: 'hidden' })
+    assert.deepEqual((await calls()).find(([c]) => c === 'answer'), ['answer', { id: 'help-two', answer: 'done' }])
+    await emit('human-questions', [question])
+    await help.waitFor()
+    await emit('human-questions', [])
+    await help.waitFor({ state: 'hidden' })
 
     // Чужое устройство: роль меняется отсюда, режим — только виден.
     await page.locator('nav .node-link', { hasText: 'win-10' }).click()

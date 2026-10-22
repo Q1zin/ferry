@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
 
+mod human;
 mod updates;
 
 type Reply<T> = Result<T, String>;
@@ -715,7 +716,12 @@ impl Tray {
 
     /// Отметка, иконка и подсказка — по текущему режиму и тому, сколько устройств на связи.
     /// Ответ — через сколько снять отметку «управляют», если она стоит.
-    fn update(&self, snapshot: &Snapshot, control: Option<String>) -> Option<std::time::Duration> {
+    fn update(
+        &self,
+        snapshot: &Snapshot,
+        control: Option<String>,
+        note: Option<String>,
+    ) -> Option<std::time::Duration> {
         let icon = self.app.tray_by_id(TRAY)?;
         let mode = snapshot.me.mode;
 
@@ -736,15 +742,26 @@ impl Tray {
         // Подсказка трея в Windows — до 128 знаков.
         let state = match &control {
             Some(who) => format!("управляет {who}"),
-            None => label(mode).to_string(),
+            None => match &note {
+                Some(note) => format!("{} · {note}", label(mode)),
+                None => label(mode).to_string(),
+            },
         };
         let tip = format!(
             "ferry — {}: {state}\nна связи {online} из {}",
             snapshot.me.name,
             snapshot.peers.len()
         );
+        let mut units = 0;
+        let tip: String = tip
+            .chars()
+            .take_while(|c| {
+                units += c.len_utf16();
+                units <= 127
+            })
+            .collect();
         let _ = icon.set_tooltip(Some(tip));
-        control.map(|_| std::time::Duration::from_secs(1))
+        control.or(note).map(|_| std::time::Duration::from_secs(1))
     }
 }
 
@@ -815,6 +832,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = ferry_core::ferry_home()?;
+            ferry_core::human::presence::start(dir.clone());
+            human::watch(app.handle().clone(), dir.clone());
             // Обновить это устройство по команде с другого (`ferry update <цели>`).
             let handle = app.handle().clone();
             let hook: ferry_net::agent::UpdateHook = std::sync::Arc::new(move || {
@@ -847,7 +866,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let tray = Tray::build(app.handle())?;
-            let mut expires = tray.update(&agent.snapshot(), controller(&agent));
+            let mut expires = tray.update(&agent.snapshot(), controller(&agent), agent.desk_note());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut changes = agent.subscribe();
@@ -861,7 +880,7 @@ pub fn run() {
                         Err(_) => false,
                     };
                     let snapshot = agent.snapshot();
-                    expires = tray.update(&snapshot, controller(&agent));
+                    expires = tray.update(&snapshot, controller(&agent), agent.desk_note());
                     if changed {
                         let _ = handle.emit("state", snapshot);
                     }
@@ -929,7 +948,9 @@ pub fn run() {
             start_job,
             kill_job,
             power,
-            version
+            version,
+            human::questions,
+            human::answer
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
