@@ -8,6 +8,7 @@ pub mod crashes;
 pub mod desk;
 pub mod device;
 pub mod doctor;
+pub mod human;
 pub mod info;
 pub mod jobs;
 pub mod junit;
