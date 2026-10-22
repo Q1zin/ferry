@@ -9,6 +9,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
 
+mod updates;
+
 type Reply<T> = Result<T, String>;
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -242,24 +244,7 @@ async fn update_all(app: AppHandle, agent: State<'_, Agent>) -> Reply<String> {
 /// сверяется публичным ключом), ответить и через секунду поставить и перезапуститься. На Windows
 /// установщик закрывает приложение сам — ответ должен успеть уйти.
 async fn update(app: &AppHandle) -> Reply<String> {
-    let Some(update) = app.updater().map_err(err)?.check().await.map_err(err)? else {
-        return Ok(format!("ferry {} — последняя версия", ferry_core::VERSION));
-    };
-    let bytes = update.download(|_, _| {}, || {}).await.map_err(err)?;
-    let said = format!(
-        "ferry {} → {}: ставлю и перезапускаюсь",
-        ferry_core::VERSION,
-        update.version
-    );
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        match update.install(&bytes) {
-            Ok(()) => app.restart(),
-            Err(e) => tracing::warn!("обновление не встало: {e}"),
-        }
-    });
-    Ok(said)
+    updates::release(app).await
 }
 
 /// Связанное устройство на связи — по ключу.
@@ -836,10 +821,22 @@ pub fn run() {
                 let app = handle.clone();
                 Box::pin(async move { update(&app).await })
             });
+            let handle = app.handle().clone();
+            let local: ferry_net::agent::LocalUpdateHook =
+                std::sync::Arc::new(move |file, signature| {
+                    let app = handle.clone();
+                    Box::pin(async move {
+                        tokio::task::spawn_blocking(move || updates::local(&app, file, signature))
+                            .await
+                            .map_err(err)?
+                    })
+                });
             let options = Options {
                 update: Some(hook),
+                update_file: Some(local),
                 ..Options::new(dir.clone())
             };
+            app.manage(options.update_status.clone());
             let agent = tauri::async_runtime::block_on(Agent::start(options))?;
             app.manage(agent.clone());
             // CLI на этой машине (`ferry devices`, `ferry pair` …) ходит сюда.
