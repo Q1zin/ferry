@@ -135,6 +135,9 @@ impl Node {
             DeviceMessage::JobResult(WithChannels { inner, tx, .. }) => {
                 tx.send(self.job_result(inner, true).await).await.ok();
             }
+            DeviceMessage::Act(WithChannels { inner, tx, .. }) => {
+                tx.send(self.act(inner.0, true).await).await.ok();
+            }
             DeviceMessage::Observe(WithChannels { inner, tx, .. }) => {
                 tx.send(self.observe(inner.0, true).await).await.ok();
             }
@@ -578,6 +581,17 @@ impl Node {
         self.runs.lock().unwrap().remove(&pid);
     }
 
+    pub async fn act(
+        &self,
+        request: ferry_core::screen::act::Request,
+        remote: bool,
+    ) -> Reply<ferry_core::screen::act::Report> {
+        if remote {
+            self.check(true)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || ferry_core::screen::act::execute(request, &root)).await
+    }
     pub async fn observe(
         &self,
         request: ferry_core::screen::observe::Request,

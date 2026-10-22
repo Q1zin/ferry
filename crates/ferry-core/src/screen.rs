@@ -11,7 +11,9 @@ use std::process::Command;
 
 use crate::exit_code;
 
+pub mod act;
 pub mod observe;
+static INPUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Снимок всего экрана в PNG.
 pub fn screenshot(file: &str) -> io::Result<i32> {
@@ -117,6 +119,9 @@ use win as os;
 /// `ferry input <действие> …` — окна и ввод на этой машине. Для `windows` — таблица окон,
 /// для действий — пусто.
 pub fn input(args: &[&str]) -> io::Result<String> {
+    let _guard = INPUT_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("ввод прервался"))?;
     let number = |s: &str| {
         s.parse::<i32>()
             .map_err(|_| io::Error::other(format!("ожидалось число, а не {s:?}")))

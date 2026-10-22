@@ -87,6 +87,22 @@ impl Device {
             .map_err(|_| Fail::new("устройство не ответило; повтори result с тем же курсором"))?
     }
 
+    pub async fn act(
+        &self,
+        request: ferry_core::screen::act::Request,
+    ) -> Reply<ferry_core::screen::act::Report> {
+        need(&self.name, self.version.as_deref(), "0.1.22", "ferry act")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(80),
+            self.client.ask(Act(request)),
+        )
+        .await
+        .map_err(|_| {
+            Fail::new(
+                "act: ответ потерян; действие могло выполниться, не повторяй — сначала observe",
+            )
+        })?
+    }
     pub async fn observe(
         &self,
         request: ferry_core::screen::observe::Request,
@@ -108,7 +124,17 @@ impl Device {
         need(
             &self.name,
             self.version.as_deref(),
-            "0.1.21",
+            if matches!(
+                query.action,
+                ferry_core::jobs::evidence::Action::Storage { .. }
+                    | ferry_core::jobs::evidence::Action::Pin { .. }
+                    | ferry_core::jobs::evidence::Action::Versions { .. }
+                    | ferry_core::jobs::evidence::Action::Stop
+            ) {
+                "0.1.22"
+            } else {
+                "0.1.21"
+            },
             "артефакты и история запусков",
         )?;
         tokio::time::timeout(std::time::Duration::from_secs(60), self.client.ask(Evidence(query))).await
