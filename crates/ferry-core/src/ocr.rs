@@ -7,7 +7,7 @@ use std::path::Path;
 
 /// Распознанный текст: строка целиком или, при поиске, место искомого в ней. Место — в пикселях
 /// картинки: `x y ширина высота`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Text {
     /// Строка целиком равна искомому (без учёта регистра).
     pub exact: bool,

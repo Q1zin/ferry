@@ -11,6 +11,8 @@ use std::process::Command;
 
 use crate::exit_code;
 
+pub mod observe;
+
 /// Снимок всего экрана в PNG.
 pub fn screenshot(file: &str) -> io::Result<i32> {
     let file = std::path::absolute(file)?;
@@ -212,7 +214,8 @@ pub fn input(args: &[&str]) -> io::Result<String> {
 }
 
 /// Окно для `windows` и поиска по имени: место — в пикселях снимка, `None` — свёрнуто.
-struct Window {
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Window {
     /// Чем ОС снимает именно это окно: HWND на Windows, номер окна на маке.
     id: i64,
     process: String,
@@ -254,6 +257,12 @@ fn find_any_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Wind
 }
 
 fn pick_window<'a>(windows: &'a [Window], name: &str, visible: bool) -> io::Result<&'a Window> {
+    if let Some(id) = name.strip_prefix('@').and_then(|id| id.parse::<i64>().ok()) {
+        return windows
+            .iter()
+            .find(|w| w.id == id && (!visible || w.rect.is_some()))
+            .ok_or_else(|| io::Error::other("выбранное окно исчезло"));
+    }
     let want = name.to_lowercase();
     let bare = |p: &str| p.trim_end_matches(".exe").to_string();
     let open = || windows.iter().filter(|w| w.rect.is_some() || !visible);
@@ -348,6 +357,10 @@ pub fn screenshot_window(file: &str, name: &str) -> io::Result<i32> {
     let file = std::path::absolute(file)?;
     let windows = os::windows()?;
     let window = find_window(&windows, name)?;
+    screenshot_selected(&file, window)
+}
+
+fn screenshot_selected(file: &std::path::Path, window: &Window) -> io::Result<i32> {
     #[cfg(target_os = "macos")]
     {
         // -o — без тени: размер снимка совпадает с местом окна.
@@ -365,19 +378,37 @@ pub fn screenshot_window(file: &str, name: &str) -> io::Result<i32> {
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public class FerryWindow {
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr window);
+    [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr window, IntPtr dc, uint flags);
 }
 '@
-[FerryWindow]::SetProcessDPIAware() | Out-Null
+# PrintWindow у DPI-unaware окна рисует логические пиксели, до масштабирования DWM.
+$window = [IntPtr][long]$args[1]
+$previous = [FerryWindow]::SetThreadDpiAwarenessContext([FerryWindow]::GetWindowDpiAwarenessContext($window))
+$r = New-Object FerryWindow+Rect
+if (-not [FerryWindow]::GetWindowRect($window, [ref]$r)) { throw 'окно исчезло' }
+$w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+if ($w -le 0 -or $h -le 0 -or ([long]$w * $h) -gt 40000000) { throw 'неверный размер окна' }
 Add-Type -AssemblyName System.Drawing
-$bmp = New-Object System.Drawing.Bitmap ([int]$args[2]), ([int]$args[3])
+$bmp = New-Object System.Drawing.Bitmap $w, $h
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $dc = $g.GetHdc()
-$ok = [FerryWindow]::PrintWindow([IntPtr][long]$args[1], $dc, 2)
+$ok = [FerryWindow]::PrintWindow($window, $dc, 2)
 $g.ReleaseHdc($dc)
+[FerryWindow]::SetThreadDpiAwarenessContext($previous) | Out-Null
 if (-not $ok) { [Console]::Error.WriteLine('окно не дало себя снять (PrintWindow)'); exit 2 }
-$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+# Вернуть физический размер: координаты UIA и OCR должны совпадать с рабочим столом.
+if ($w -ne [int]$args[2] -or $h -ne [int]$args[3]) {
+    $physical = New-Object System.Drawing.Bitmap ([int]$args[2]), ([int]$args[3])
+    $scaled = [System.Drawing.Graphics]::FromImage($physical)
+    $scaled.DrawImage($bmp, 0, 0, [int]$args[2], [int]$args[3])
+    $physical.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png)
+    $scaled.Dispose(); $physical.Dispose()
+} else { $bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Png) }
+$g.Dispose(); $bmp.Dispose()
 "#;
         let (_, _, width, height) = window.rect.unwrap_or_default();
         let status = powershell("ferry-screenshot-window.ps1", script)?
@@ -1345,6 +1376,15 @@ mod mac {
                 .unwrap_or_default()
         };
         let all = items(attribute(&app, "AXWindows"));
+        if filter.starts_with('@') {
+            let hits: Vec<_> = all.iter().filter(|w| title(w) == found.title).collect();
+            if hits.len() != 1 {
+                return Err(io::Error::other(
+                    "не удалось однозначно сопоставить окно Accessibility",
+                ));
+            }
+            return Ok((hits[0].clone(), found.title.clone()));
+        }
         let window = all
             .iter()
             .find(|w| !found.title.is_empty() && title(w) == found.title)
@@ -2191,6 +2231,7 @@ function Fail($text) { [Console]::Error.WriteLine($text); exit 2 }
 
 function Window($filter) {
     if (-not $filter) { return $AE::FromHandle([Ferry.Win]::GetForegroundWindow()) }
+    if ($filter -match '^@([0-9]+)$') { return $AE::FromHandle([IntPtr][long]$Matches[1]) }
     foreach ($w in $AE::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, $all)) {
         $proc = (Get-Process -Id $w.Current.ProcessId -ErrorAction SilentlyContinue).ProcessName
         if ($w.Current.Name -like "*$filter*" -or $proc -eq $filter -or "$proc.exe" -eq $filter) { return $w }
