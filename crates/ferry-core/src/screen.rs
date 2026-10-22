@@ -14,6 +14,7 @@ use crate::exit_code;
 pub mod act;
 mod act_v2;
 pub mod elements;
+pub mod live;
 pub mod observe;
 static INPUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -2003,7 +2004,7 @@ mod win {
     }
 
     /// Левый верхний угол и размер всего рабочего стола (всех мониторов) в физических пикселях.
-    fn desktop() -> (i32, i32, i32, i32) {
+    pub(super) fn desktop() -> (i32, i32, i32, i32) {
         unsafe {
             SetProcessDPIAware();
             (

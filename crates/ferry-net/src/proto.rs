@@ -386,8 +386,12 @@ pub enum DeviceProtocol {
     ExecutionCancel(ExecutionCancel),
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     ExecutionCancelOwned(ExecutionCancelOwned),
+    #[rpc(tx = mpsc::Sender<Reply<ferry_core::screen::live::Frame>>)]
+    ScreenStream(ScreenStream),
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ScreenStream(pub ferry_core::screen::live::Request);
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Storage(pub ferry_core::storage::Request);
 #[derive(Serialize, Deserialize, Debug)]

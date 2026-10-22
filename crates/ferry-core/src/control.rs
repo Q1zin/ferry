@@ -19,6 +19,10 @@ use crate::jobs::Job;
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     State,
+    ScreenStream {
+        device: Option<String>,
+        request: crate::screen::live::Request,
+    },
     ExecutionCancel {
         device: Option<String>,
         request_id: String,
@@ -266,6 +270,7 @@ pub enum Request {
 #[serde(rename_all = "kebab-case")]
 pub enum Response {
     State(Snapshot),
+    Frame(crate::screen::live::Frame),
     Report(String),
     Capabilities(crate::capabilities::Capabilities),
     UpdateStatus(crate::update::Status),
@@ -293,7 +298,10 @@ pub enum Response {
 impl Response {
     /// Конец ответа: дальше строк не будет.
     pub fn last(&self) -> bool {
-        !matches!(self, Response::Out(_) | Response::Err(_))
+        !matches!(
+            self,
+            Response::Out(_) | Response::Err(_) | Response::Frame(_)
+        )
     }
 }
 
@@ -521,6 +529,15 @@ pub fn call_session(request: Request, session: &str) -> io::Result<Response> {
     .next()
     .unwrap_or_else(|| Err(io::Error::other("приложение не ответило")))
 }
+pub fn call_session_timeout(
+    request: Request,
+    session: &str,
+    timeout: std::time::Duration,
+) -> io::Result<Response> {
+    open_session(&crate::ferry_home()?, request, session, Some(timeout))?
+        .next()
+        .unwrap_or_else(|| Err(io::Error::other("приложение не ответило")))
+}
 fn open_session(
     dir: &Path,
     request: Request,
@@ -535,26 +552,30 @@ fn open_session(
         .ok_or_else(|| io::Error::other(format!("испорчен {}", dir.join("app").display())))?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| not_running())?;
     stream.set_read_timeout(timeout)?;
-    if matches!(&request, Request::UpdateStatus { .. }) {
+    if timeout.is_none() && matches!(&request, Request::UpdateStatus { .. }) {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     }
-    if let Request::JobResult { wait, .. } = &request {
+    if timeout.is_none()
+        && let Request::JobResult { wait, .. } = &request
+    {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(
             u64::from((*wait).min(60)) + 10,
         )))?;
     }
-    if matches!(
-        &request,
-        Request::Info { .. }
-            | Request::Crashes { .. }
-            | Request::ActV2 { .. }
-            | Request::ObserveV2 { .. }
-            | Request::AtomicStart { .. }
-            | Request::Act { .. }
-            | Request::Observe { .. }
-            | Request::Evidence { .. }
-            | Request::Capabilities { .. }
-    ) {
+    if timeout.is_none()
+        && matches!(
+            &request,
+            Request::Info { .. }
+                | Request::Crashes { .. }
+                | Request::ActV2 { .. }
+                | Request::ObserveV2 { .. }
+                | Request::AtomicStart { .. }
+                | Request::Act { .. }
+                | Request::Observe { .. }
+                | Request::Evidence { .. }
+                | Request::Capabilities { .. }
+        )
+    {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(90)))?;
     }
     let envelope = Envelope {

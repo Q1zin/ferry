@@ -676,6 +676,18 @@ impl Agent {
             .unwrap()
             .note(std::time::Instant::now())
     }
+    pub async fn screen_stream_self(
+        &self,
+        request: ferry_core::screen::live::Request,
+    ) -> irpc::channel::mpsc::Receiver<crate::proto::Reply<ferry_core::screen::live::Frame>> {
+        let (tx, rx) = irpc::channel::mpsc::channel(1);
+        let node = self.inner.node.clone();
+        tokio::spawn(async move {
+            node.screen_stream(request, tx).await;
+        });
+        rx
+    }
+
     pub async fn storage_self(
         &self,
         request: ferry_core::storage::Request,
@@ -1240,6 +1252,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
         DeviceMessage::ObserveV2(_) => ("наблюдение окна".into(), true),
         DeviceMessage::Act(_) => ("проверяемое действие".into(), true),
         DeviceMessage::Observe(_) => ("наблюдение окна".into(), true),
+        DeviceMessage::ScreenStream(_) => ("трансляция экрана".into(), true),
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
         DeviceMessage::ShotArea(_) => ("снимок части экрана".into(), true),
         DeviceMessage::ShotWindow(m) => (format!("снимок окна {}", m.inner.name), true),

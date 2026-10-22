@@ -610,7 +610,7 @@ fn dir(name: &str) -> io::Result<PathBuf> {
     Ok(crate::ferry_home()?.join("jobs").join(name))
 }
 
-fn validate_name(name: &str) -> io::Result<()> {
+pub(crate) fn validate_name(name: &str) -> io::Result<()> {
     let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     // Имена переносимы на Windows; точка в конце и имена устройств там имеют особый смысл.
     let stem = name

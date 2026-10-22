@@ -152,6 +152,7 @@ impl Lines {
 enum Answer {
     Once(Box<Response>),
     Stream(mpsc::Receiver<Output>),
+    Frames(mpsc::Receiver<crate::proto::Reply<ferry_core::screen::live::Frame>>),
 }
 
 async fn handle(
@@ -167,6 +168,29 @@ async fn handle(
             out.send(&response).await;
         }
         Ok(Answer::Stream(rx)) => stream(rx, out, gone).await,
+        Ok(Answer::Frames(mut rx)) => {
+            let relay = async {
+                loop {
+                    match rx.recv().await {
+                        Ok(Some(Ok(frame))) => {
+                            if !out.send(&Response::Frame(frame)).await {
+                                break;
+                            }
+                        }
+                        Ok(Some(Err(e))) => {
+                            out.error(e).await;
+                            break;
+                        }
+                        _ => {
+                            out.error(Fail::new("трансляция прервана")).await;
+                            break;
+                        }
+                    }
+                }
+            };
+            // On disconnect drop the whole channel; never resume a cancelled irpc recv.
+            tokio::select! { _ = relay => {}, _ = gone => {} }
+        }
         Err(fail) => out.error(fail).await,
     }
 }
@@ -228,6 +252,13 @@ async fn answer(
     };
     let response = match request {
         Request::RunShell { .. } | Request::StartShell { .. } => unreachable!(),
+        Request::ScreenStream { device, request } => {
+            let rx = match device {
+                Some(who) => agent.device(&who)?.screen_stream(request).await?,
+                None => agent.screen_stream_self(request).await,
+            };
+            return Ok(Answer::Frames(rx));
+        }
         Request::Storage { device, request } => Response::Report(match device {
             Some(who) => agent.device(&who)?.storage(request).await?,
             None => agent.storage_self(request).await?,
