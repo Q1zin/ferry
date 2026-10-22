@@ -9,7 +9,9 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_updater::UpdaterExt;
 
+mod dashboard;
 mod human;
+mod stream;
 mod updates;
 
 type Reply<T> = Result<T, String>;
@@ -950,7 +952,12 @@ pub fn run() {
             power,
             version,
             human::questions,
-            human::answer
+            human::answer,
+            dashboard::dashboard,
+            stream::start_stream,
+            stream::stop_stream,
+            stream::stream_ack,
+            stream::control_screen
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

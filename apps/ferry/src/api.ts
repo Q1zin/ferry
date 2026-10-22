@@ -50,8 +50,48 @@ export type Snapshot = {
   activity: Activity[]
 }
 
+export const desktop = '__TAURI_INTERNALS__' in window
+let token = ''
+if (!desktop) {
+  const fragment = new URLSearchParams(location.hash.slice(1))
+  token = fragment.get('token') ?? sessionStorage.getItem('ferry-token') ?? ''
+  if (fragment.has('token')) {
+    sessionStorage.setItem('ferry-token', token)
+    history.replaceState(null, '', location.pathname)
+  }
+}
+export type DashboardRequest = { action: string; id?: string; value?: string; cursor?: string }
+export async function dashboard<T>(request: DashboardRequest): Promise<T> {
+  if (desktop) return invoke<T>('dashboard', { request })
+  const reply = await fetch('/api', {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify(request),
+  })
+  const value = await reply.json()
+  if (!reply.ok) throw new Error(value.error ?? `HTTP ${reply.status}`)
+  return value as T
+}
+export async function downloadReport(id: string): Promise<ExportReport> {
+  const result = await dashboard<ExportReport>({ action: 'export', id })
+  if (result.download_id) {
+    const reply = await fetch(`/download/${encodeURIComponent(result.download_id)}`, { headers: { authorization: `Bearer ${token}` } })
+    if (!reply.ok) throw new Error('Не удалось скачать архив; повтори экспорт')
+    const url = URL.createObjectURL(await reply.blob())
+    const link = document.createElement('a'); link.href = url; link.download = result.filename ?? 'ferry-report.zip'; link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+  return result
+}
+export type ExportReport = { complete: boolean; errors: string[]; archive_file?: string; directory?: string; download_id?: string; filename?: string }
+export type TestSummary = { tests: number; passed: number; failed: number; errors: number; skipped: number; artifacts?: number; warnings?: string[] }
+export type RunSummary = { id: string; profile: string; created: number; finished_at: number | null; duration_seconds: number | null; state: string; worker_active: boolean; total: number; succeeded: number; devices: {device: string; state: string}[]; summary: TestSummary }
+export type RunList = { checks: RunSummary[]; next_cursor: string | null; errors: string[]; scan_truncated?: boolean }
+export type RunPhase = { name: string; job: string; run_id: string | null; started: number; finished_seen?: number | null; result: Record<string, unknown> | null }
+export type RunTarget = { device: string; state: string; duration_seconds?: number | null; phases: RunPhase[]; tests?: TestSummary; test_cases?: {count?: number; complete?: boolean; omitted_cases?: number; error?: string; preview_error?: string; preview?: {cases:{suite:string[];class:string;name:string;state:string;duration_seconds?:number;message?:string;detail?:string}[];more:number;complete:boolean}}; artifacts?: {id: string; name?: string; path?: string; bytes?: number}[]; errors?: string[]; cleanup_pending?: boolean; source?: unknown }
+export type RunReport = { id: string; profile: string; state: string; created?: number; duration_seconds?: number | null; worker_active?: boolean; results: RunTarget[] }
+export type SetupStatus = { agents: { id: 'claude' | 'codex'; available: boolean; skill_installed: boolean; mcp_configured: boolean; command: string | null; config_conflict?: boolean; error?: string | null }[]; cli_available: boolean; app_available: boolean }
+
 export const api = {
-  state: () => invoke<Snapshot>('state'),
+  state: () => desktop ? invoke<Snapshot>('state') : dashboard<Snapshot>({ action: 'snapshot' }),
   openPairing: () => invoke<PairingInfo>('open_pairing'),
   closePairing: () => invoke<void>('close_pairing'),
   pair: (code: string) => invoke<PeerView>('pair', { code }),
@@ -97,9 +137,9 @@ export function blocked(d: DeviceRef, desk = false): string {
 }
 
 export const onState = (cb: (s: Snapshot) => void): Promise<UnlistenFn> =>
-  listen<Snapshot>('state', (e) => cb(e.payload))
+  desktop ? listen<Snapshot>('state', (e) => cb(e.payload)) : Promise.resolve(() => {})
 
-export const onOpenPairing = (cb: () => void): Promise<UnlistenFn> => listen('open-pairing', cb)
+export const onOpenPairing = (cb: () => void): Promise<UnlistenFn> => desktop ? listen('open-pairing', cb) : Promise.resolve(() => {})
 export const onHumanQuestions = (cb: (q: HumanQuestion[]) => void): Promise<UnlistenFn> =>
   listen<HumanQuestion[]>('human-questions', (e) => cb(e.payload))
 
