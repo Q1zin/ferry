@@ -5,7 +5,11 @@ const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 const rows = ref<RunSummary[]>([]), selected = ref<RunReport | null>(null)
 const search = ref(''), state = ref(''), cursor = ref<string | null>(null)
 const busy = ref(''), error = ref(''), warnings = ref<string[]>([]), actions = ref(desktop)
-const confirmCancel = ref(false)
+const confirmCancel = ref(false), expandedId = ref<string | null>(null), detailError = ref('')
+const warningPage = ref(0), legacyCount = ref(0)
+const warningPageSize = 25
+const warningPages = computed(() => Math.ceil(warnings.value.length / warningPageSize))
+const visibleWarnings = computed(() => warnings.value.slice(warningPage.value * warningPageSize, (warningPage.value + 1) * warningPageSize))
 const baseline = ref(''), comparison = ref<Record<string, unknown> | null>(null)
 let stopped = false, timer = 0, detailGeneration = 0
 const labels: Record<string, string> = { succeeded: 'Успешно', failed: 'Ошибка', running: 'В работе', pending: 'В очереди', interrupted: 'Прерван', cancelling: 'Отмена', cancelled: 'Отменён', unavailable: 'Недоступен' }
@@ -26,18 +30,49 @@ async function refresh(more = false, quiet = false) {
     rows.value = more ? [...rows.value,...result.checks.filter(r=>!rows.value.some(x=>x.id===r.id))] : quiet ? [...result.checks,...rows.value.filter(r=>!result.checks.some(x=>x.id===r.id))] : result.checks
     if (!quiet || !cursor.value) cursor.value = result.next_cursor
     warnings.value = [...result.errors, ...(result.scan_truncated ? ['История ограничена первыми 10 000 каталогами; часть старых прогонов может отсутствовать.'] : [])]
+    warningPage.value = Math.min(warningPage.value, Math.max(0, warningPages.value - 1))
+    legacyCount.value = result.legacy_count ?? 0
     error.value = ''
   } catch (e) { error.value = String(e) }
   finally { if (!quiet) busy.value = '' }
 }
+function closeDetail(restoreFocus = false) {
+  const id = expandedId.value
+  expandedId.value = null
+  selected.value = null
+  detailError.value = ''
+  confirmCancel.value = false
+  comparison.value = null
+  baseline.value = ''
+  detailGeneration++
+  if (busy.value === id) busy.value = ''
+  if (restoreFocus && id) document.getElementById(`run-trigger-${id}`)?.focus()
+}
+function toggle(id: string) {
+  if (expandedId.value === id) closeDetail()
+  else open(id)
+}
 async function open(id: string, quiet = false) {
+  if (quiet && expandedId.value !== id) return
   const generation = ++detailGeneration
-  if (!quiet) { confirmCancel.value = false; busy.value = id; comparison.value = null; baseline.value = '' }
+  if (!quiet) {
+    expandedId.value = id
+    selected.value = null
+    confirmCancel.value = false
+    busy.value = id
+    comparison.value = null
+    baseline.value = ''
+  }
+  detailError.value = ''
   try {
     const report = await dashboard<RunReport>({action:'run',id})
-    if (!stopped && generation === detailGeneration) selected.value = report
-  } catch (e) { if (!quiet) emit('say',String(e),true) }
-  finally { if (!quiet) busy.value = '' }
+    if (report.id !== id) throw new Error('Получен результат другого прогона. Обнови данные.')
+    if (!stopped && generation === detailGeneration && expandedId.value === id) selected.value = report
+  } catch (e) {
+    if (!stopped && generation === detailGeneration && expandedId.value === id) detailError.value = String(e)
+  } finally {
+    if (!quiet && generation === detailGeneration && busy.value === id) busy.value = ''
+  }
 }
 async function command(action: 'resume' | 'cancel') {
   const id = selected.value?.id
@@ -60,7 +95,11 @@ async function exportRun() {
 async function compare() {
   if (!selected.value || !baseline.value) return
   busy.value = 'compare'
-  try { comparison.value = await dashboard({action:'compare',id:baseline.value,value:selected.value.id}) }
+  const id = selected.value.id, base = baseline.value
+  try {
+    const result = await dashboard<Record<string, unknown>>({action:'compare',id:base,value:id})
+    if (expandedId.value === id && baseline.value === base) comparison.value = result
+  }
   catch(e) { emit('say',String(e),true) }
   finally { busy.value = '' }
 }
@@ -83,15 +122,28 @@ onUnmounted(()=>{stopped=true;detailGeneration++;clearTimeout(timer)})
     <div class="page-title"><div><p class="eyebrow">Результат работы агента</p><h1>Прогоны</h1></div><button :disabled="!!busy" @click="refresh()">Обновить</button></div>
     <p class="muted">Проверки на этом пульте: этапы, тесты и сохранённые доказательства.</p>
     <div class="metrics"><div><strong>{{ rows.length }}</strong><span>в истории</span></div><div><strong>{{ totals.active }}</strong><span>в работе</span></div><div><strong>{{ totals.passed }}</strong><span>успешно</span></div><div><strong>{{ totals.failed }}</strong><span>с ошибкой</span></div></div>
-    <p v-if="error" class="warning" role="alert">{{ error }}</p><p v-for="w in warnings" :key="w" class="warning">{{ w }}</p>
+    <p v-if="error" class="warning" role="alert">{{ error }}</p>
+    <details v-if="warnings.length" class="history-warnings card">
+      <summary><span><strong>Не удалось прочитать часть истории · {{ warnings.length }}</strong><span>Доступные прогоны показаны ниже. Подробности</span></span></summary>
+      <ul class="history-warning-list"><li v-for="(warning,index) in visibleWarnings" :key="warningPage * warningPageSize + index">{{ warning }}</li></ul>
+      <div v-if="warningPages > 1" class="row warning-pagination"><button :disabled="warningPage === 0" @click="warningPage--">Предыдущие замечания</button><span class="muted">{{ warningPage * warningPageSize + 1 }}–{{ Math.min((warningPage + 1) * warningPageSize, warnings.length) }} из {{ warnings.length }}</span><button :disabled="warningPage + 1 >= warningPages" @click="warningPage++">Следующие замечания</button></div>
+    </details>
+    <p v-if="legacyCount" class="muted legacy-history">Старые отчёты: {{ legacyCount }}. Сохранены в <code>~/.ferry/checks</code>; здесь показаны прогоны нового формата.</p>
     <div class="run-filters"><input v-model="search" aria-label="Поиск прогонов" placeholder="Профиль, устройство или ID" /><select v-model="state" aria-label="Состояние прогона"><option value="">Все состояния</option><option v-for="(text,key) in labels" :key="key" :value="key">{{ text }}</option></select></div>
     <figure v-if="histogram.length" class="duration-chart card"><figcaption>Длительность последних {{ histogram.length }} завершённых прогонов <span class="muted">· до {{ duration(maxDuration) }}</span></figcaption><div class="bars"><button v-for="r in histogram" :key="r.id" :title="`${r.id}: ${duration(r.duration_seconds)}`" :aria-label="`${r.id}: ${duration(r.duration_seconds)}`" :class="r.state" :style="{height:`${Math.max(8,(r.duration_seconds ?? 0)/maxDuration*100)}%`}" @click="open(r.id)"></button></div></figure>
     <p v-if="!rows.length && !busy && !error" class="empty card">Проверок пока нет. Подключи агента и запусти первую безопасную проверку — результат появится здесь.</p>
     <p v-else-if="!visible.length && rows.length" class="muted">По этому фильтру прогонов нет.</p>
-    <div class="run-list"><button v-for="r in visible" :key="r.id" class="card run-row" :class="{chosen:selected?.id===r.id}" :aria-pressed="selected?.id===r.id" @click="open(r.id)"><div><strong>{{ r.profile }}</strong><span class="state-pill" :class="r.state">{{ label(r.state) }}</span><code>{{ r.id }}</code></div><div class="muted run-meta"><span>{{ date(r.created) }}</span><span>{{ r.devices.map(d=>d.device).join(', ') }}</span><span>{{ r.succeeded }}/{{ r.total }} устройств · {{ r.summary.tests }} тестов · {{ duration(r.duration_seconds) }}</span></div></button></div>
-    <button v-if="cursor" :disabled="!!busy" @click="refresh(true)">Показать ещё</button>
-    <article v-if="selected" class="run-detail card" aria-label="Результаты прогона">
-      <div class="page-title"><div><p class="eyebrow">{{ selected.id }}</p><h2>{{ selected.profile }} <span class="state-pill" :class="selected.state">{{ label(selected.state) }}</span></h2></div><button aria-label="Закрыть результаты" @click="selected=null;detailGeneration++">×</button></div>
+    <div class="run-list">
+      <div v-for="r in visible" :key="r.id" class="run-entry">
+        <button :id="`run-trigger-${r.id}`" class="card run-row" :class="{chosen:expandedId===r.id}" :aria-expanded="expandedId===r.id" :aria-controls="`run-details-${r.id}`" @click="toggle(r.id)">
+          <div><strong>{{ r.profile }}</strong><span class="state-pill" :class="r.state">{{ label(r.state) }}</span><code>{{ r.id }}</code><span class="run-chevron" aria-hidden="true">{{ expandedId===r.id ? '▾' : '▸' }}</span></div>
+          <div class="muted run-meta"><span>{{ date(r.created) }}</span><span>{{ r.devices.map(d=>d.device).join(', ') }}</span><span>{{ r.succeeded }}/{{ r.total }} устройств · {{ r.summary.tests }} тестов · {{ duration(r.duration_seconds) }}</span></div>
+        </button>
+        <article v-if="expandedId===r.id" :id="`run-details-${r.id}`" class="run-detail card" aria-label="Результаты прогона" :aria-busy="busy===r.id">
+          <div v-if="detailError" class="warning" role="alert"><p>{{ detailError }}</p><button :disabled="!!busy" @click="open(r.id)">Повторить загрузку</button></div>
+          <p v-if="!selected && !detailError" class="muted" role="status">Загружаю результаты…</p>
+          <template v-if="selected && selected.id===r.id">
+      <div class="page-title"><div><p class="eyebrow">{{ selected.id }}</p><h2>{{ selected.profile }} <span class="state-pill" :class="selected.state">{{ label(selected.state) }}</span></h2></div><button aria-label="Закрыть результаты" @click="closeDetail(true)">×</button></div>
       <div class="row wrap"><button :disabled="!!busy" @click="exportRun">{{ busy==='export' ? 'Собираю отчёт…' : 'Скачать отчёт ZIP' }}</button><button v-if="actions && selected.state==='interrupted'" :disabled="!!busy" @click="command('resume')">Продолжить</button><button v-if="actions && ['running','interrupted','pending'].includes(selected.state)" class="danger" :disabled="!!busy" @click="confirmCancel=true">Отменить прогон</button><span class="muted">{{ duration(selected.duration_seconds) }}</span></div>
       <div v-if="confirmCancel" class="card warning" role="alert"><p>Остановить собственные задачи прогона {{ selected.id }}?</p><div class="row"><button class="danger" :disabled="!!busy" @click="command('cancel')">Да, отменить</button><button @click="confirmCancel=false">Оставить</button></div></div>
       <p v-if="!actions" class="muted">Панель открыта для просмотра. Управление доступно при запуске сервера с --allow-actions.</p>
@@ -105,6 +157,10 @@ onUnmounted(()=>{stopped=true;detailGeneration++;clearTimeout(timer)})
         <details v-if="target.source"><summary>Исходники прогона</summary><pre>{{ json(target.source) }}</pre></details>
       </section>
       <div class="compare-box"><h3>Сравнить тесты</h3><div class="row wrap"><select v-model="baseline" aria-label="Базовый прогон"><option value="">Выбери базовый прогон</option><option v-for="r in rows.filter(r=>r.id!==selected?.id && ['succeeded','failed'].includes(r.state))" :key="r.id" :value="r.id">{{ r.profile }} · {{ r.id }}</option></select><button :disabled="!!busy || !baseline" @click="compare">Сравнить</button></div><template v-if="comparison"><p :class="comparison.comparable ? 'muted':'warning'">{{ comparison.comparable ? 'Сопоставимые testcase' : 'Прогоны несопоставимы' }}</p><pre>{{ json(comparison) }}</pre></template></div>
-    </article>
+          </template>
+        </article>
+      </div>
+    </div>
+    <button v-if="cursor" :disabled="!!busy" @click="refresh(true)">Показать ещё</button>
   </section>
 </template>
