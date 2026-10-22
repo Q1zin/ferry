@@ -22,8 +22,11 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let port = listener.local_addr()?.port();
     ferry_core::write_private(&dir.join("app"), &format!("{port} {token}\n"))?;
+    let sessions = std::sync::Arc::new(Sessions::default());
+    tokio::spawn(sessions.clone().watch(agent.clone()));
     loop {
         let (stream, _) = listener.accept().await?;
+        let sessions = sessions.clone();
         let (agent, token) = (agent.clone(), token.clone());
         tokio::spawn(async move {
             let (read, write) = stream.into_split();
@@ -50,8 +53,76 @@ pub async fn serve(agent: Agent, dir: PathBuf) -> Result<()> {
                 let mut byte = [0u8; 1];
                 let _ = read.read(&mut byte).await;
             };
-            handle(&agent, request, &session, &mut out, gone).await;
+            handle(&agent, request, &session, &mut out, gone, &sessions).await;
         });
+    }
+}
+
+#[derive(Default)]
+struct Sessions(std::sync::Mutex<std::collections::BTreeMap<(iroh::EndpointId, String), Instant>>);
+
+impl Sessions {
+    async fn hold(&self, device: &crate::Device, session: &str) -> Result<(), Fail> {
+        device.hold(session).await?;
+        self.track(device.id, session, crate::desk::HOLD.as_secs() as u32);
+        Ok(())
+    }
+
+    fn track(&self, device: iroh::EndpointId, session: &str, secs: u32) {
+        if ferry_core::control::session_pid(session).is_none() {
+            return;
+        }
+        let until = Instant::now() + Duration::from_secs(secs.into());
+        self.0
+            .lock()
+            .unwrap()
+            .entry((device, session.into()))
+            .and_modify(|previous| *previous = (*previous).max(until))
+            .or_insert(until);
+    }
+
+    async fn watch(self: std::sync::Arc<Self>, agent: Agent) {
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let tracked = {
+                let mut entries = self.0.lock().unwrap();
+                entries.retain(|_, until| *until > Instant::now());
+                entries.clone()
+            };
+            if tracked.is_empty() {
+                continue;
+            }
+            let names = tracked
+                .keys()
+                .map(|(_, name)| name.clone())
+                .collect::<Vec<_>>();
+            let Ok(Ok(ended)) =
+                tokio::task::spawn_blocking(move || ferry_core::control::ended_sessions(&names))
+                    .await
+            else {
+                continue;
+            };
+            for ((id, session), until) in tracked {
+                if !ended.contains(&session) {
+                    continue;
+                }
+                let Ok(device) = agent.device(&id.to_string()) else {
+                    continue;
+                };
+                // Free проверяет владельца: новую бронь другой сессии не снимаем.
+                if let Ok(Ok(_)) = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    device.desk(&session, DeskAction::Free),
+                )
+                .await
+                {
+                    let mut entries = self.0.lock().unwrap();
+                    if entries.get(&(id, session.clone())) == Some(&until) {
+                        entries.remove(&(id, session));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -83,8 +154,9 @@ async fn handle(
     session: &str,
     out: &mut Lines,
     gone: impl Future<Output = ()>,
+    sessions: &std::sync::Arc<Sessions>,
 ) {
-    match answer(agent, request, session).await {
+    match answer(agent, request, session, sessions).await {
         Ok(Answer::Once(response)) => {
             out.send(&response).await;
         }
@@ -109,7 +181,12 @@ fn acts(args: &[String]) -> bool {
     !(reads.contains(&first) || args == ["clip"])
 }
 
-async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer, Fail> {
+async fn answer(
+    agent: &Agent,
+    request: Request,
+    session: &str,
+    sessions: &std::sync::Arc<Sessions>,
+) -> Result<Answer, Fail> {
     let (request, shell) = match request {
         Request::RunShell {
             device,
@@ -191,9 +268,14 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
                     device.run_shell(&cmd, dir, false, shell).await?,
                 ));
             }
-            device.hold(session).await?;
+            sessions.hold(&device, session).await?;
             let rx = device.run_shell(&cmd, dir, true, shell).await?;
-            return Ok(Answer::Stream(holding(device, session.into(), rx)));
+            return Ok(Answer::Stream(holding(
+                device,
+                session.into(),
+                rx,
+                sessions.clone(),
+            )));
         }
         Request::Log {
             device,
@@ -219,7 +301,7 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
         } => {
             // Задача может открыть окна — она тоже под бронью.
             let device = agent.device(&device)?;
-            device.hold(session).await?;
+            sessions.hold(&device, session).await?;
             Response::Message(device.start_shell(&name, &cmd, dir, shell).await?)
         }
         Request::Jobs { device } => Response::Jobs(agent.device(&device)?.jobs().await?),
@@ -241,7 +323,7 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
         Request::Input { device, args } => {
             let device = agent.device(&device)?;
             if acts(&args) {
-                device.hold(session).await?;
+                sessions.hold(&device, session).await?;
             }
             Response::Message(device.input(args).await?)
         }
@@ -256,7 +338,12 @@ async fn answer(agent: &Agent, request: Request, session: &str) -> Result<Answer
                 "force" => DeskAction::ForceFree,
                 _ => DeskAction::Show,
             };
-            Response::Message(agent.device(&device)?.desk(session, action).await?)
+            let device = agent.device(&device)?;
+            let message = device.desk(session, action).await?;
+            if let DeskAction::Hold(secs) = action {
+                sessions.track(device.id, session, secs);
+            }
+            Response::Message(message)
         }
         Request::Rec {
             device,
@@ -340,6 +427,7 @@ fn holding(
     device: crate::Device,
     session: String,
     mut rx: mpsc::Receiver<Output>,
+    sessions: std::sync::Arc<Sessions>,
 ) -> mpsc::Receiver<Output> {
     let (tx, out) = mpsc::channel(64);
     // Отдельной задачей: `recv` удалённого потока нельзя прерывать посреди сообщения.
@@ -348,6 +436,17 @@ fn holding(
         every.tick().await;
         loop {
             every.tick().await;
+            if ferry_core::control::session_pid(&session).is_some() {
+                let names = vec![session.clone()];
+                if let Ok(Ok(ended)) =
+                    tokio::task::spawn_blocking(move || ferry_core::control::ended_sessions(&names))
+                        .await
+                    && !ended.is_empty()
+                {
+                    break;
+                }
+                sessions.track(device.id, &session, crate::desk::HOLD.as_secs() as u32);
+            }
             let _ = device.hold(&session).await;
         }
     });
