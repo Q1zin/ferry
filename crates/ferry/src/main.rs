@@ -5,6 +5,7 @@ mod checks;
 mod capture;
 mod workflows;
 mod queue;
+mod server;
 mod devices;
 mod diagnostics;
 mod execution;
@@ -255,6 +256,8 @@ fn main() {
         ["capture", rest @ ..] => capture::run(rest),
         ["workflow", rest @ ..] => workflows::run(rest),
         ["queue", rest @ ..] => queue::run(rest),
+        ["server", rest @ ..] => server::run(rest),
+        ["dashboard", rest @ ..] => server::dashboard(rest),
         ["diagnose", rest @ ..] => diagnostics::run(rest),
         ["act", rest @ ..] => agent_tools::act(rest),
         ["history", rest @ ..] => agent_tools::history(rest),
