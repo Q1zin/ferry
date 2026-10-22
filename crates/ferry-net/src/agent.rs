@@ -756,12 +756,18 @@ impl Inner {
         let mut client = Some(client);
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
-            tokio::select! {
-                next = statuses.recv() => match next? {
-                    Some(status) => self.on_status(id, status, client.take(), &conn),
-                    None => return Ok(()),
-                },
-                _ = tick.tick() => self.on_path(id, &conn),
+            // irpc читает кадр частями: таймер не должен бросать незавершённое чтение.
+            let next = statuses.recv();
+            tokio::pin!(next);
+            let status = loop {
+                tokio::select! {
+                    next = &mut next => break next?,
+                    _ = tick.tick() => self.on_path(id, &conn),
+                }
+            };
+            match status {
+                Some(status) => self.on_status(id, status, client.take(), &conn),
+                None => return Ok(()),
             }
         }
     }
@@ -1125,6 +1131,50 @@ mod tests {
             first_ok(async { Ok(3) }, std::future::pending::<Result<u8, &str>>()).await,
             Ok(3)
         );
+    }
+
+    #[tokio::test]
+    async fn path_tick_does_not_drop_a_partial_status() {
+        let a = agent("partial-status").await;
+        let server = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![proto::ALPN.to_vec()])
+            .bind()
+            .await
+            .unwrap();
+        let id = server.id();
+        a.learn(server.addr());
+        a.inner.peers.lock().unwrap().insert(id, Live::default());
+        let writer = tokio::spawn(async move {
+            let conn = server.accept().await.unwrap().await.unwrap();
+            let (mut tx, mut rx) = conn.accept_bi().await.unwrap();
+            assert_eq!(rx.read_to_end(64).await.unwrap(), [1, 0]); // Watch
+            // Postcard Status: node, Both, Active, macos, 0.1.18. Разрыв посреди тела кадра.
+            let status = b"\x04node\x00\x00\x05macos\x060.1.18";
+            tx.write_all(&[status.len() as u8, status[0]])
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(5500)).await;
+            tx.write_all(&status[1..]).await.unwrap();
+            tx.finish().unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+            server.close().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(10), a.inner.watch_peer(id)).await;
+        assert!(
+            matches!(result, Ok(Ok(()))),
+            "status was interrupted: {result:?}"
+        );
+        assert_eq!(
+            a.inner.peers.lock().unwrap()[&id]
+                .status
+                .as_ref()
+                .unwrap()
+                .name,
+            "node"
+        );
+        a.shutdown().await;
+        writer.await.unwrap();
     }
 
     // Устройство новее прислало запрос, которого эта версия не знает: отказать надо только ему,
