@@ -7,6 +7,7 @@ mod diagnostics;
 mod execution;
 mod human;
 mod mcp;
+mod setup;
 mod storage;
 
 use ferry_core::mode::{self, Mode};
@@ -306,6 +307,8 @@ fn main() {
         ["update", spec] => devices::update(Some(spec)),
         ["skill"] => skill(),
         ["mcp"] => mcp::serve(),
+        ["setup", rest @ ..] => setup::run(rest),
+        ["init", rest @ ..] => setup::init(rest),
         ["trust"] => relay::trust(None),
         ["trust", host] => relay::trust(Some(host)),
         ["ssh", args @ ..] => relay::ssh(args),
