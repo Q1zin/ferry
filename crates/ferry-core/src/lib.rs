@@ -49,6 +49,10 @@ pub fn app_log(dir: &Path) -> PathBuf {
 
 /// Атомарно заменить файл, доступный только владельцу (на Windows профиль и так закрыт).
 pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
+    write_private_bytes(path, text.as_bytes())
+}
+
+pub(crate) fn write_private_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let name = path
@@ -72,7 +76,7 @@ pub fn write_private(path: &Path, text: &str) -> io::Result<()> {
         }
     };
     let result = (|| {
-        file.write_all(text.as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temp, path)

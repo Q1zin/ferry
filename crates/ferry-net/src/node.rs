@@ -141,7 +141,10 @@ impl Node {
                 let result = async {
                     self.check(true)?;
                     let cwd = self.resolve(&inner.dir)?;
-                    let supervisor = self.supervisor.clone();
+                    let source = self.supervisor.clone();
+                    let state = self.dir.clone();
+                    let supervisor =
+                        blocking(move || jobs::prepare_supervisor(&state, &source)).await?;
                     let env = self.relay.env(from, &inner.trust, &supervisor);
                     blocking(move || {
                         jobs::start_in_shell(
