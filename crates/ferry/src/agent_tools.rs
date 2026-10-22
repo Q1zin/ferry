@@ -11,7 +11,7 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
-fn report(request: Request) -> Result<Value, Fail> {
+pub(crate) fn report(request: Request) -> Result<Value, Fail> {
     match ask(request)? {
         Response::Report(text) => serde_json::from_str(&text).map_err(|e| Fail::new(e.to_string())),
         _ => Err(Fail::new("ожидался JSON-отчёт")),
@@ -334,6 +334,155 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
         Ok(code)
     })())
 }
+/// Просмотр места; удаление требует token именно этого preview.
+pub fn history(args: &[&str]) -> io::Result<i32> {
+    let Some((device, name, mut rest)) = target(args) else {
+        return crate::usage();
+    };
+    let (mut days, mut bytes, mut apply, mut pin) = (None, None, None, None);
+    while !rest.is_empty() {
+        match rest {
+            ["--older-than", n, tail @ ..] if days.is_none() => {
+                days = Some(n.parse::<u32>().map_err(io::Error::other)?);
+                rest = tail;
+            }
+            ["--max-bytes", n, tail @ ..] if bytes.is_none() => {
+                bytes = Some(n.parse::<u64>().map_err(io::Error::other)?);
+                rest = tail;
+            }
+            ["--apply", token, tail @ ..] if apply.is_none() => {
+                apply = Some((*token).into());
+                rest = tail;
+            }
+            [flag @ ("--pin" | "--unpin"), run, tail @ ..] if pin.is_none() => {
+                pin = Some(((*run).to_string(), *flag == "--pin"));
+                rest = tail;
+            }
+            _ => return crate::usage(),
+        }
+    }
+    if pin.is_some() && (days.is_some() || bytes.is_some() || apply.is_some()) {
+        return crate::usage();
+    }
+    let (run_id, action) = match pin {
+        Some((id, pinned)) => (Some(id), Action::Pin { pinned }),
+        None => (
+            None,
+            Action::Storage {
+                older_than_days: days,
+                max_bytes: bytes,
+                apply,
+            },
+        ),
+    };
+    finish((|| {
+        let mut value = report(Request::Evidence {
+            device: device.clone(),
+            query: Query {
+                name,
+                run_id,
+                action,
+            },
+        })?;
+        value["device"] = device.unwrap_or_else(|| "local".into()).into();
+        let failed = value["errors"].as_array().is_some_and(|a| !a.is_empty());
+        println!("{value}");
+        Ok(i32::from(failed))
+    })())
+}
+
+pub fn act(args: &[&str]) -> io::Result<i32> {
+    let (device, mut rest) = match args {
+        [d, tail @ ..] if !d.starts_with('-') => (Some((*d).to_string()), tail),
+        _ => (None, args),
+    };
+    let (mut from, mut action, mut expect, mut timeout, mut dry_run) =
+        (None, None, None, 10, false);
+    while !rest.is_empty() {
+        match rest {
+            ["--from", p, tail @ ..] if from.is_none() => {
+                from = Some(*p);
+                rest = tail;
+            }
+            ["--click", s, tail @ ..] if action.is_none() => {
+                action = Some(ferry_core::screen::act::Action::Click((*s).into()));
+                rest = tail;
+            }
+            ["--key", s, tail @ ..] if action.is_none() => {
+                action = Some(ferry_core::screen::act::Action::Key((*s).into()));
+                rest = tail;
+            }
+            ["--type", s, tail @ ..] if action.is_none() => {
+                action = Some(ferry_core::screen::act::Action::Type((*s).into()));
+                rest = tail;
+            }
+            ["--expect", s, tail @ ..] if expect.is_none() => {
+                expect = Some((*s).to_string());
+                rest = tail;
+            }
+            ["--timeout", s, tail @ ..] => {
+                timeout = s.parse().map_err(io::Error::other)?;
+                rest = tail;
+            }
+            ["--dry-run", tail @ ..] => {
+                dry_run = true;
+                rest = tail;
+            }
+            _ => return crate::usage(),
+        }
+    }
+    let (Some(from), Some(action), Some(expect)) = (from, action, expect) else {
+        return crate::usage();
+    };
+    finish((|| {
+        if std::fs::metadata(from)?.len() > 128 * 1024 {
+            return Err(Fail::new("слишком большой observe JSON"));
+        }
+        let value: Value =
+            serde_json::from_slice(&std::fs::read(from)?).map_err(|e| Fail::new(e.to_string()))?;
+        if value["device"].as_str() != Some(device.as_deref().unwrap_or("local"))
+            || value["changed_during_capture"] != false
+            || value["ui_truncated"] != false
+        {
+            return Err(Fail::new(
+                "нужен полный стабильный observe этого устройства",
+            ));
+        }
+        let request = ferry_core::screen::act::Request {
+            window: serde_json::from_value(value["window"].clone())
+                .map_err(|e| Fail::new(e.to_string()))?,
+            ui: value["ui"].as_str().unwrap_or_default().into(),
+            captured_at: value["captured_at"].as_u64().unwrap_or_default(),
+            action,
+            expect,
+            timeout,
+            dry_run,
+        };
+        let file = shot_path()?;
+        let mut result = report(Request::Act {
+            device: device.clone(),
+            request,
+            file,
+        })?;
+        result["device"] = device.clone().unwrap_or_else(|| "local".into()).into();
+        if result["observation"].is_object() {
+            result["observation"]["device"] = result["device"].clone();
+        }
+        let failed = result["error"].is_string() || (!dry_run && result["verified"] != true);
+        println!("{result}");
+        Ok(i32::from(failed))
+    })())
+}
+pub(crate) fn shot_path() -> Result<PathBuf, Fail> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(ferry_core::ferry_home()?
+        .join("shots")
+        .join(format!("observe-{}-{nonce}.png", std::process::id())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

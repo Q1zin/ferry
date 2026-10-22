@@ -1,7 +1,9 @@
 use std::io;
 
 mod agent_tools;
+mod checks;
 mod devices;
+mod diagnostics;
 mod mcp;
 
 use ferry_core::mode::{self, Mode};
@@ -25,6 +27,19 @@ ferry — разработка и тесты на нескольких устр�
 <цели> — имя устройства, несколько через запятую, all — все на связи, os:windows — по системе.
 На нескольких целях команда идёт параллельно, строки вывода — с [устройство], код выхода —
 первый ненулевой. Отказ устройства по режиму или роли — код 75.
+
+Проверки для агента (0.1.22):
+  ferry check <профиль> [--devices local,WIN-11-2|all|os:windows] [--parallel 2]
+              [--file ferry.checks.json] [--home] [--no-sync]
+                                    профиль, готовность, JUnit и артефакты; JSON всей матрицы
+  ferry diagnose [<устройство>] <задача> --run <id> [--window <окно>] [--junit <id>]
+                                    сохранить диагностический отчёт; снимок только указанного окна
+  ferry history [<устройство>] <задача> [--pin <run> | --unpin <run>]
+  ferry history [<устройство>] <задача> [--older-than <дни>] [--max-bytes <байты>]
+                                    место и preview очистки архивов; --apply <preview_token> удаляет
+  ferry act [<устройство>] --from <observe.json> --click <имя>|--key <клавиша>|--type <текст>
+            --expect <точное имя элемента> [--timeout 10] [--dry-run]
+                                    сверить окно и дерево, одно действие, проверить результат
 
 Команды на устройствах:
   ferry run <цели> [--desk] [--no-sync] [--home] [--shell <имя>] [--] <команда>
@@ -177,6 +192,10 @@ fn main() {
         ["jobs", "--tsv"] => jobs::list(true),
         ["jobs", spec, "--json"] => devices::jobs(spec, true),
         ["jobs", spec] => devices::jobs(spec, false),
+        ["check", rest @ ..] => checks::run(rest),
+        ["diagnose", rest @ ..] => diagnostics::run(rest),
+        ["act", rest @ ..] => agent_tools::act(rest),
+        ["history", rest @ ..] => agent_tools::history(rest),
         ["observe", rest @ ..] => agent_tools::observe(rest),
         ["select", rest @ ..] => agent_tools::select(rest),
         [kind @ ("runs" | "artifacts" | "tests"), rest @ ..] => agent_tools::evidence(kind, rest),
