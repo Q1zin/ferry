@@ -2,7 +2,6 @@
 //! устройствами. В трее — режим этого устройства. Окно открывается по клику; закрытое окно
 //! не останавливает агента, выход — из меню трея.
 
-use ferry_core::device::CONTROL_SECS;
 use ferry_net::{Agent, EndpointId, Mode, Options, PairingInfo, PeerView, Role, Snapshot};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -731,12 +730,10 @@ impl Tray {
 
     /// Отметка, иконка и подсказка — по текущему режиму и тому, сколько устройств на связи.
     /// Ответ — через сколько снять отметку «управляют», если она стоит.
-    fn update(&self, snapshot: &Snapshot) -> Option<std::time::Duration> {
+    fn update(&self, snapshot: &Snapshot, control: Option<String>) -> Option<std::time::Duration> {
         let icon = self.app.tray_by_id(TRAY)?;
         let mode = snapshot.me.mode;
-        let now = ferry_core::now();
-        // В других режимах ввод и снимки и так отклоняются.
-        let control = snapshot.controlled(now).filter(|_| mode == Mode::Active);
+
         let look = (mode, control.is_some());
         if self.look.lock().unwrap().replace(look) != Some(look) {
             for (m, item) in &self.modes {
@@ -752,12 +749,8 @@ impl Tray {
         }
         let online = snapshot.peers.iter().filter(|p| p.online).count();
         // Подсказка трея в Windows — до 128 знаков.
-        let state = match control {
-            Some(a) => format!(
-                "управляет {}: {}",
-                a.who,
-                a.what.chars().take(40).collect::<String>()
-            ),
+        let state = match &control {
+            Some(who) => format!("управляет {who}"),
             None => label(mode).to_string(),
         };
         let tip = format!(
@@ -766,7 +759,7 @@ impl Tray {
             snapshot.peers.len()
         );
         let _ = icon.set_tooltip(Some(tip));
-        control.map(|a| std::time::Duration::from_secs(CONTROL_SECS - now.saturating_sub(a.at)))
+        control.map(|_| std::time::Duration::from_secs(1))
     }
 }
 
@@ -857,7 +850,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let tray = Tray::build(app.handle())?;
-            let mut expires = tray.update(&agent.snapshot());
+            let mut expires = tray.update(&agent.snapshot(), controller(&agent));
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut changes = agent.subscribe();
@@ -871,7 +864,7 @@ pub fn run() {
                         Err(_) => false,
                     };
                     let snapshot = agent.snapshot();
-                    expires = tray.update(&snapshot);
+                    expires = tray.update(&snapshot, controller(&agent));
                     if changed {
                         let _ = handle.emit("state", snapshot);
                     }

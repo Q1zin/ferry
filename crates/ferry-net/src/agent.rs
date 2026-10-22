@@ -956,6 +956,7 @@ struct Acting<'a>(&'a Inner, String);
 impl<'a> Acting<'a> {
     fn new(inner: &'a Inner, who: String) -> Self {
         inner.acting.lock().unwrap().start(who.clone());
+        inner.notify();
         Acting(inner, who)
     }
 }
@@ -964,6 +965,8 @@ impl Drop for Acting<'_> {
     fn drop(&mut self) {
         let mut acting = self.0.acting.lock().unwrap();
         acting.finish(&self.1, std::time::Instant::now());
+        drop(acting);
+        self.0.notify();
     }
 }
 
