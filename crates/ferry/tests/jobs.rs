@@ -201,3 +201,30 @@ fn a_stranger_with_the_old_pid_is_not_the_job() {
     stranger.kill().unwrap();
     stranger.wait().unwrap();
 }
+
+#[test]
+fn supervisor_uses_saved_shell_and_accepts_old_jobs() {
+    let node = Node::new("shell");
+    for (name, choice) in [("explicit", Some("\"bash\"")), ("legacy", None)] {
+        let dir = node.home.join(".ferry/jobs").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        if let Some(choice) = choice {
+            fs::write(dir.join("shell"), choice).unwrap();
+        }
+        fs::write(
+            dir.join("cmd"),
+            if choice.is_some() {
+                "[[ -n $BASH_VERSION ]] || exit 9; printf saved; exit 7"
+            } else {
+                "printf saved; exit 7"
+            },
+        )
+        .unwrap();
+        fs::write(dir.join("cwd"), node.home.to_str().unwrap()).unwrap();
+        fs::write(dir.join("log"), "").unwrap();
+        let out = node.ferry(&["job-supervise", name]);
+        assert_eq!(out.status.code(), Some(7), "{out:?}");
+        assert_eq!(node.file(name, "log"), "saved");
+        assert_eq!(node.file(name, "exit"), "7");
+    }
+}

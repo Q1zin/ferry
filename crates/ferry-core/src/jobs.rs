@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::desk::{kill_tree, shell};
+use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
 /// Запустить задачу; задача с тем же именем, если ещё работает, перезапускается.
@@ -38,6 +38,19 @@ pub fn start_in(
     env: &[(String, String)],
     supervisor: &Path,
 ) -> io::Result<String> {
+    start_in_shell(name, cmd, cwd, env, supervisor, Shell::Default)
+}
+
+pub fn start_in_shell(
+    name: &str,
+    cmd: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    supervisor: &Path,
+    shell: Shell,
+) -> io::Result<String> {
+    // Отклонить неподдерживаемую оболочку до остановки существующей задачи.
+    shell_with(cmd, shell)?;
     let dir = dir(name)?;
     if running(&dir) {
         stop_job(name)?;
@@ -49,6 +62,7 @@ pub fn start_in(
     }
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("cmd"), cmd)?;
+    fs::write(dir.join("shell"), serde_json::to_vec(&shell)?)?;
     fs::write(dir.join("cwd"), cwd.to_string_lossy().as_bytes())?;
     fs::write(dir.join("started"), now().to_string())?;
     fs::File::create(dir.join("log"))?;
@@ -78,7 +92,12 @@ pub fn supervise(name: &str) -> io::Result<i32> {
     // Дозапись не годится: на Windows такой дескриптор без FILE_WRITE_DATA, и MSYS-bash
     // в него молча не пишет.
     let log = fs::OpenOptions::new().write(true).open(dir.join("log"))?;
-    let mut command = shell(&cmd);
+    let choice = match fs::read(dir.join("shell")) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Shell::Default,
+        Err(e) => return Err(e),
+    };
+    let mut command = shell_with(&cmd, choice)?;
     command
         .current_dir(cwd)
         .stdin(Stdio::null())

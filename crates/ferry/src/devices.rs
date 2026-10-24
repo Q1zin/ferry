@@ -5,6 +5,7 @@
 //! целях команда идёт параллельно, строки вывода подписаны `[устройство]`, код выхода — первый
 //! ненулевой по порядку целей.
 
+use ferry_core::desk::Shell;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -476,7 +477,14 @@ pub fn forget(device: &str) -> io::Result<i32> {
 
 /// `ferry run <цели> [--desk] [--no-sync] -- <команда>`: снимок проекта на цели, затем команда
 /// в том же подкаталоге проекта (или в доме, если мы не в репозитории).
-pub fn run(spec: &str, desk: bool, sync: bool, home: bool, cmd: &str) -> io::Result<i32> {
+pub fn run(
+    spec: &str,
+    desk: bool,
+    sync: bool,
+    home: bool,
+    cmd: &str,
+    shell: Shell,
+) -> io::Result<i32> {
     let project = match project(sync, home) {
         Ok(project) => project,
         Err(fail) => return finish(Err(fail)),
@@ -490,6 +498,17 @@ pub fn run(spec: &str, desk: bool, sync: bool, home: bool, cmd: &str) -> io::Res
             cmd: cmd.into(),
             dir: dir(&project),
             desk,
+        };
+        let request = if shell == Shell::Default {
+            request
+        } else {
+            Request::RunShell {
+                device: device.into(),
+                cmd: cmd.into(),
+                dir: dir(&project),
+                desk,
+                shell,
+            }
         };
         stream(request, printer)
     })
@@ -512,7 +531,14 @@ pub fn sync(spec: &str) -> io::Result<i32> {
 }
 
 /// `ferry start <цели> <имя> [--no-sync] -- <команда>`: фоновая задача там же, где шла бы `run`.
-pub fn start(spec: &str, name: &str, sync: bool, home: bool, cmd: &str) -> io::Result<i32> {
+pub fn start(
+    spec: &str,
+    name: &str,
+    sync: bool,
+    home: bool,
+    cmd: &str,
+    shell: Shell,
+) -> io::Result<i32> {
     let project = match project(sync, home) {
         Ok(project) => project,
         Err(fail) => return finish(Err(fail)),
@@ -526,6 +552,17 @@ pub fn start(spec: &str, name: &str, sync: bool, home: bool, cmd: &str) -> io::R
             name: name.into(),
             cmd: cmd.into(),
             dir: dir(&project),
+        };
+        let request = if shell == Shell::Default {
+            request
+        } else {
+            Request::StartShell {
+                device: device.into(),
+                name: name.into(),
+                cmd: cmd.into(),
+                dir: dir(&project),
+                shell,
+            }
         };
         said(ask(request)?, printer)
     })

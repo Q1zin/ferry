@@ -108,8 +108,20 @@ impl Node {
 
     /// Запрос связанного устройства `from`.
     pub async fn handle(self: Arc<Self>, msg: DeviceMessage, from: iroh::EndpointId) {
+        let (msg, shell) = match msg {
+            DeviceMessage::RunShell(WithChannels { inner, tx, .. }) => {
+                (DeviceMessage::Run((inner.run, tx).into()), inner.shell)
+            }
+            DeviceMessage::StartShell(WithChannels { inner, tx, .. }) => {
+                (DeviceMessage::Start((inner.start, tx).into()), inner.shell)
+            }
+            msg => (msg, Shell::Default),
+        };
         match msg {
-            DeviceMessage::Run(WithChannels { inner, tx, .. }) => self.run(inner, from, tx).await,
+            DeviceMessage::RunShell(_) | DeviceMessage::StartShell(_) => unreachable!(),
+            DeviceMessage::Run(WithChannels { inner, tx, .. }) => {
+                self.run(inner, from, tx, shell).await
+            }
             DeviceMessage::Info(WithChannels { tx, .. }) => {
                 let mode = self.me.borrow().mode;
                 let result = match mode {
@@ -132,7 +144,14 @@ impl Node {
                     let supervisor = self.supervisor.clone();
                     let env = self.relay.env(from, &inner.trust, &supervisor);
                     blocking(move || {
-                        jobs::start_in(&inner.name, &inner.cmd, &cwd, &env, &supervisor)
+                        jobs::start_in_shell(
+                            &inner.name,
+                            &inner.cmd,
+                            &cwd,
+                            &env,
+                            &supervisor,
+                            shell,
+                        )
                     })
                     .await
                 };
@@ -422,18 +441,21 @@ impl Node {
         }: Run,
         from: iroh::EndpointId,
         tx: mpsc::Sender<Output>,
+        shell: Shell,
     ) {
         let spawned = (|| {
             self.check(desk)?;
             let cwd = self.resolve(&dir)?;
-            tokio::process::Command::from(desk::shell(&cmd))
-                .envs(self.relay.env(from, &trust, &self.supervisor))
-                .current_dir(&cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))
+            tokio::process::Command::from(
+                desk::shell_with(&cmd, shell).map_err(|e| Fail::new(e.to_string()))?,
+            )
+            .envs(self.relay.env(from, &trust, &self.supervisor))
+            .current_dir(&cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))
         })();
         let mut child = match spawned {
             Ok(child) => child,

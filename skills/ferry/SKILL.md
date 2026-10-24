@@ -21,13 +21,15 @@ ferry devices --json        # me и peers: name, online, status.role/mode/os/ver
 
 ## Код и сборки
 
-Из каталога проекта (git): `ferry run` сначала кладёт на устройство снимок рабочего дерева (с незакоммиченным), потом выполняет команду в том же подкаталоге. Вне репозитория — в домашнем каталоге устройства. На Windows шелл — Git Bash.
+Из каталога проекта (git): `ferry run` сначала кладёт на устройство снимок рабочего дерева (с незакоммиченным), потом выполняет команду в том же подкаталоге. Вне репозитория — в домашнем каталоге устройства. На Windows по умолчанию Git Bash; у `run` и `start` есть `--shell default|bash|powershell|cmd` (с ferry 0.1.18 на пульте и устройстве). PowerShell/cmd запускаются напрямую, только на Windows. Для точного кода внешней программы в PowerShell добавь `exit $LASTEXITCODE`.
 
 ```sh
 ferry run win-10 -- cargo test                      # ждёт конца, код — команды
 ferry run win-10 --desk -- bunx playwright test     # --desk: команде нужны окна
 ferry run win-10 --no-sync -- 'ls target'           # без снимка проекта
 ferry run win-10 --home -- 'ls ~/Downloads'         # из репозитория, но в доме устройства
+ferry run win-10 --home --shell powershell -- 'Get-Location'
+ferry run win-10 --home --shell cmd -- 'ver & echo %USERPROFILE%'
 ferry sync win-10                                   # только снимок — перед start --no-sync
 ```
 
