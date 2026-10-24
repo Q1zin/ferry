@@ -1056,6 +1056,85 @@ pub fn update(spec: Option<&str>) -> io::Result<i32> {
     }
 }
 
+/// Локальный пакет: передача, проверка подписи на устройстве, установка и новый запуск.
+pub fn update_file(spec: Option<&str>, file: &str) -> io::Result<i32> {
+    let file = std::fs::canonicalize(file)?;
+    let package = match ferry_core::update::Package::read(&file) {
+        Ok(p) => p,
+        Err(fail) => return finish(Err(fail)),
+    };
+    let one = |device: Option<String>, printer: &Printer| -> Result<i32, Fail> {
+        let status = || match ask(Request::UpdateStatus {
+            device: device.clone(),
+        })? {
+            Response::UpdateStatus(status) => Ok(status),
+            _ => Err(unexpected()),
+        };
+        let before = status()?;
+        package.check_target(&before)?;
+        printer.line(
+            &format!(
+                "передаю подписанный пакет ferry {} ({} МиБ)…",
+                package.version,
+                std::fs::metadata(&file)?.len().div_ceil(1024 * 1024)
+            ),
+            false,
+        );
+        said(
+            ask(Request::UpdateFile {
+                device: device.clone(),
+                file: file.clone(),
+                signature: package.signature.clone(),
+            })?,
+            printer,
+        )?;
+        printer.line("жду нового запуска устройства (до 180 с)…", false);
+        let started = std::time::Instant::now();
+        let mut last = String::new();
+        while started.elapsed() < Duration::from_secs(180) {
+            std::thread::sleep(Duration::from_secs(1));
+            match status() {
+                Ok(now) if now.restarted(&before, &package.version) => {
+                    printer.line(
+                        &format!(
+                            "устройство перезапустилось и на связи: ferry {}",
+                            now.version
+                        ),
+                        false,
+                    );
+                    return Ok(0);
+                }
+                Ok(now) => {
+                    if let Some(error) = now.error {
+                        return Err(Fail::new(error));
+                    }
+                    last = format!(
+                        "ferry {}, {}",
+                        now.version,
+                        if now.boot == before.boot {
+                            "ещё прежний процесс"
+                        } else {
+                            "версия не совпадает с пакетом"
+                        }
+                    );
+                }
+                Err(fail) if fail.code == 75 => return Err(fail),
+                Err(fail) => last = fail.message,
+            }
+        }
+        Err(Fail::new(format!(
+            "новый запуск ferry {} не подтверждён за 180 с: {last}. Проверь ferry logs; повторная установка не запущена",
+            package.version
+        )))
+    };
+    match spec {
+        None => finish(one(None, &Printer::new(None))),
+        Some(spec) => each_of(spec, true, |device, printer| {
+            one(Some(device.into()), printer)
+        }),
+    }
+}
+
 /// `ferry logs [<цели>] [-n <строк>]`: хвост лога приложения ferry — на устройствах или здесь.
 pub fn logs(spec: Option<&str>, lines: usize) -> io::Result<i32> {
     let one =

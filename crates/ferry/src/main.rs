@@ -49,6 +49,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry info <цели> [--json]        свойства: система, железо, питание, экран, ferry
   ferry power <цели> reboot|sleep|shutdown|cancel
                                     питание (Windows); reboot и shutdown — через 10 с
+  ferry update [<цели>] --file <пакет>  локальная подписанная сборка (.sig рядом), ждать перезапуска
   ferry update [<цели>]             обновить ferry из релиза: на устройствах (all — и пульты) или
                                     (без целей) на этой машине; они перезапустятся и снова выйдут
                                     на связь
@@ -202,6 +203,8 @@ fn main() {
         ["rec", device, seconds, fps] => devices::rec(device, seconds, fps),
         ["power", spec, action] => devices::power(spec, action),
         ["logs", rest @ ..] => logs(rest),
+        ["update", "--file", file] => devices::update_file(None, file),
+        ["update", spec, "--file", file] => devices::update_file(Some(spec), file),
         ["update"] => devices::update(None),
         ["update", spec] => devices::update(Some(spec)),
         ["skill"] => skill(),
