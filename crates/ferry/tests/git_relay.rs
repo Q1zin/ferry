@@ -19,6 +19,11 @@ async fn agent(name: &str) -> Agent {
     let home = root(name);
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join(".ferry")).unwrap();
+    start_agent(name).await
+}
+
+async fn start_agent(name: &str) -> Agent {
+    let home = root(name);
     let options = Options {
         internet: false,
         lan: false,
@@ -104,6 +109,24 @@ fn git_on_the_node_uses_the_callers_keys_read_only() {
             out.contains("want-refs"),
             "stdin дошёл до ssh пульта: {out}"
         );
+
+        // Команда сохранила окружение до перезапуска приложения, включая уже старые порт/токен.
+        let (_, err, code) = run(&device, "printf \"export FERRY_RELAY='%s'\\nexport FERRY_RELAY_FILE='%s'\\n\" \"$FERRY_RELAY\" \"$FERRY_RELAY_FILE\" > relay-env").await;
+        assert_eq!(code, 0, "{err}");
+        node.shutdown().await;
+        let node = start_agent("node").await;
+        ctl.learn(node.addr());
+        node.learn(ctl.addr());
+        let start = Instant::now();
+        let device = loop {
+            if let Ok(device) = ctl.device("node")
+                && device.jobs().await.is_ok() { break device; }
+            assert!(start.elapsed() < Duration::from_secs(15), "узел не вернулся после перезапуска");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let (out, err, code) = run(&device, &format!(". ./relay-env; {fetch}")).await;
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("want-refs"), "старое окружение работает с новым релеем: {out}");
 
         // Запись — нет: скомпрометированный узел не пушит от имени пульта.
         let push = format!("{ssh} git@git.test \"git-receive-pack '/repo.git'\" </dev/null");

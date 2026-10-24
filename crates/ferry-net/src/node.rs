@@ -145,7 +145,10 @@ impl Node {
                     let state = self.dir.clone();
                     let supervisor =
                         blocking(move || jobs::prepare_supervisor(&state, &source)).await?;
-                    let env = self.relay.env(from, &inner.trust, &supervisor);
+                    let env = self
+                        .relay
+                        .env(from, &inner.trust, &supervisor)
+                        .map_err(Fail::new)?;
                     blocking(move || {
                         jobs::start_in_shell(
                             &inner.name,
@@ -452,7 +455,11 @@ impl Node {
             tokio::process::Command::from(
                 desk::shell_with(&cmd, shell).map_err(|e| Fail::new(e.to_string()))?,
             )
-            .envs(self.relay.env(from, &trust, &self.supervisor))
+            .envs(
+                self.relay
+                    .env(from, &trust, &self.supervisor)
+                    .map_err(Fail::new)?,
+            )
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

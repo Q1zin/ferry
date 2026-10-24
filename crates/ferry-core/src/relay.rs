@@ -45,11 +45,15 @@ pub fn ssh(args: &[&str]) -> io::Result<i32> {
         return plain_ssh(args);
     };
     let host = target.rsplit_once('@').map_or(*target, |(_, host)| host);
-    let relay = std::env::var("FERRY_RELAY").unwrap_or_default();
     let trusted = std::env::var("FERRY_TRUST").unwrap_or_default();
-    let (Some((relay_port, token)), true) =
-        (relay.split_once(' '), trusted.split(' ').any(|t| t == host))
-    else {
+    if !trusted.split(' ').any(|t| t == host) {
+        return plain_ssh(args);
+    }
+    let relay = match std::env::var_os("FERRY_RELAY_FILE") {
+        Some(file) => fs::read_to_string(file)?,
+        None => std::env::var("FERRY_RELAY").unwrap_or_default(),
+    };
+    let Some((relay_port, token)) = relay.trim().split_once(' ') else {
         return plain_ssh(args);
     };
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", relay_port.parse().unwrap_or(0))) else {

@@ -8,8 +8,8 @@
 //! её своим ssh: ключ X не покидает.
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ferry_core::mode::Mode;
 use ferry_core::{exit_code, relay};
@@ -24,46 +24,77 @@ use crate::proto::{DeviceClient, GitSsh, Relay, Status};
 const MAX_FIELD: u32 = 1 << 20;
 
 /// Локальный вход релея на этом устройстве: порт и токен на каждое устройство-заказчика.
-#[derive(Default)]
 pub(crate) struct Local {
-    port: OnceLock<u16>,
+    dir: PathBuf,
+    port: u16,
     tokens: Mutex<HashMap<EndpointId, String>>,
 }
 
 impl Local {
+    pub async fn bind(dir: &Path, peers: &[EndpointId]) -> std::io::Result<(Self, TcpListener)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let local = Self {
+            dir: dir.join("relays"),
+            port: listener.local_addr()?.port(),
+            tokens: Mutex::default(),
+        };
+        std::fs::create_dir_all(&local.dir)?;
+        // Новые порт и токены публикуются до запуска команд; старые задачи читают их заново.
+        for &peer in peers {
+            local.token(peer)?;
+        }
+        Ok((local, listener))
+    }
+
+    fn token(&self, from: EndpointId) -> std::io::Result<String> {
+        let mut tokens = self.tokens.lock().unwrap();
+        if let Some(token) = tokens.get(&from) {
+            return Ok(token.clone());
+        }
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
+        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        ferry_core::write_private(
+            &self.dir.join(from.to_string()),
+            &format!("{} {token}\n", self.port),
+        )?;
+        tokens.insert(from, token.clone());
+        Ok(token)
+    }
+
     /// Окружение команды, которую прислало `from`: git к его доверенным хостам `trust` — через
     /// его ssh. `shim` — бинарник с `ssh` (само приложение или `ferry`).
-    pub fn env(&self, from: EndpointId, trust: &[String], shim: &Path) -> Vec<(String, String)> {
-        let Some(port) = self.port.get() else {
-            return Vec::new();
-        };
+    pub fn env(
+        &self,
+        from: EndpointId,
+        trust: &[String],
+        shim: &Path,
+    ) -> std::io::Result<Vec<(String, String)>> {
         if trust.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let token = self
-            .tokens
-            .lock()
-            .unwrap()
-            .entry(from)
-            .or_insert_with(|| {
-                let mut bytes = [0u8; 16];
-                getrandom::fill(&mut bytes).expect("системный генератор случайных чисел");
-                bytes.iter().map(|b| format!("{b:02x}")).collect()
-            })
-            .clone();
+        let token = self.token(from)?;
+        let port = self.port;
         // Прямые слэши: команду разбирает шелл узла (Git Bash на Windows).
         let shim = shim.to_string_lossy().replace('\\', "/");
-        [
+        Ok([
             ("GIT_SSH_COMMAND", format!("'{shim}' ssh")),
             ("GIT_SSH_VARIANT", "ssh".into()),
             // cargo по умолчанию ходит в git через libgit2, мимо GIT_SSH_COMMAND.
             ("CARGO_NET_GIT_FETCH_WITH_CLI", "true".into()),
             ("FERRY_RELAY", format!("{port} {token}")),
+            (
+                "FERRY_RELAY_FILE",
+                self.dir
+                    .join(from.to_string())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             ("FERRY_TRUST", trust.join(" ")),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
-        .collect()
+        .collect())
     }
 
     fn device(&self, token: &[u8]) -> Option<EndpointId> {
@@ -78,10 +109,9 @@ impl Local {
     /// связанного устройства на связи.
     pub async fn serve(
         self: std::sync::Arc<Self>,
+        listener: TcpListener,
         client: impl Fn(EndpointId) -> Option<DeviceClient> + Send + Sync + 'static,
     ) -> std::io::Result<()> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let _ = self.port.set(listener.local_addr()?.port());
         let client = std::sync::Arc::new(client);
         loop {
             let (stream, _) = listener.accept().await?;
@@ -254,4 +284,28 @@ async fn send(w: &mut (impl AsyncWrite + Unpin), kind: u8, data: &[u8]) -> std::
     w.write_all(&[kind]).await?;
     w.write_all(&(data.len() as u32).to_le_bytes()).await?;
     w.write_all(data).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn restart_rotates_credentials_and_does_not_restore_removed_peers() {
+        let peer = iroh::SecretKey::generate().public();
+        let removed = iroh::SecretKey::generate().public();
+        let dir = std::env::temp_dir().join(format!("ferry-relay-{peer}"));
+        let (first, _listener) = Local::bind(&dir, &[peer, removed]).await.unwrap();
+        let old = first.token(peer).unwrap();
+        let removed_token = first.token(removed).unwrap();
+        let (second, _listener) = Local::bind(&dir, &[peer]).await.unwrap();
+        assert_eq!(second.device(old.as_bytes()), None);
+        assert_eq!(second.device(removed_token.as_bytes()), None);
+        let descriptor =
+            std::fs::read_to_string(dir.join("relays").join(peer.to_string())).unwrap();
+        let (port, token) = descriptor.trim().split_once(' ').unwrap();
+        assert_eq!(port.parse::<u16>().unwrap(), second.port);
+        assert_eq!(second.device(token.as_bytes()), Some(peer));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

@@ -284,7 +284,8 @@ impl Agent {
         };
         let peers: Vec<EndpointId> = store.peers.iter().map(|p| p.id).collect();
         let me = watch::channel(me).0;
-        let relay = Arc::new(crate::relay::Local::default());
+        let (relay, relay_listener) = crate::relay::Local::bind(&opts.dir, &peers).await?;
+        let relay = Arc::new(relay);
         let node = Arc::new(Node {
             relay: relay.clone(),
             update: opts.update.clone(),
@@ -316,7 +317,7 @@ impl Agent {
             .spawn();
         // Вход релея git: сессия `ferry ssh` уходит к устройству, запустившему команду.
         let clients = inner.clone();
-        tokio::spawn(relay.serve(move |id| clients.client(id).ok()));
+        tokio::spawn(relay.serve(relay_listener, move |id| clients.client(id).ok()));
         inner.announce();
         for id in peers {
             inner.clone().keep(id);
