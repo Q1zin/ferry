@@ -19,6 +19,66 @@ use std::time::Duration;
 use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
+/// На Windows установщик завершает ferry-app.exe и заменяет файлы приложения.
+/// Надсмотрщик и его DLL живут отдельно: запущенную задачу обновление не трогает.
+pub fn prepare_supervisor(state: &Path, source: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let root = state.join("runners");
+        if source.starts_with(&root) && source.file_name().is_some_and(|n| n == "ferry-job.exe") {
+            return Ok(source.to_path_buf());
+        }
+        cache_supervisor(&root, source)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = state;
+        Ok(source.to_path_buf())
+    }
+}
+
+#[cfg(any(windows, test))]
+fn cache_supervisor(root: &Path, source: &Path) -> io::Result<PathBuf> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut files = vec![("ferry-job.exe", fs::read(source)?)];
+    // GNU-сборка приложения загружает эту DLL ещё до разбора job-supervise.
+    let dll = source.with_file_name("WebView2Loader.dll");
+    match fs::read(dll) {
+        Ok(bytes) => files.push(("WebView2Loader.dll", bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut hash = DefaultHasher::new();
+    files.hash(&mut hash);
+    let dir = root.join(format!("{:016x}", hash.finish()));
+    fs::create_dir_all(&dir)?;
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        match fs::read(&path) {
+            // Хеш — только имя кеша; перед запуском сверяем все байты.
+            Ok(saved) if saved == bytes => continue,
+            Ok(_) => {
+                return Err(io::Error::other(format!(
+                    "повреждён надсмотрщик: {}",
+                    path.display()
+                )));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        if let Err(e) = crate::write_private_bytes(&path, &bytes) {
+            // Другой запуск мог уже положить тот же файл и запустить его: Windows не даст
+            // заменить работающий exe, но готовая побайтно совпадающая копия нам подходит.
+            if fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+                return Err(e);
+            }
+        }
+    }
+    // shortcut: старые сборки остаются в кеше; удалять можно лишь после завершения всех
+    // использующих их задач, включая готовящиеся к запуску в другом процессе.
+    Ok(dir.join("ferry-job.exe"))
+}
+
 /// Запустить задачу; задача с тем же именем, если ещё работает, перезапускается.
 pub fn start(name: &str, cmd: &str) -> io::Result<i32> {
     let exe = std::env::current_exe()?;
@@ -52,6 +112,7 @@ pub fn start_in_shell(
     // Отклонить неподдерживаемую оболочку до остановки существующей задачи.
     shell_with(cmd, shell)?;
     let dir = dir(name)?;
+    let supervisor = prepare_supervisor(&crate::ferry_home()?, supervisor)?;
     if running(&dir) {
         stop_job(name)?;
     }
@@ -74,6 +135,8 @@ pub fn start_in_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // После переноса exe в runners его собственный каталог больше не содержит CLI.
+    crate::desk::ferry_path(&mut supervisor);
     detach(&mut supervisor);
     let pid = supervisor.spawn()?.id();
     fs::write(dir.join("pid"), pid.to_string())?;
@@ -455,6 +518,39 @@ pub(crate) fn ago(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisors_keep_their_build_and_verify_cached_bytes() {
+        let root = std::env::temp_dir().join(format!("ferry-runners-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("ferry-app.exe");
+        let dll = root.join("WebView2Loader.dll");
+        let cache = root.join("runners");
+        fs::write(&source, b"old exe").unwrap();
+        fs::write(&dll, b"old dll").unwrap();
+        let old = cache_supervisor(&cache, &source).unwrap();
+        assert_eq!(cache_supervisor(&cache, &source).unwrap(), old);
+        fs::write(&source, b"new exe").unwrap();
+        let new = cache_supervisor(&cache, &source).unwrap();
+        assert_ne!(new, old);
+        fs::write(&dll, b"new dll").unwrap();
+        let newer = cache_supervisor(&cache, &source).unwrap();
+        assert_ne!(newer, new);
+        fs::remove_file(&source).unwrap();
+        fs::remove_file(&dll).unwrap();
+        assert_eq!(fs::read(&old).unwrap(), b"old exe");
+        assert_eq!(
+            fs::read(old.with_file_name("WebView2Loader.dll")).unwrap(),
+            b"old dll"
+        );
+        fs::write(&source, b"new exe").unwrap();
+        fs::write(&dll, b"new dll").unwrap();
+        fs::write(&newer, b"broken").unwrap();
+        assert!(cache_supervisor(&cache, &source).is_err());
+        assert_eq!(fs::read(&newer).unwrap(), b"broken");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tsv_round_trips_jobs() {

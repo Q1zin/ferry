@@ -130,19 +130,7 @@ pub fn shell(cmd: &str) -> Command {
 }
 
 fn configure(command: &mut Command) {
-    // `ferry` лежит рядом с приложением: команды на устройстве находят его, даже если его не
-    // ставили в PATH («Настройки» → «Поставить команду ferry»).
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
-    {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        if let Ok(path) =
-            std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
-        {
-            command.env("PATH", path);
-        }
-    }
+    ferry_path(command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -152,6 +140,27 @@ fn configure(command: &mut Command) {
     {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
+    }
+}
+
+pub(crate) fn ferry_path(command: &mut Command) {
+    // `ferry` лежит рядом с приложением: команды на устройстве находят его, даже если его не
+    // ставили в PATH («Настройки» → «Поставить команду ferry»).
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+    {
+        let path = command
+            .get_envs()
+            .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case("PATH"))
+            .and_then(|(_, value)| value.map(OsString::from))
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_default();
+        if let Ok(path) =
+            std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path)))
+        {
+            command.env("PATH", path);
+        }
     }
 }
 
@@ -345,6 +354,32 @@ mod tests {
 #[cfg(test)]
 mod shell_tests {
     use super::*;
+
+    #[test]
+    fn ferry_path_preserves_the_commands_environment() {
+        let custom = std::env::temp_dir().join("ferry-custom-path");
+        let mut command = Command::new("unused");
+        command.env("PATH", &custom);
+        ferry_path(&mut command);
+        let path = command
+            .get_envs()
+            .find(|(k, _)| k == &"PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        let dirs = std::env::split_paths(path).collect::<Vec<_>>();
+        assert_eq!(
+            dirs,
+            [
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .to_path_buf(),
+                custom
+            ]
+        );
+    }
 
     #[test]
     fn explicit_bash_preserves_script_and_exit_code() {
