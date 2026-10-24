@@ -310,6 +310,34 @@ async fn cli_drives_devices_through_the_app() {
     let out = ferry_as("a", &outside, &["desk", "win", "free", "--force"]).await;
     assert_eq!(text(&out.stdout), "win: свободен — бронь ctl (b) снята\n");
 
+    // Завершившийся агент освобождает стол; чужая более новая бронь остаётся.
+    let dead = format!("claude:{}", u32::MAX);
+    let out = ferry_as(&dead, &outside, &["desk", "win", "take"]).await;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let started = Instant::now();
+    loop {
+        let out = ferry(&outside, &["desk", "win"]).await;
+        if text(&out.stdout).contains("свободен") {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "бронь мёртвого агента не снята"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    ferry_as(&dead, &outside, &["desk", "win", "take"]).await;
+    ferry_as("b", &outside, &["desk", "win", "free", "--force"]).await;
+    let out = ferry_as("b", &outside, &["desk", "win", "take"]).await;
+    assert!(out.status.success());
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let out = ferry(&outside, &["desk", "win"]).await;
+    assert!(
+        text(&out.stdout).contains("ctl (b)"),
+        "очистка не снимает чужую бронь"
+    );
+    ferry_as("b", &outside, &["desk", "win", "free"]).await;
+
     // В репозитории — сначала снимок, потом команда в том же подкаталоге проекта.
     let repo = root("ctl").join("app");
     std::fs::create_dir_all(repo.join("src")).unwrap();

@@ -239,15 +239,49 @@ pub fn session() -> String {
         .clone()
 }
 
-/// Ближайший предок-процесс `claude`: одна таблица процессов `ps`, по ней — вверх от себя.
-#[cfg(unix)]
 fn claude_ancestor() -> Option<u32> {
+    ancestor_named(&process_table().ok()?, std::process::id(), "claude")
+}
+
+fn program_name(comm: &str) -> &str {
+    let name = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    name.strip_suffix(".exe").unwrap_or(name)
+}
+
+/// Только автоматически определяемые сессии имеют проверяемый срок жизни.
+pub fn session_pid(session: &str) -> Option<u32> {
+    session
+        .strip_prefix("claude:")?
+        .parse()
+        .ok()
+        .filter(|pid| *pid > 1)
+}
+
+pub fn ended_sessions(sessions: &[String]) -> io::Result<Vec<String>> {
+    let table = process_table()?;
+    Ok(sessions
+        .iter()
+        .filter(|session| {
+            session_pid(session).is_some_and(|pid| {
+                !table.iter().any(|(id, _, comm)| {
+                    *id == pid && program_name(comm).eq_ignore_ascii_case("claude")
+                })
+            })
+        })
+        .cloned()
+        .collect())
+}
+
+#[cfg(unix)]
+fn process_table() -> io::Result<Vec<(u32, u32, String)>> {
     let out = std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,comm="])
         .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&out.stdout)
+        .output()?;
+    if !out.status.success() {
+        return Err(io::Error::other("не удалось прочитать процессы"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -256,23 +290,71 @@ fn claude_ancestor() -> Option<u32> {
             let comm = fields.collect::<Vec<_>>().join(" ");
             Some((pid, ppid, comm))
         })
-        .collect();
-    ancestor_named(&table, std::process::id(), "claude")
+        .collect())
 }
 
-#[cfg(not(unix))]
-fn claude_ancestor() -> Option<u32> {
-    None
+#[cfg(windows)]
+fn process_table() -> io::Result<Vec<(u32, u32, String)>> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct Entry {
+        size: u32,
+        usage: u32,
+        pid: u32,
+        heap: usize,
+        module: u32,
+        threads: u32,
+        parent: u32,
+        priority: i32,
+        flags: u32,
+        name: [u16; 260],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> *mut c_void;
+        fn Process32FirstW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn Process32NextW(snapshot: *mut c_void, entry: *mut Entry) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(2, 0);
+        if snapshot as isize == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut entry: Entry = std::mem::zeroed();
+        entry.size = std::mem::size_of::<Entry>() as u32;
+        let mut table = Vec::new();
+        let mut found = Process32FirstW(snapshot, &mut entry);
+        while found != 0 {
+            let end = entry
+                .name
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(entry.name.len());
+            table.push((
+                entry.pid,
+                entry.parent,
+                String::from_utf16_lossy(&entry.name[..end]),
+            ));
+            found = Process32NextW(snapshot, &mut entry);
+        }
+        let error = io::Error::last_os_error();
+        CloseHandle(snapshot);
+        // ERROR_NO_MORE_FILES: снимок прочитан полностью, остальные ошибки не означают смерть агента.
+        if error.raw_os_error() != Some(18) {
+            return Err(error);
+        }
+        Ok(table)
+    }
 }
 
 /// Ближайший предок `pid` с программой `name` по таблице (pid, ppid, путь программы).
-#[cfg_attr(not(unix), allow(dead_code))]
 fn ancestor_named(table: &[(u32, u32, String)], pid: u32, name: &str) -> Option<u32> {
     let mut current = pid;
     for _ in 0..64 {
         let &(_, parent, _) = table.iter().find(|(p, _, _)| *p == current)?;
         let (_, _, comm) = table.iter().find(|(p, _, _)| *p == parent)?;
-        if comm.rsplit('/').next() == Some(name) {
+        if program_name(comm).eq_ignore_ascii_case(name) {
             return Some(parent);
         }
         if parent <= 1 {
@@ -380,6 +462,33 @@ mod tests {
         // Терминал без Claude Code — нет сессии; чужого pid в таблице нет — тоже.
         assert_eq!(ancestor_named(&table, 900, "claude"), None);
         assert_eq!(ancestor_named(&table, 42, "claude"), None);
+    }
+
+    #[test]
+    fn windows_sessions_follow_native_process_ancestry() {
+        let table = vec![
+            (100, 1, r"C:\Apps\claude.exe".into()),
+            (200, 100, "powershell.exe".into()),
+            (300, 200, "ferry.exe".into()),
+            (400, 1, "claude.exe".into()),
+            (500, 400, "ferry.exe".into()),
+        ];
+        assert_eq!(ancestor_named(&table, 300, "claude"), Some(100));
+        assert_eq!(ancestor_named(&table, 500, "claude"), Some(400));
+        assert_eq!(session_pid("claude:100"), Some(100));
+        assert_eq!(session_pid("claude:0"), None);
+        assert_eq!(session_pid("my-agent"), None);
+    }
+
+    #[test]
+    fn reads_native_process_table_without_releasing_named_sessions() {
+        let table = process_table().unwrap();
+        assert!(table.iter().any(|(pid, _, _)| *pid == std::process::id()));
+        let missing = format!("claude:{}", u32::MAX);
+        assert_eq!(
+            ended_sessions(&[missing.clone(), "manual".into()]).unwrap(),
+            vec![missing]
+        );
     }
 
     use super::*;
