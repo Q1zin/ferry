@@ -70,6 +70,46 @@ fn alive(pid: &str) -> bool {
 }
 
 #[test]
+fn invalid_job_names_cannot_touch_state_or_other_jobs() {
+    let node = Node::new("invalid");
+    let state = node.home.join(".ferry");
+    fs::create_dir_all(state.join("jobs/keep")).unwrap();
+    for path in ["key", "device.json", "jobs/keep/cmd", "jobs/keep/log"] {
+        fs::write(state.join(path), "keep").unwrap();
+    }
+    for name in [
+        "",
+        ".",
+        "..",
+        "../keep",
+        "/tmp/escape",
+        "a\\b",
+        "CON",
+        "nul.txt",
+        "COM1",
+        "Lpt9.log",
+        "app.",
+    ] {
+        for args in [
+            vec!["job", name, "true"],
+            vec!["log", name],
+            vec!["kill", name],
+            vec!["job-supervise", name],
+        ] {
+            let out = node.ferry(&args);
+            assert!(!out.status.success(), "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains("недопустимое имя задачи"),
+                "{args:?}: {out:?}"
+            );
+        }
+        for path in ["key", "device.json", "jobs/keep/cmd", "jobs/keep/log"] {
+            assert_eq!(fs::read_to_string(state.join(path)).unwrap(), "keep");
+        }
+    }
+}
+
+#[test]
 fn job_runs_in_background_and_records_its_exit() {
     let node = Node::new("exit");
     let start = Instant::now();
