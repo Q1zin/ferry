@@ -177,6 +177,49 @@ impl Device {
         self.client.ask(Update).await
     }
 
+    pub async fn update_file(&self, file: &Path, signature: String) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.19",
+            "локальная сборка ferry",
+        )?;
+        ferry_core::update::check_size(file)?;
+        let package = ferry_core::update::Package::parse(&signature)?;
+        package.check_target(&self.update_status().await?)?;
+        let (tx, reply) = self
+            .client
+            .0
+            .client_streaming(UpdateFile { signature }, 8)
+            .await
+            .map_err(lost)?;
+        let sent = files::send_file(file, &tx).await;
+        drop(tx);
+        // Если устройство отказало до приёма файла — сохранить его понятную причину.
+        let result = reply.await.map_err(lost)?;
+        match result {
+            Err(fail) => Err(fail),
+            Ok(said) => {
+                sent?;
+                Ok(said)
+            }
+        }
+    }
+    pub async fn update_status(&self) -> Reply<ferry_core::update::Status> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.19",
+            "локальная сборка ferry",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            self.client.ask(UpdateStatus),
+        )
+        .await
+        .map_err(|_| Fail::new("устройство не ответило за 4 с"))?
+    }
+
     /// Хвост лога приложения ferry на устройстве.
     pub async fn logs(&self, lines: usize) -> Reply<String> {
         need(&self.name, self.version.as_deref(), "0.1.3", "ferry logs")?;

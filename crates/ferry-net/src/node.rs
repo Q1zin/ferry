@@ -34,6 +34,8 @@ pub(crate) struct Node {
     /// Вход релея git: команды, которые прислало устройство, ходят в git его ключами.
     pub relay: Arc<crate::relay::Local>,
     pub update: Option<crate::agent::UpdateHook>,
+    pub update_file: Option<crate::agent::LocalUpdateHook>,
+    pub update_status: ferry_core::update::Monitor,
 }
 
 impl Node {
@@ -365,6 +367,29 @@ impl Node {
                 let me = self.me.borrow().clone();
                 crate::relay::serve_git_ssh(&self.dir, &me, inner, tx, rx).await;
             }
+            DeviceMessage::UpdateStatus(WithChannels { tx, .. }) => {
+                let status = self.update_status.lock().unwrap().clone();
+                tx.send(Ok(status)).await.ok();
+            }
+            DeviceMessage::UpdateFile(WithChannels {
+                inner, tx, mut rx, ..
+            }) => {
+                let result = async {
+                    self.check_update_file(&inner.signature)?;
+                    let file = files::temp(&self.dir, "update")?;
+                    let received =
+                        files::recv_file_limited(&mut rx, &file, ferry_core::update::MAX_PACKAGE)
+                            .await;
+                    let result = match received {
+                        Ok(()) => self.install_file(file.clone(), inner.signature).await,
+                        Err(fail) => Err(fail),
+                    };
+                    let _ = std::fs::remove_file(file);
+                    result
+                }
+                .await;
+                tx.send(result).await.ok();
+            }
             DeviceMessage::Update(WithChannels { tx, .. }) => {
                 tx.send(self.update().await).await.ok();
             }
@@ -435,6 +460,29 @@ impl Node {
             )));
         };
         update().await.map_err(Fail::new)
+    }
+
+    fn check_update_file(&self, signature: &str) -> Reply<()> {
+        if self.me.borrow().mode != Mode::Active {
+            return Err(Fail::refused(
+                "для установки локальной сборки включи активный режим на устройстве",
+            ));
+        }
+        if self.update_file.is_none() {
+            return Err(Fail::new("эта сборка ferry не обновляется сама"));
+        }
+        let status = self.update_status.lock().unwrap();
+        if status.busy {
+            return Err(Fail::new("обновление уже выполняется"));
+        }
+        ferry_core::update::Package::parse(signature)?.check_target(&status)
+    }
+    pub async fn install_file(&self, file: PathBuf, signature: String) -> Reply<String> {
+        self.check_update_file(&signature)?;
+        ferry_core::update::check_size(&file)?;
+        self.update_file.as_ref().unwrap()(file, signature)
+            .await
+            .map_err(Fail::new)
     }
 
     async fn run(

@@ -16,6 +16,7 @@ pub mod project;
 pub mod relay;
 pub mod screen;
 pub mod sync;
+pub mod update;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

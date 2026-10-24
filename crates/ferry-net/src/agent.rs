@@ -49,10 +49,15 @@ pub struct Options {
     /// Обновить ferry на этом устройстве из релиза (умеет приложение): ответ — что будет; само
     /// обновление и перезапуск — после ответа.
     pub update: Option<UpdateHook>,
+    pub update_file: Option<LocalUpdateHook>,
+    pub update_status: ferry_core::update::Monitor,
 }
 
 pub type UpdateHook =
     Arc<dyn Fn() -> n0_future::boxed::BoxFuture<Result<String, String>> + Send + Sync>;
+
+pub type LocalUpdateHook =
+    Arc<dyn Fn(PathBuf, String) -> BoxFuture<Result<String, String>> + Send + Sync>;
 
 /// Порт ferry по умолчанию.
 pub const PORT: u16 = 47760;
@@ -67,6 +72,8 @@ impl Options {
             supervisor: std::env::current_exe().unwrap_or_default(),
             port: Some(PORT),
             update: None,
+            update_file: None,
+            update_status: Arc::new(Mutex::new(ferry_core::update::Status::default())),
         }
     }
 }
@@ -289,6 +296,8 @@ impl Agent {
         let node = Arc::new(Node {
             relay: relay.clone(),
             update: opts.update.clone(),
+            update_file: opts.update_file.clone(),
+            update_status: opts.update_status.clone(),
             dir: opts.dir.clone(),
             home: opts.home,
             supervisor: opts.supervisor,
@@ -586,6 +595,13 @@ impl Agent {
 
     pub async fn update_self(&self) -> Result<String, Fail> {
         self.inner.node.update().await
+    }
+
+    pub async fn update_file_self(&self, file: PathBuf, signature: String) -> Result<String, Fail> {
+        self.inner.node.install_file(file, signature).await
+    }
+    pub fn update_status(&self) -> ferry_core::update::Status {
+        self.inner.node.update_status.lock().unwrap().clone()
     }
 
     pub async fn shutdown(&self) {
@@ -1020,7 +1036,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
         DeviceMessage::SyncApply(m) => (format!("снимок проекта {}", m.inner.project), false),
         DeviceMessage::Put(_) => ("файлы в проект".into(), false),
         DeviceMessage::Get(m) => (format!("забрать {}", m.inner.path), false),
-        DeviceMessage::Update(_) => ("обновить ferry".into(), false),
+        DeviceMessage::Update(_) | DeviceMessage::UpdateFile(_) => ("обновить ferry".into(), false),
         DeviceMessage::SetRole(m) => (format!("роль: {}", m.inner.0.name()), false),
         DeviceMessage::Rename(m) => (format!("имя: {}", m.inner.0), false),
         _ => return None,

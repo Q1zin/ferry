@@ -336,3 +336,86 @@ async fn tunnel_carries_bytes_both_ways() {
     assert_eq!(rx.recv().await.unwrap(), Some(b"ping".to_vec()));
     drop(b);
 }
+
+#[tokio::test]
+async fn local_update_streams_package_and_respects_modes() {
+    use ferry_core::update::{Package, Status};
+    use std::sync::Mutex;
+    let a = agent("local-upd-ctl").await;
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let saved = received.clone();
+    let hook: ferry_net::agent::LocalUpdateHook = Arc::new(move |file, signature| {
+        let saved = saved.clone();
+        Box::pin(async move {
+            assert_eq!(Package::parse(&signature).unwrap().version, "0.1.19");
+            *saved.lock().unwrap() = std::fs::read(&file).unwrap();
+            Ok("accepted test package".into())
+        })
+    });
+    let opts = Options {
+        update_file: Some(hook),
+        ..options("local-upd-node")
+    };
+    let monitor = opts.update_status.clone();
+    // Test a Windows package even when these in-process agents run on macOS.
+    *monitor.lock().unwrap() = Status {
+        os: "windows".into(),
+        arch: "x86_64".into(),
+        ..Status::default()
+    };
+    let b = agent_with("local-upd-node", opts).await;
+    pair(&a, &b).await;
+    let node = a.device("local-upd-node").unwrap();
+    let signature = "dW50cnVzdGVkIGNvbW1lbnQ6IHRlc3QKYWJjCnRydXN0ZWQgY29tbWVudDogdGltZXN0YW1wOjEJZmlsZTpmZXJyeV8wLjEuMTlfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4xOQpkZWYK".to_string();
+    let file = path("local-upd-ctl").join("package.exe");
+    let bytes = vec![42u8; 700_000];
+    std::fs::write(&file, &bytes).unwrap();
+    let before = node.update_status().await.unwrap();
+    b.set_role(None, Role::Console).await.unwrap();
+    assert_eq!(
+        node.update_file(&file, signature.clone()).await.unwrap(),
+        "accepted test package"
+    );
+    assert_eq!(*received.lock().unwrap(), bytes);
+    assert_eq!(
+        std::fs::read_dir(path("local-upd-node").join("tmp"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert!(
+        !node
+            .update_status()
+            .await
+            .unwrap()
+            .restarted(&before, "0.1.19")
+    );
+    for mode in [Mode::NoDesktop, Mode::Paused] {
+        b.set_mode(mode).unwrap();
+        assert_eq!(
+            node.update_file(&file, signature.clone())
+                .await
+                .unwrap_err()
+                .code,
+            75
+        );
+    }
+    b.set_mode(Mode::Active).unwrap();
+    monitor.lock().unwrap().busy = true;
+    assert!(
+        node.update_file(&file, signature.clone())
+            .await
+            .unwrap_err()
+            .message
+            .contains("уже выполняется")
+    );
+    monitor.lock().unwrap().busy = false;
+    monitor.lock().unwrap().os = "macos".into();
+    assert!(
+        node.update_file(&file, signature)
+            .await
+            .unwrap_err()
+            .message
+            .contains("пакет для")
+    );
+}

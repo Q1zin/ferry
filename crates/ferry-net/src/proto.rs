@@ -165,6 +165,13 @@ pub struct Tunnel {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Update;
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateFile {
+    pub signature: String,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct UpdateStatus;
+
 /// Снимок области экрана: `[x, y, ширина, высота]` в пикселях снимка.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ShotArea {
@@ -321,6 +328,11 @@ pub enum DeviceProtocol {
     RunShell(RunShell),
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     StartShell(StartShell),
+    /// Локальные подписанные сборки с 0.1.19.
+    #[rpc(tx = oneshot::Sender<Reply<String>>, rx = mpsc::Receiver<Chunk>)]
+    UpdateFile(UpdateFile),
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::update::Status>>)]
+    UpdateStatus(UpdateStatus),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
