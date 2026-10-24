@@ -438,16 +438,42 @@ const MOUSE_RIGHT_UP: u32 = 0x0010;
 /// Клавиша Windows: виртуальный код и нужен ли ей флаг «расширенная» (стрелки, Home, Delete…).
 type Key = (u16, bool);
 
+/// Последний `+` в `ctrl++` — клавиша; на ANSI-клавиатуре это Shift+=.
+/// Общий разбор для macOS и Windows, включая удержание при движении мыши.
+fn key_names(text: &str) -> Vec<String> {
+    let normalized = if text == "+" {
+        "plus".to_owned()
+    } else if let Some(prefix) = text.strip_suffix("++") {
+        format!("{prefix}+plus")
+    } else {
+        text.to_ascii_lowercase()
+    };
+    let mut names = Vec::new();
+    for name in normalized.split('+') {
+        let name = name.to_ascii_lowercase();
+        if name == "plus" {
+            if !names.iter().any(|name| name == "shift") {
+                names.push("shift".to_owned());
+            }
+            names.push("=".to_owned());
+        } else {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// `ctrl+shift+s` → клавиши Windows по порядку нажатия; последняя — основная.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn combo(text: &str) -> io::Result<Vec<Key>> {
-    text.split('+')
+    key_names(text)
+        .into_iter()
         .map(|name| {
             key(&name.to_ascii_lowercase()).ok_or_else(|| {
                 io::Error::other(format!(
                     "неизвестная клавиша {name:?}: буквы, цифры, f1–f24, ctrl, shift, alt, win, \
                      enter, esc, tab, space, backspace, delete, insert, home, end, pageup, \
-                     pagedown, up, down, left, right"
+                     pagedown, up, down, left, right, =, -, plus (+)"
                 ))
             })
         })
@@ -467,6 +493,8 @@ fn key(name: &str) -> Option<Key> {
         "esc" | "escape" => plain(0x1B),
         "tab" => plain(0x09),
         "space" => plain(0x20),
+        "=" | "equal" | "equals" => plain(0xBB),
+        "-" | "−" | "minus" => plain(0xBD),
         "backspace" => plain(0x08),
         "delete" | "del" => extended(0x2E),
         "insert" | "ins" => extended(0x2D),
@@ -1066,13 +1094,14 @@ mod mac {
     }
 
     pub(super) fn combo(text: &str) -> io::Result<Vec<(u16, CGEventFlags)>> {
-        text.split('+')
+        super::key_names(text)
+            .into_iter()
             .map(|name| {
                 keycode(&name.to_ascii_lowercase()).ok_or_else(|| {
                     io::Error::other(format!(
                         "неизвестная клавиша {name:?}: буквы, цифры, f1–f20, cmd, ctrl, shift, \
                          alt, enter, esc, tab, space, backspace, delete, home, end, pageup, \
-                         pagedown, up, down, left, right"
+                         pagedown, up, down, left, right, =, -, plus (+)"
                     ))
                 })
             })
@@ -1091,6 +1120,8 @@ mod mac {
             "esc" | "escape" => plain(53),
             "tab" => plain(48),
             "space" => plain(49),
+            "=" | "equal" | "equals" => plain(24),
+            "-" | "−" | "minus" => plain(27),
             "backspace" => plain(51),
             "delete" | "del" => plain(117),
             "home" => plain(115),
@@ -1719,6 +1750,8 @@ mod win {
     unsafe extern "system" {
         fn SetProcessDPIAware() -> i32;
         fn GetSystemMetrics(index: i32) -> i32;
+        fn MapVirtualKeyExW(code: u32, map: u32, layout: isize) -> u32;
+        fn GetKeyboardLayout(thread: u32) -> isize;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
         fn EnumWindows(callback: extern "system" fn(isize, isize) -> i32, param: isize) -> i32;
         fn IsWindowVisible(window: isize) -> i32;
@@ -1843,6 +1876,16 @@ mod win {
     }
 
     fn key(vk: u16, scan: u16, flags: u32) -> Input {
+        // WebView/Chromium берёт event.code из scan code, даже при вводе через VK.
+        // Раскладка именно окна-получателя, а не фонового потока ferry.
+        let scan = if vk != 0 && scan == 0 {
+            unsafe {
+                let thread = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+                MapVirtualKeyExW(u32::from(vk), 0, GetKeyboardLayout(thread)) as u16
+            }
+        } else {
+            scan
+        };
         Input {
             kind: INPUT_KEYBOARD,
             event: Event {
@@ -1964,6 +2007,37 @@ mod win {
             }
         }
         send(&inputs)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn keyboard_events_include_scan_codes_without_sending_input() {
+        for (combo, expected) in [
+            ("f12", vec![0x58]),
+            ("ctrl+shift+i", vec![0x1d, 0x2a, 0x17]),
+            ("ctrl+=", vec![0x1d, 0x0d]),
+            ("ctrl+-", vec![0x1d, 0x0c]),
+            ("ctrl++", vec![0x1d, 0x2a, 0x0d]),
+            ("ctrl+left", vec![0x1d, 0x4b]),
+        ] {
+            let (down, up) = presses(combo).unwrap();
+            let scans = down
+                .iter()
+                .map(|input| unsafe { input.event.key.scan })
+                .collect::<Vec<_>>();
+            assert_eq!(scans, expected, "{combo}");
+            for (down, up) in down.iter().zip(up.iter().rev()) {
+                let (down, up) = unsafe { (down.event.key, up.event.key) };
+                assert_eq!(down.scan, up.scan);
+                assert_eq!(down.flags | KEY_UP, up.flags);
+            }
+        }
+        let (down, _) = presses("left").unwrap();
+        assert_eq!(unsafe { down[0].event.key.flags }, KEY_EXTENDED);
+        assert_eq!(
+            unsafe { key(0, 0x044f, KEY_UNICODE).event.key.scan },
+            0x044f
+        );
     }
 
     /// Каждая комбинация: всё нажать по порядку, отпустить в обратном.
@@ -2331,6 +2405,22 @@ mod tests {
         assert!(err.contains("самого ferry"), "{err}");
     }
 
+    #[test]
+    fn parses_zoom_keys_and_rejects_empty_keys() {
+        assert_eq!(combo("ctrl+=").unwrap(), [(0x11, false), (0xbb, false)]);
+        assert_eq!(combo("ctrl+−").unwrap(), [(0x11, false), (0xbd, false)]);
+        assert_eq!(
+            combo("CTRL++").unwrap(),
+            [(0x11, false), (0x10, false), (0xbb, false)]
+        );
+        assert_eq!(combo("ctrl+plus").unwrap(), combo("ctrl++").unwrap());
+        assert_eq!(combo("ctrl+shift++").unwrap(), combo("ctrl++").unwrap());
+        assert_eq!(combo("+").unwrap(), [(0x10, false), (0xbb, false)]);
+        for invalid in ["", "ctrl+", "ctrl+++", "ctrl++a", "+a"] {
+            assert!(combo(invalid).is_err(), "{invalid}");
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn parses_mac_key_combos() {
@@ -2343,6 +2433,22 @@ mod tests {
         assert_eq!(
             codes("Alt+F4"),
             [(58, F::CGEventFlagAlternate), (118, F::CGEventFlagNull)]
+        );
+        assert_eq!(
+            codes("cmd+="),
+            [(55, F::CGEventFlagCommand), (24, F::CGEventFlagNull)]
+        );
+        assert_eq!(
+            codes("cmd+-"),
+            [(55, F::CGEventFlagCommand), (27, F::CGEventFlagNull)]
+        );
+        assert_eq!(
+            codes("cmd++"),
+            [
+                (55, F::CGEventFlagCommand),
+                (56, F::CGEventFlagShift),
+                (24, F::CGEventFlagNull)
+            ]
         );
         assert_eq!(codes("m"), [(46, F::CGEventFlagNull)]);
         assert_eq!(codes("0"), [(29, F::CGEventFlagNull)]);

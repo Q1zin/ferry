@@ -75,6 +75,7 @@ ferry wait win-10 --window "Сохранить как"   # ждать окно �
 ferry wait win-10 --name "Готово" --timeout 60   # ждать элемент; печатает его место
 ferry type win-10 'текст'                # юникодом, раскладка не важна
 ferry key win-10 ctrl+s enter alt+f4
+ferry key win-10 ctrl+= ctrl+- ctrl++   # = и -; plus или + — Shift+= (ANSI)
 ferry key win-10 space --for 2           # долгое нажатие
 ferry click win-10 300 200 --hold shift  # shift/ctrl/cmd+клик; у drag тоже есть --hold
 ferry drag win-10 100 200 400 200        # перетащить: выделение, ползунок, перенос
