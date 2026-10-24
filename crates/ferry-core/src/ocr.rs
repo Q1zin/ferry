@@ -39,8 +39,16 @@ pub fn read(image: &Path, want: &str) -> io::Result<Vec<Text>> {
 const LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Запустить распознаватель и дождаться его не дольше [`LIMIT`]; не успел — убить.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
-fn finish(mut command: std::process::Command) -> io::Result<String> {
+#[cfg(windows)]
+fn finish(command: std::process::Command) -> io::Result<String> {
+    finish_with_limit(command, LIMIT)
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn finish_with_limit(
+    mut command: std::process::Command,
+    limit: std::time::Duration,
+) -> io::Result<String> {
     use std::process::Stdio;
     // Своя группа процессов: по пределу убиваем её целиком (`kill_tree`).
     #[cfg(unix)]
@@ -55,15 +63,14 @@ fn finish(mut command: std::process::Command) -> io::Result<String> {
     std::thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
     });
-    let out = match rx.recv_timeout(LIMIT) {
+    let out = match rx.recv_timeout(limit) {
         Ok(out) => out?,
         Err(_) => {
             crate::desk::kill_tree(pid).ok();
-            return Err(io::Error::other(format!(
-                "распознавание текста не ответило за {} с — распознаватель системы на этом \
-                 устройстве не работает",
-                LIMIT.as_secs()
-            )));
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("распознавание текста не ответило за {} с", limit.as_secs()),
+            ));
         }
     };
     if !out.status.success() {
@@ -74,6 +81,38 @@ fn finish(mut command: std::process::Command) -> io::Result<String> {
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// После сбоя ускорителя остаёмся на CPU до перезапуска, если он смог выполнить запрос.
+#[cfg(any(target_os = "macos", test))]
+fn with_cpu_fallback(
+    prefer_cpu: &std::sync::atomic::AtomicBool,
+    mut run: impl FnMut(bool, std::time::Duration) -> io::Result<String>,
+) -> io::Result<String> {
+    use std::sync::atomic::Ordering;
+    if prefer_cpu.load(Ordering::Relaxed) {
+        return run(true, LIMIT);
+    }
+    let started = std::time::Instant::now();
+    match run(false, LIMIT / 2) {
+        Ok(text) => Ok(text),
+        Err(first) => {
+            let remaining = LIMIT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(first);
+            }
+            match run(true, remaining) {
+                Ok(text) => {
+                    prefer_cpu.store(true, Ordering::Relaxed);
+                    Ok(text)
+                }
+                Err(cpu) => Err(io::Error::new(
+                    cpu.kind(),
+                    format!("Vision: {first}; повтор на CPU: {cpu}"),
+                )),
+            }
+        }
+    }
 }
 
 /// Строки распознавателя: `вид<TAB>x<TAB>y<TAB>ширина<TAB>высота<TAB>текст`, вид — `line`,
@@ -118,6 +157,7 @@ mod os {
     const SCRIPT: &str = r#"
 ObjC.import('Vision');
 ObjC.import('AppKit');
+ObjC.import('CoreML');
 function run(argv) {
     var url = $.NSURL.fileURLWithPath(argv[0]), want = argv[1] || '';
     var image = $.NSImage.alloc.initWithContentsOfURL(url);
@@ -128,6 +168,26 @@ function run(argv) {
     request.recognitionLevel = 0;
     request.recognitionLanguages = $(['ru-RU', 'en-US']);
     request.usesLanguageCorrection = true;
+    if (argv[2] === 'cpu') {
+        if (request.respondsToSelector($.NSSelectorFromString('supportedComputeStageDevicesAndReturnError:'))) {
+            var devices = request.supportedComputeStageDevicesAndReturnError(null);
+            if (devices.isNil()) { throw new Error('Vision не перечислил устройства CPU'); }
+            var stages = devices.allKeys;
+            if (!stages.count) { throw new Error('Vision не перечислил этапы вычислений'); }
+            for (var si = 0; si < stages.count; si++) {
+                var stage = stages.objectAtIndex(si), choices = devices.objectForKey(stage), cpu = null;
+                for (var ci = 0; ci < choices.count; ci++) {
+                    var choice = choices.objectAtIndex(ci);
+                    if (choice.isKindOfClass($.MLCPUComputeDevice)) { cpu = choice; break; }
+                }
+                if (!cpu) { throw new Error('Vision: CPU недоступен для ' + stage.js); }
+                request.setComputeDeviceForComputeStage(cpu, stage);
+            }
+        } else {
+            // macOS до 14: старый API выбора CPU.
+            request.usesCPUOnly = true;
+        }
+    }
     var error = $();
     if (!$.VNImageRequestHandler.alloc.initWithURLOptions(url, $()).performRequestsError($([request]), error)) {
         throw new Error('Vision не распознал: ' + (error.isNil() ? '?' : error.localizedDescription.js));
@@ -154,12 +214,23 @@ function run(argv) {
 "#;
 
     pub fn run(image: &Path, want: &str) -> io::Result<String> {
+        static CPU: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        super::with_cpu_fallback(&CPU, |cpu, limit| run_on(image, want, cpu, limit))
+    }
+
+    pub(super) fn run_on(
+        image: &Path,
+        want: &str,
+        cpu: bool,
+        limit: std::time::Duration,
+    ) -> io::Result<String> {
         let mut command = Command::new("osascript");
         command
             .args(["-l", "JavaScript", "-e", SCRIPT])
             .arg(image)
-            .arg(want);
-        super::finish(command)
+            .arg(want)
+            .arg(if cpu { "cpu" } else { "auto" });
+        super::finish_with_limit(command, limit)
     }
 }
 
@@ -295,6 +366,80 @@ mod tests {
             text(false, (10, 300, 50, 20), "ready"),
         ];
         assert_eq!(pick(found).len(), 2);
+    }
+
+    #[test]
+    fn ocr_retries_cpu_and_remembers_only_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cpu = AtomicBool::new(false);
+        let mut calls = Vec::new();
+        let text = with_cpu_fallback(&cpu, |on_cpu, budget| {
+            calls.push(on_cpu);
+            assert!(!budget.is_zero() && budget <= LIMIT);
+            if on_cpu {
+                Ok("recognized".into())
+            } else {
+                Err(io::Error::other("e5rt failed"))
+            }
+        })
+        .unwrap();
+        assert_eq!(text, "recognized");
+        assert_eq!(calls, [false, true]);
+        assert!(cpu.load(Ordering::Relaxed));
+        with_cpu_fallback(&cpu, |on_cpu, budget| {
+            assert!(on_cpu);
+            assert_eq!(budget, LIMIT);
+            Ok(String::new())
+        })
+        .unwrap();
+
+        let cpu = AtomicBool::new(false);
+        let error = with_cpu_fallback(&cpu, |on_cpu, _| {
+            Err(io::Error::other(if on_cpu {
+                "CPU failed"
+            } else {
+                "e5rt failed"
+            }))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("CPU failed") && error.contains("e5rt failed"));
+        assert!(!cpu.load(Ordering::Relaxed));
+        with_cpu_fallback(&cpu, |on_cpu, _| {
+            assert!(!on_cpu, "пустой результат не означает сбой ускорителя");
+            Ok(String::new())
+        })
+        .unwrap();
+        assert!(!cpu.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn recognizer_timeout_returns_promptly() {
+        let command = crate::desk::shell(if cfg!(windows) {
+            "sleep 5"
+        } else {
+            "exec sleep 5"
+        });
+        // Тест не открывает окон и не вызывает распознавание.
+        let started = std::time::Instant::now();
+        let error = finish_with_limit(command, std::time::Duration::from_millis(100)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn vision_cpu_reads_and_locates_text() {
+        let image = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ocr-sample.png");
+        let lines = parse(&os::run_on(&image, "", true, LIMIT).unwrap());
+        assert!(
+            lines.iter().any(|line| line.text.contains("second line")),
+            "{lines:?}"
+        );
+        let hits = pick(parse(&os::run_on(&image, "second", true, LIMIT).unwrap()));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        let (x, y) = hits[0].center();
+        assert!(x < 120 && (28..60).contains(&y), "{hits:?}");
     }
 
     /// Настоящий Vision на маленькой картинке с текстом из TextEdit.
