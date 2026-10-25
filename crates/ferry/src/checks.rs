@@ -371,6 +371,7 @@ fn check_one(
                 max_bytes: 8192,
             },
         )?;
+        terminal = row["result"]["state"] != "running";
         let mut artifacts = Vec::new();
         if terminal {
             for path in p.artifacts.iter().chain(p.junit.iter()) {
@@ -414,7 +415,7 @@ fn check_one(
             }
         }
         row["artifacts"] = artifacts.into();
-        row["state"] = if current.state == "succeeded" && errors.is_empty() {
+        row["state"] = if row["result"]["state"] == "succeeded" && errors.is_empty() {
             "succeeded"
         } else {
             "failed"

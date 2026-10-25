@@ -61,6 +61,16 @@ pub(super) fn generation(dir: &Path) -> io::Result<String> {
     }
 }
 
+fn reported_state(state: &str, exit_code: Option<i32>) -> &'static str {
+    match state {
+        "running" => "running",
+        "killed" => "killed",
+        "lost" if exit_code.is_none() => "lost",
+        _ if exit_code == Some(0) => "succeeded",
+        _ => "failed",
+    }
+}
+
 /// Не читает весь лог в память. Состояние смотрим до чтения лога, чтобы финальные
 /// строки всегда попали в результат, который уже говорит «завершилась».
 pub fn result_in(
@@ -88,13 +98,10 @@ pub(super) fn result_at(
     let run_id = generation(dir)?;
     let state = code(dir);
     let exit_code = read(dir, "exit").and_then(|s| s.parse::<i32>().ok());
-    let state = match state.as_str() {
-        "running" => "running",
-        "killed" if running(dir) => "running",
-        "killed" => "killed",
-        "lost" => "lost",
-        _ if exit_code == Some(0) => "succeeded",
-        _ => "failed",
+    let state = if state == "killed" && running(dir) {
+        "running"
+    } else {
+        reported_state(&state, exit_code)
     }
     .to_string();
     let mut file = fs::File::open(dir.join("log"))?;
@@ -178,6 +185,14 @@ fn complete_utf8(bytes: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exit_published_during_poll_overrides_transient_lost_state() {
+        assert_eq!(super::reported_state("lost", Some(0)), "succeeded");
+        assert_eq!(super::reported_state("lost", Some(7)), "failed");
+        assert_eq!(super::reported_state("lost", None), "lost");
+        assert_eq!(super::reported_state("killed", Some(0)), "killed");
+    }
+
     use super::*;
     struct Fixture(PathBuf);
     impl Fixture {

@@ -374,7 +374,16 @@ fn code(dir: &Path) -> String {
         (Some(_), _) => "killed".into(),
         (None, Some(code)) => format!("exit:{code}"),
         (None, None) if running(dir) => "running".into(),
-        (None, None) => "lost".into(),
+        (None, None) => {
+            // running мог уже увидеть exit, появившийся после первого чтения.
+            if read(dir, "killed").is_some() {
+                "killed".into()
+            } else {
+                read(dir, "exit")
+                    .map(|code| format!("exit:{code}"))
+                    .unwrap_or_else(|| "lost".into())
+            }
+        }
     }
 }
 
