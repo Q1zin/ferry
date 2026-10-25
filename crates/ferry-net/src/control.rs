@@ -387,6 +387,24 @@ async fn answer(
             close: true,
         } => Response::Message(agent.close_tunnel(&device, port)?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
+        Request::JobResult {
+            device,
+            name,
+            cursor,
+            max_bytes,
+            wait,
+        } => {
+            let request = crate::proto::JobResult {
+                name,
+                cursor,
+                max_bytes,
+                wait,
+            };
+            Response::JobResult(match device {
+                Some(device) => agent.device(&device)?.job_result(request).await?,
+                None => agent.job_result_self(request).await?,
+            })
+        }
         Request::UpdateStatus { device } => Response::UpdateStatus(match device {
             None => agent.update_status(),
             Some(device) => agent.device(&device)?.update_status().await?,

@@ -132,6 +132,9 @@ impl Node {
                 };
                 tx.send(result).await.ok();
             }
+            DeviceMessage::JobResult(WithChannels { inner, tx, .. }) => {
+                tx.send(self.job_result(inner, true).await).await.ok();
+            }
             DeviceMessage::Jobs(WithChannels { tx, .. }) => {
                 let result = match self.check(false) {
                     Ok(()) => blocking(jobs::rows).await,
@@ -560,6 +563,43 @@ impl Node {
             }
         }
         self.runs.lock().unwrap().remove(&pid);
+    }
+
+    pub async fn job_result(&self, request: JobResult, remote: bool) -> Reply<jobs::JobResult> {
+        if request.wait > 60 {
+            return Err(Fail::new("--wait: от 0 до 60 секунд"));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(request.wait.into());
+        let mut generation = None;
+        loop {
+            if remote {
+                self.check(false)?;
+            }
+            let (root, name, cursor, limit) = (
+                self.dir.clone(),
+                request.name.clone(),
+                request.cursor.clone(),
+                request.max_bytes,
+            );
+            let result =
+                blocking(move || jobs::result_in(&root, &name, cursor.as_deref(), limit)).await?;
+            if generation.as_ref().is_some_and(|id| id != &result.run_id) {
+                return Err(Fail::new(
+                    "задача перезапущена во время ожидания; запроси result заново",
+                ));
+            }
+            generation = Some(result.run_id.clone());
+            if result.state != "running"
+                || tokio::time::Instant::now() >= deadline
+                || (request.cursor.is_some() && !result.log.is_empty())
+            {
+                return Ok(result);
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(250)),
+            )
+            .await;
+        }
     }
 
     async fn log(&self, Log { name, follow }: Log, tx: mpsc::Sender<Output>) {

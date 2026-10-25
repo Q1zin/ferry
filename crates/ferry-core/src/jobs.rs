@@ -19,6 +19,9 @@ use std::time::Duration;
 use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
+mod result;
+pub use result::{DEFAULT_BYTES, JobResult, MAX_BYTES, result_in};
+
 /// На Windows установщик завершает ferry-app.exe и заменяет файлы приложения.
 /// Надсмотрщик и его DLL живут отдельно: запущенную задачу обновление не трогает.
 pub fn prepare_supervisor(state: &Path, source: &Path) -> io::Result<PathBuf> {
@@ -122,6 +125,7 @@ pub fn start_in_shell(
         Err(e) => return Err(e),
     }
     fs::create_dir_all(&dir)?;
+    fs::write(dir.join("run-id"), result::new_run_id())?;
     fs::write(dir.join("cmd"), cmd)?;
     fs::write(dir.join("shell"), serde_json::to_vec(&shell)?)?;
     fs::write(dir.join("cwd"), cwd.to_string_lossy().as_bytes())?;
@@ -177,7 +181,7 @@ pub fn supervise(name: &str) -> io::Result<i32> {
             127
         }
     };
-    fs::write(dir.join("exit"), code.to_string())?;
+    crate::write_private(&dir.join("exit"), &code.to_string())?;
     drop(lock);
     Ok(code)
 }
@@ -407,7 +411,8 @@ fn running(dir: &Path) -> bool {
 
 /// Есть ли процесс `pid` и это ли ferry (`ferry` или `ferry-app` — они и бывают надсмотрщиками).
 fn ferry_process(pid: u32) -> bool {
-    process_name(pid).is_some_and(|name| name == "ferry" || name == "ferry-app")
+    process_name(pid)
+        .is_some_and(|name| matches!(name.as_str(), "ferry" | "ferry-app" | "ferry-job"))
 }
 
 /// Имя программы процесса: без пути и `.exe`, в нижнем регистре.
@@ -465,6 +470,11 @@ fn detach(command: &mut Command) {
 }
 
 fn dir(name: &str) -> io::Result<PathBuf> {
+    validate_name(name)?;
+    Ok(crate::ferry_home()?.join("jobs").join(name))
+}
+
+fn validate_name(name: &str) -> io::Result<()> {
     let alias = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
     // Имена переносимы на Windows; точка в конце и имена устройств там имеют особый смысл.
     let stem = name
@@ -487,7 +497,7 @@ fn dir(name: &str) -> io::Result<PathBuf> {
             "недопустимое имя задачи: {name:?}"
         )));
     }
-    Ok(crate::ferry_home()?.join("jobs").join(name))
+    Ok(())
 }
 
 fn existing(name: &str) -> io::Result<PathBuf> {
