@@ -69,7 +69,7 @@ fn tool() -> Value {
         "description": "Работа на других компьютерах (Windows, macOS) через ferry — та же команда, \
             что в терминале: args — аргументы после `ferry`. Вывод и код выхода — текстом, снимки \
             экрана (shot) и листы записи (rec) — картинками. Основное: devices --json; \
-            run <устройство> -- <команда>; start/log/jobs/kill — фоновые задачи; \
+            run <устройство> -- <команда>; start/result/log/jobs/kill — фоновые задачи; result [<устройство>] <задача> --wait 30 — ограниченный JSON результата, --cursor — новые строки; для долгих команд используй start и result; \
             shot <устройство> [--window <окно> | --region x,y,w,h]; windows; focus; ui; text; \
             click <устройство> (x y | --name <имя> | --text <текст>); type; key; drag; clip; \
             wait <устройство> (--window | --name | --text | --port | --log <задача> <текст>); \
@@ -111,7 +111,17 @@ fn run(args: &[String]) -> Value {
     said += &format!("(код {code})");
     let mut parts = vec![text(&said)];
     parts.extend(images(&stdout));
-    answer(parts, code != 0)
+    command_answer(args, &stdout, parts, code)
+}
+
+fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -> Value {
+    let mut result = answer(parts, code != 0);
+    if args.first().is_some_and(|arg| arg == "result")
+        && let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(stdout)
+    {
+        result["structuredContent"] = value;
+    }
+    result
 }
 
 /// Картинки по путям к PNG в выводе: строка — путь, у нескольких целей — с `[устройство] `.
@@ -153,6 +163,21 @@ mod tests {
 
     fn ask(message: Value) -> Option<Value> {
         handle(&message, |args| answer(vec![text(&args.join("|"))], false))
+    }
+
+    #[test]
+    fn failed_job_results_keep_json_and_mark_tool_failure() {
+        let args = vec!["result".into(), "win".into(), "build".into()];
+        let stdout = r#"{"state":"failed","exit_code":7,"log":"error"}"#;
+        let reply = command_answer(&args, stdout, vec![text(stdout)], 7);
+        assert_eq!(reply["isError"], true);
+        assert_eq!(reply["structuredContent"]["exit_code"], 7);
+        assert_eq!(reply["content"][0]["text"], stdout);
+        assert!(
+            command_answer(&args, "", vec![], 1)
+                .get("structuredContent")
+                .is_none()
+        );
     }
 
     #[test]
