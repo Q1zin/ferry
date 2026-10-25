@@ -9,6 +9,21 @@ pub fn collect() -> io::Result<Vec<(String, String)>> {
     let mut pairs = platform()?;
     pairs.push(("ferry".into(), crate::VERSION.into()));
     pairs.push(("mode".into(), crate::mode::current().name().into()));
+    let human = crate::human::presence::read(&crate::ferry_home()?);
+    pairs.push((
+        "human_idle_s".into(),
+        human["idle_seconds"]
+            .as_u64()
+            .map_or_else(|| "unknown".into(), |s| s.to_string()),
+    ));
+    pairs.push((
+        "human_input_status".into(),
+        human["note"].as_str().unwrap_or("unknown").into(),
+    ));
+    pairs.push((
+        "human_observed_since".into(),
+        human["observed_since"].to_string(),
+    ));
     Ok(pairs)
 }
 
@@ -53,6 +68,13 @@ pub fn describe(pairs: &[(String, String)]) -> Vec<(String, String)> {
     push("система", text("os"));
     push("имя ПК", text("computer"));
     push("пользователь", text("user"));
+    push(
+        "последний ввод человека",
+        get(pairs, "human_idle_s").map(|s| match s.parse::<u64>() {
+            Ok(seconds) => format!("{} назад", duration(seconds)),
+            Err(_) => "неизвестно".into(),
+        }),
+    );
     push(
         "работает",
         number(pairs, "uptime_s").map(|s| duration(s as u64)),
