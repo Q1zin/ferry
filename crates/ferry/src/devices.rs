@@ -217,13 +217,13 @@ fn each_of(
 // --- Проект ----------------------------------------------------------------------------------
 
 /// Репозиторий, где мы, и его снимок (если нужен sync).
-struct Project {
-    repo: sync::Repo,
-    snapshot: Option<(String, String)>,
+pub(crate) struct Project {
+    pub(crate) repo: sync::Repo,
+    pub(crate) snapshot: Option<(String, String)>,
 }
 
 /// `home` — как вне репозитория: без снимка, в доме устройства.
-fn project(snapshot: bool, home: bool) -> Result<Option<Project>, Fail> {
+pub(crate) fn project(snapshot: bool, home: bool) -> Result<Option<Project>, Fail> {
     if home {
         return Ok(None);
     }
@@ -239,7 +239,7 @@ fn project(snapshot: bool, home: bool) -> Result<Option<Project>, Fail> {
 }
 
 /// Где выполнять на устройстве: то же место в проекте или дом, если мы не в репозитории.
-fn dir(project: &Option<Project>) -> Dir {
+pub(crate) fn dir(project: &Option<Project>) -> Dir {
     match project {
         Some(p) => Dir::Project {
             name: p.repo.name.clone(),

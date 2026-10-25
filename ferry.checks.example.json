@@ -1,0 +1,30 @@
+{
+  "profiles": {
+    "rust": {
+      "platforms": {
+        "macos": {
+          "command": "cargo test --workspace > {output}/tests.log 2>&1",
+          "shell": "bash",
+          "tools": ["cargo"]
+        },
+        "windows": {
+          "command": "cargo test --workspace > {output}/tests.log 2>&1; exit $LASTEXITCODE",
+          "shell": "powershell",
+          "tools": ["cargo"]
+        }
+      },
+      "timeout": 600,
+      "artifacts": ["tests.log"]
+    },
+    "pytest": {
+      "platforms": {
+        "all": {
+          "command": "python3 -m pytest --junitxml={output}/junit.xml",
+          "tools": ["python3"]
+        }
+      },
+      "timeout": 300,
+      "junit": "junit.xml"
+    }
+  }
+}
