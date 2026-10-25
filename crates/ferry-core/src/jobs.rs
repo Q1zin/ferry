@@ -19,6 +19,7 @@ use std::time::Duration;
 use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
+pub mod evidence;
 mod result;
 pub use result::{DEFAULT_BYTES, JobResult, MAX_BYTES, result_in};
 
@@ -114,16 +115,14 @@ pub fn start_in_shell(
 ) -> io::Result<String> {
     // Отклонить неподдерживаемую оболочку до остановки существующей задачи.
     shell_with(cmd, shell)?;
+    let root = crate::ferry_home()?;
+    let _guard = evidence::guard(&root, name)?;
     let dir = dir(name)?;
     let supervisor = prepare_supervisor(&crate::ferry_home()?, supervisor)?;
     if running(&dir) {
         stop_job(name)?;
     }
-    match fs::remove_dir_all(&dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
+    evidence::archive(&root, name)?;
     fs::create_dir_all(&dir)?;
     fs::write(dir.join("run-id"), result::new_run_id())?;
     fs::write(dir.join("cmd"), cmd)?;

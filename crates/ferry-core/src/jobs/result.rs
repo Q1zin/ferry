@@ -45,7 +45,7 @@ pub(crate) fn new_run_id() -> String {
     )
 }
 
-fn generation(dir: &Path) -> io::Result<String> {
+pub(super) fn generation(dir: &Path) -> io::Result<String> {
     match fs::read_to_string(dir.join("run-id")) {
         Ok(id) => Ok(id),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -70,19 +70,27 @@ pub fn result_in(
     max_bytes: u32,
 ) -> io::Result<JobResult> {
     validate_name(name)?;
+    result_at(&root.join("jobs").join(name), name, cursor, max_bytes)
+}
+
+pub(super) fn result_at(
+    dir: &Path,
+    name: &str,
+    cursor: Option<&str>,
+    max_bytes: u32,
+) -> io::Result<JobResult> {
     if !(4..=MAX_BYTES).contains(&max_bytes) {
         return Err(io::Error::other("--max-bytes: от 4 до 65536"));
     }
-    let dir = root.join("jobs").join(name);
     if !dir.is_dir() {
         return Err(io::Error::other(format!("нет задачи {name}")));
     }
-    let run_id = generation(&dir)?;
-    let state = code(&dir);
-    let exit_code = read(&dir, "exit").and_then(|s| s.parse::<i32>().ok());
+    let run_id = generation(dir)?;
+    let state = code(dir);
+    let exit_code = read(dir, "exit").and_then(|s| s.parse::<i32>().ok());
     let state = match state.as_str() {
         "running" => "running",
-        "killed" if running(&dir) => "running",
+        "killed" if running(dir) => "running",
         "killed" => "killed",
         "lost" => "lost",
         _ if exit_code == Some(0) => "succeeded",
@@ -137,15 +145,15 @@ pub fn result_in(
         name: name.into(),
         state,
         exit_code,
-        started: read(&dir, "started").and_then(|t| t.parse().ok()),
-        cwd: read(&dir, "cwd").unwrap_or_default(),
+        started: read(dir, "started").and_then(|t| t.parse().ok()),
+        cwd: read(dir, "cwd").unwrap_or_default(),
         run_id: run_id.clone(),
         log: String::from_utf8_lossy(&bytes[..end]).into_owned(),
         cursor: format!("{run_id}:{next}"),
         more: next < len,
         omitted_bytes: if cursor.is_none() { offset } else { 0 },
     };
-    if generation(&dir)? != run_id {
+    if generation(dir)? != run_id {
         return Err(io::Error::other(
             "задача перезапущена во время чтения; запроси result без --cursor",
         ));

@@ -9,6 +9,7 @@ pub mod device;
 pub mod doctor;
 pub mod info;
 pub mod jobs;
+pub mod junit;
 pub mod mode;
 pub mod ocr;
 pub mod power;
