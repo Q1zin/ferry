@@ -124,6 +124,56 @@ async fn cli_drives_devices_through_the_app() {
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stderr).contains("перезапущена"));
 
+    // Артефакты и JUnit проходят весь путь CLI → приложение → узел, включая скачивание.
+    let xml = root("win").join("junit.xml");
+    std::fs::write(&xml, r#"<testsuite><testcase name="ok"/><testcase name="bad"><failure message="proof">stack</failure></testcase></testsuite>"#).unwrap();
+    let out = ferry(
+        &outside,
+        &["artifacts", "win", "report", "--add", xml.to_str().unwrap()],
+    )
+    .await;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let added: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let artifact = added["artifact"]["id"].as_str().unwrap();
+    let out = ferry(&outside, &["tests", "win", "report", "--junit", artifact]).await;
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["passed"], 1);
+    assert_eq!(report["failed"], 1);
+    let dest = outside.join("evidence");
+    let out = ferry(
+        &outside,
+        &[
+            "artifacts",
+            "win",
+            "report",
+            "--get",
+            artifact,
+            "--dest",
+            dest.to_str().unwrap(),
+        ],
+    )
+    .await;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read(dest.join("new-run").join(artifact).join("junit.xml")).unwrap(),
+        std::fs::read(xml).unwrap()
+    );
+    let out = ferry(&outside, &["runs", "win", "report"]).await;
+    assert!(out.status.success());
+    let history: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(history["runs"][0]["run_id"], "new-run");
+    let out = ferry(&outside, &["select", "--tool", "sh"]).await;
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let selection: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        selection["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["device"] == "win")
+    );
+
     // Явная оболочка проходит CLI, локальный JSON и сетевой протокол без потери кавычек.
     let out = ferry(
         &outside,

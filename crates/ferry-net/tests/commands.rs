@@ -534,3 +534,47 @@ async fn job_results_wait_for_output_finish_or_deadline_and_respect_modes() {
     a.shutdown().await;
     b.shutdown().await;
 }
+
+#[tokio::test]
+async fn agent_reports_respect_modes_without_desktop_input() {
+    use ferry_core::{
+        capabilities,
+        jobs::evidence::{Action, Query},
+        screen::observe,
+    };
+    let (a, b) = paired("reports-ctl", "reports-node").await;
+    let node = a.device("reports-node").unwrap();
+    let cap = capabilities::Request {
+        shell: ferry_core::desk::Shell::Default,
+        tools: vec!["sh".into()],
+        desktop: false,
+    };
+    let result = node.capabilities(cap.clone()).await.unwrap();
+    assert!(result.shell_available);
+    assert!(result.missing_tools.is_empty());
+    let evidence = Query {
+        name: "none".into(),
+        run_id: None,
+        action: Action::Runs,
+    };
+    let report: serde_json::Value =
+        serde_json::from_str(&node.evidence(evidence.clone()).await.unwrap()).unwrap();
+    assert_eq!(report["total"], 0);
+    b.set_mode(Mode::NoDesktop).unwrap();
+    assert_eq!(
+        node.observe(observe::Request {
+            window: "never read".into(),
+            ocr: false
+        })
+        .await
+        .unwrap_err()
+        .code,
+        75
+    );
+    assert!(node.evidence(evidence.clone()).await.is_ok());
+    b.set_mode(Mode::Paused).unwrap();
+    assert_eq!(node.capabilities(cap).await.unwrap_err().code, 75);
+    assert_eq!(node.evidence(evidence).await.unwrap_err().code, 75);
+    a.shutdown().await;
+    b.shutdown().await;
+}

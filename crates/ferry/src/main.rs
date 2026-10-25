@@ -1,5 +1,6 @@
 use std::io;
 
+mod agent_tools;
 mod devices;
 mod mcp;
 
@@ -11,6 +12,8 @@ ferry — разработка и тесты на нескольких устр�
 идут отсюда через приложение на этой машине
 
 Устройства:
+  ferry select [--os windows|macos] [--shell <имя>] [--tool <команда>]... [--desktop]
+                                    JSON: подходящие связанные устройства и причины отказа; без брони
   ferry devices [--json]            это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят
   ferry pair <код|ссылка>           связать с устройством, которое показало код
@@ -40,6 +43,12 @@ ferry — разработка и тесты на нескольких устр�
   ferry result [<устройство>] <имя> [--wait <сек>] [--cursor <курсор>] [--max-bytes <байт>]
                                     JSON: состояние, код выхода и хвост лога (16 КиБ); курсор —
                                     только новые данные; --wait до 60 с, не останавливает задачу
+  ferry runs [<устройство>] <имя>   последние 100 запусков с run_id; старые запуски сохраняются
+  ferry artifacts [<устройство>] <имя> [--run <id>] [--add <файл> | --get <id> [--dest <каталог>]]
+                                    список / копия файла в запуск / скачать; пути --add на устройстве
+  ferry tests [<устройство>] <имя> --junit <id артефакта> [--run <id>]
+                                    JSON: фактические testcase и до 50 падений из JUnit XML
+  ferry result [<устройство>] <имя> --run <id>  результат сохранённого запуска, без --wait
   ferry kill <цели> <имя>           остановить задачу
   ferry stop <цели>                 снять всё: команды и задачи
   ferry put <цели> <файл>...        файлы отсюда — на то же место в проекте на устройстве
@@ -70,6 +79,8 @@ ferry — разработка и тесты на нескольких устр�
                                     (только чтение); без аргумента — доверенные хосты
 
 Экран устройства (координаты — пиксели снимка ferry shot):
+  ferry observe [<устройство>] [--window <окно>] [--ocr]
+                                    JSON: окно, фокус, элементы и путь снимка; OCR — координаты в снимке
   ferry shot <цели> [файл.png] [--window <окно> | --region x,y,ширина,высота]
                                     снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png);
                                     --window — само окно (процесс или часть заголовка), даже закрытое
@@ -166,6 +177,9 @@ fn main() {
         ["jobs", "--tsv"] => jobs::list(true),
         ["jobs", spec, "--json"] => devices::jobs(spec, true),
         ["jobs", spec] => devices::jobs(spec, false),
+        ["observe", rest @ ..] => agent_tools::observe(rest),
+        ["select", rest @ ..] => agent_tools::select(rest),
+        [kind @ ("runs" | "artifacts" | "tests"), rest @ ..] => agent_tools::evidence(kind, rest),
         ["result", rest @ ..] => job_result(rest),
         ["log", device, name] if *name != "-f" => devices::log(device, name, false),
         ["log", device, name, "-f"] => devices::log(device, name, true),
@@ -247,8 +261,13 @@ fn job_result(args: &[&str]) -> io::Result<i32> {
         _ => return usage(),
     };
     let (mut cursor, mut max_bytes, mut wait) = (None, jobs::DEFAULT_BYTES, 0);
+    let mut run_id = None;
     while !rest.is_empty() {
         match rest {
+            ["--run", value, tail @ ..] if run_id.is_none() => {
+                run_id = Some(*value);
+                rest = tail;
+            }
             ["--cursor", value, tail @ ..] if cursor.is_none() => {
                 cursor = Some(*value);
                 rest = tail;
@@ -269,6 +288,14 @@ fn job_result(args: &[&str]) -> io::Result<i32> {
             }
             _ => return usage(),
         }
+    }
+    if let Some(run) = run_id {
+        if wait != 0 {
+            return Err(io::Error::other(
+                "для --run запрашивай результат без --wait",
+            ));
+        }
+        return agent_tools::historical_result(device, name, run, cursor, max_bytes);
     }
     devices::job_result(device, name, cursor, max_bytes, wait)
 }

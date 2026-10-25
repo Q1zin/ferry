@@ -135,6 +135,19 @@ impl Node {
             DeviceMessage::JobResult(WithChannels { inner, tx, .. }) => {
                 tx.send(self.job_result(inner, true).await).await.ok();
             }
+            DeviceMessage::Observe(WithChannels { inner, tx, .. }) => {
+                tx.send(self.observe(inner.0, true).await).await.ok();
+            }
+            DeviceMessage::Evidence(WithChannels { inner, tx, .. }) => {
+                tx.send(self.evidence(inner.0, true).await).await.ok();
+            }
+            DeviceMessage::Capabilities(WithChannels { inner, tx, .. }) => {
+                let result = match self.check(false) {
+                    Ok(()) => blocking(move || ferry_core::capabilities::collect(inner.0)).await,
+                    Err(e) => Err(e),
+                };
+                tx.send(result).await.ok();
+            }
             DeviceMessage::Jobs(WithChannels { tx, .. }) => {
                 let result = match self.check(false) {
                     Ok(()) => blocking(jobs::rows).await,
@@ -563,6 +576,35 @@ impl Node {
             }
         }
         self.runs.lock().unwrap().remove(&pid);
+    }
+
+    pub async fn observe(
+        &self,
+        request: ferry_core::screen::observe::Request,
+        remote: bool,
+    ) -> Reply<ferry_core::screen::observe::Observation> {
+        if remote {
+            self.check(true)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || ferry_core::screen::observe::capture(request, &root)).await
+    }
+
+    pub async fn evidence(
+        &self,
+        query: ferry_core::jobs::evidence::Query,
+        remote: bool,
+    ) -> Reply<String> {
+        if remote {
+            self.check(false)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || {
+            Ok(serde_json::to_string(&jobs::evidence::execute(
+                &root, query,
+            )?)?)
+        })
+        .await
     }
 
     pub async fn job_result(&self, request: JobResult, remote: bool) -> Reply<jobs::JobResult> {

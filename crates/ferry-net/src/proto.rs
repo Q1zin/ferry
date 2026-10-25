@@ -40,6 +40,13 @@ pub enum Chunk {
 pub struct Watch;
 
 #[derive(Serialize, Deserialize, Debug)]
+pub struct Observe(pub ferry_core::screen::observe::Request);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Evidence(pub ferry_core::jobs::evidence::Query);
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Capabilities(pub ferry_core::capabilities::Request);
+
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SetRole(pub Role);
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -344,6 +351,12 @@ pub enum DeviceProtocol {
     /// Ограниченные результаты с курсором с 0.1.20.
     #[rpc(tx = oneshot::Sender<Reply<ferry_core::jobs::JobResult>>)]
     JobResult(JobResult),
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::screen::observe::Observation>>)]
+    Observe(Observe),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    Evidence(Evidence),
+    #[rpc(tx = oneshot::Sender<Reply<ferry_core::capabilities::Capabilities>>)]
+    Capabilities(Capabilities),
 }
 
 /// Клиент протокола поверх одного соединения с устройством.
