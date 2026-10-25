@@ -624,6 +624,12 @@ impl Agent {
             .map_err(Fail::refused)
     }
 
+    pub async fn act_self(
+        &self,
+        request: ferry_core::screen::act::Request,
+    ) -> Result<ferry_core::screen::act::Report, Fail> {
+        self.inner.node.act(request, false).await
+    }
     pub async fn observe_self(
         &self,
         request: ferry_core::screen::observe::Request,
@@ -1079,6 +1085,7 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
             Some("text") => ("текст с экрана".into(), true),
             _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
         },
+        DeviceMessage::Act(_) => ("проверяемое действие".into(), true),
         DeviceMessage::Observe(_) => ("наблюдение окна".into(), true),
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),
         DeviceMessage::ShotArea(_) => ("снимок части экрана".into(), true),

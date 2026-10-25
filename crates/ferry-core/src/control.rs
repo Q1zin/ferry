@@ -19,6 +19,11 @@ use crate::jobs::Job;
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     State,
+    Act {
+        device: Option<String>,
+        request: crate::screen::act::Request,
+        file: PathBuf,
+    },
     Observe {
         device: Option<String>,
         request: crate::screen::observe::Request,
@@ -415,6 +420,29 @@ pub fn open(request: Request) -> io::Result<Answer> {
 }
 
 pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
+    open_session(dir, request, &session(), None)
+}
+pub fn call_session(request: Request, session: &str) -> io::Result<Response> {
+    let timeout = if matches!(request, Request::Sync { .. }) {
+        600
+    } else {
+        90
+    };
+    open_session(
+        &crate::ferry_home()?,
+        request,
+        session,
+        Some(std::time::Duration::from_secs(timeout)),
+    )?
+    .next()
+    .unwrap_or_else(|| Err(io::Error::other("приложение не ответило")))
+}
+fn open_session(
+    dir: &Path,
+    request: Request,
+    session: &str,
+    timeout: Option<std::time::Duration>,
+) -> io::Result<Answer> {
     let state = std::fs::read_to_string(dir.join("app")).map_err(|_| not_running())?;
     let (port, token) = state
         .trim()
@@ -422,6 +450,7 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
         .and_then(|(port, token)| Some((port.parse::<u16>().ok()?, token.to_string())))
         .ok_or_else(|| io::Error::other(format!("испорчен {}", dir.join("app").display())))?;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|_| not_running())?;
+    stream.set_read_timeout(timeout)?;
     if matches!(&request, Request::UpdateStatus { .. }) {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
     }
@@ -432,15 +461,19 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
     }
     if matches!(
         &request,
-        Request::Observe { .. } | Request::Evidence { .. } | Request::Capabilities { .. }
+        Request::Info { .. }
+            | Request::Crashes { .. }
+            | Request::Act { .. }
+            | Request::Observe { .. }
+            | Request::Evidence { .. }
+            | Request::Capabilities { .. }
     ) {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(90)))?;
     }
-    let session = session();
     let envelope = Envelope {
         token,
         request,
-        session,
+        session: session.into(),
     };
     let line = serde_json::to_string(&envelope).map_err(io::Error::other)?;
     stream.write_all(format!("{line}\n").as_bytes())?;
