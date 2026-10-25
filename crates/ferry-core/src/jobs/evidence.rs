@@ -27,6 +27,19 @@ pub enum Action {
         cursor: Option<String>,
         max_bytes: u32,
     },
+    Storage {
+        older_than_days: Option<u32>,
+        max_bytes: Option<u64>,
+        apply: Option<String>,
+    },
+    Pin {
+        pinned: bool,
+    },
+    Stop,
+    Versions {
+        shell: crate::desk::Shell,
+        tools: Vec<String>,
+    },
 }
 
 pub(super) fn guard(root: &Path, name: &str) -> io::Result<fs::File> {
@@ -136,13 +149,46 @@ fn artifacts(dir: &Path) -> io::Result<Vec<Artifact>> {
 
 pub fn execute(root: &Path, query: Query) -> io::Result<Value> {
     let _guard = guard(root, &query.name)?;
+    if let Action::Storage {
+        older_than_days,
+        max_bytes,
+        apply,
+    } = &query.action
+    {
+        return super::history::storage(
+            root,
+            &query.name,
+            *older_than_days,
+            *max_bytes,
+            apply.as_deref(),
+        );
+    }
     if query.action == Action::Runs {
         return runs(root, &query.name);
     }
     let dir = locate(root, &query.name, query.run_id.as_deref())?;
     let run_id = result::generation(&dir)?;
     let value = match query.action {
-        Action::Runs => unreachable!(),
+        Action::Runs | Action::Storage { .. } => unreachable!(),
+        Action::Versions { shell, tools } => crate::capabilities::versions(shell, tools)?,
+        Action::Stop => {
+            if query.run_id.is_none() || dir != root.join("jobs").join(&query.name) {
+                return Err(io::Error::other("остановка требует id текущего запуска"));
+            }
+            json!({"message":super::stop_at(&query.name,&dir)?})
+        }
+        Action::Pin { pinned } => {
+            if query.run_id.is_none() {
+                return Err(io::Error::other("закрепление требует --run"));
+            }
+            let marker = dir.join("pinned");
+            if pinned {
+                crate::write_private(&marker, "pinned")?;
+            } else if marker.exists() {
+                fs::remove_file(marker)?;
+            }
+            json!({"pinned":pinned})
+        }
         Action::Result { cursor, max_bytes } => serde_json::to_value(result::result_at(
             &dir,
             &query.name,
@@ -269,6 +315,7 @@ fn runs(root: &Path, name: &str) -> io::Result<Value> {
         for key in ["log", "cursor", "more", "omitted_bytes"] {
             row.as_object_mut().unwrap().remove(key);
         }
+        row["pinned"] = dir.join("pinned").exists().into();
         row["archived"] = (dir.parent() != Some(root.join("jobs").as_path())).into();
         rows.push(row);
     }

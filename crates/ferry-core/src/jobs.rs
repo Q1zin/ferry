@@ -20,6 +20,7 @@ use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
 pub mod evidence;
+mod history;
 pub(crate) use result::new_run_id as unique_id;
 mod result;
 pub use result::{DEFAULT_BYTES, JobResult, MAX_BYTES, result_in};
@@ -307,21 +308,24 @@ pub fn kill(name: &str) -> io::Result<i32> {
 /// Остановить задачу; ответ — что вышло, для человека.
 pub fn stop_job(name: &str) -> io::Result<String> {
     let dir = existing(name)?;
-    if !running(&dir) {
+    stop_at(name, &dir)
+}
+fn stop_at(name: &str, dir: &Path) -> io::Result<String> {
+    if !running(dir) {
         return Ok(format!(
             "ferry: задача {name} уже не работает: {}",
-            state(&dir)
+            state(dir)
         ));
     }
     fs::write(dir.join("killed"), "")?;
     // Команда в своей группе (unix) или дереве (Windows); надсмотрщик запишет её код.
     // Если надсмотрщик ещё не успел её запустить — гасим его самого.
-    let pid = read(&dir, "child").or_else(|| read(&dir, "pid"));
+    let pid = read(dir, "child").or_else(|| read(dir, "pid"));
     // Код taskkill не показатель: в дереве вроде Chrome часть детей умирает сама, пока его
     // обходят, и он отвечает «не всё нашлось». Решает то, работает ли задача после.
     let killed = pid.and_then(|p| p.parse().ok()).map(kill_tree);
     for _ in 0..50 {
-        if !running(&dir) {
+        if !running(dir) {
             return Ok(format!("ferry: задача {name} остановлена"));
         }
         thread::sleep(Duration::from_millis(100));
