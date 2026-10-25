@@ -2,6 +2,7 @@
 //! релей git; общие типы устройств и локальное управление приложением. CLI и приложение —
 //! тонкие оболочки над ней, связь устройств — в `ferry-net`.
 
+pub mod capabilities;
 pub mod control;
 pub mod crashes;
 pub mod desk;
