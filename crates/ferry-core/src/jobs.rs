@@ -20,6 +20,7 @@ use crate::desk::{Shell, kill_tree, shell_with};
 use crate::{exit_code, now};
 
 pub mod evidence;
+pub(crate) use result::new_run_id as unique_id;
 mod result;
 pub use result::{DEFAULT_BYTES, JobResult, MAX_BYTES, result_in};
 
