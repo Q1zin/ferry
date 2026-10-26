@@ -1,4 +1,5 @@
 //! Одно действие по свежему наблюдению. Отказ до ввода при смене окна/дерева.
+pub use super::act_v2::{ActionV2, Assertion, Property, ReportV2, RequestV2, Snapshot, execute_v2};
 use super::*;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -52,7 +53,7 @@ fn validate(r: &Request) -> io::Result<()> {
         _ => Ok(()),
     }
 }
-fn stable(expected: &Window, windows: &[Window]) -> io::Result<()> {
+pub(super) fn stable(expected: &Window, windows: &[Window]) -> io::Result<()> {
     if !expected.focused
         || expected.rect.is_none()
         || windows.iter().find(|w| w.focused) != Some(expected)

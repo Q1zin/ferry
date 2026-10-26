@@ -24,7 +24,112 @@ pub struct Observation {
     pub png: Vec<u8>,
 }
 
+/// Separate wire types: postcard fields of the original observation stay unchanged.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestV2 {
+    pub window: String,
+    pub ocr: bool,
+    pub screenshot: bool,
+    pub query: Option<elements::Locator>,
+    pub subtree: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservationV2 {
+    pub captured_at: u64,
+    pub elapsed_ms: u64,
+    pub window: Window,
+    pub foreground: Option<Window>,
+    pub changed_during_capture: bool,
+    pub screen_access: Option<bool>,
+    pub input_access: Option<bool>,
+    pub elements: Vec<elements::Element>,
+    pub complete: bool,
+    pub query: Option<elements::Locator>,
+    pub subtree: bool,
+    pub text: Vec<crate::ocr::Text>,
+    pub text_truncated: bool,
+    pub warnings: Vec<String>,
+    pub png: Vec<u8>,
+}
+pub fn capture_v2(request: RequestV2, root: &Path) -> io::Result<ObservationV2> {
+    if let Some(query) = &request.query {
+        query.validate()?;
+    }
+    let started = Instant::now();
+    let base = capture_base(
+        Request {
+            window: request.window,
+            ocr: request.ocr,
+        },
+        root,
+        request.screenshot,
+        false,
+    )?;
+    let mut result = ObservationV2 {
+        captured_at: base.captured_at,
+        elapsed_ms: 0,
+        window: base.window,
+        foreground: base.foreground,
+        changed_during_capture: base.changed_during_capture,
+        screen_access: base.screen_access,
+        input_access: base.input_access,
+        elements: Vec::new(),
+        complete: false,
+        query: request.query,
+        subtree: request.subtree,
+        text: base.text,
+        text_truncated: base.text_truncated,
+        warnings: base.warnings,
+        png: if request.screenshot {
+            base.png
+        } else {
+            Vec::new()
+        },
+    };
+    match os::structured(&format!("@{}", result.window.id))
+        .and_then(|tree| elements::select(tree, result.query.as_ref(), result.subtree))
+    {
+        Ok(tree) => {
+            result.elements = tree.elements;
+            result.complete = tree.complete;
+        }
+        Err(e) => result.warnings.push(format!("элементы: {e}")),
+    }
+    if result
+        .elements
+        .iter()
+        .any(|e| e.name_truncated || e.id_truncated || e.value_truncated)
+    {
+        result.warnings.push("Некоторые поля длиннее 512 байт и обрезаны: см. *_truncated; обрезанное поле нельзя использовать для точной проверки.".into());
+    }
+    if !result.complete {
+        result.warnings.push("дерево неполное: ограничение обхода, размера ответа или недоступный элемент; отсутствие элемента не доказано".into());
+    }
+    match os::windows() {
+        Ok(after) => {
+            result.changed_during_capture |= after.iter().find(|w| w.id == result.window.id)
+                != Some(&result.window)
+                || after.iter().find(|w| w.focused).map(|w| w.id)
+                    != result.foreground.as_ref().map(|w| w.id);
+        }
+        Err(e) => {
+            result.changed_during_capture = true;
+            result.warnings.push(e.to_string());
+        }
+    }
+    result.elapsed_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
+}
+
 pub fn capture(request: Request, root: &Path) -> io::Result<Observation> {
+    capture_base(request, root, true, true)
+}
+fn capture_base(
+    request: Request,
+    root: &Path,
+    screenshot: bool,
+    legacy_ui: bool,
+) -> io::Result<Observation> {
     let begin = Instant::now();
     #[cfg(target_os = "macos")]
     if locked() {
@@ -65,6 +170,9 @@ pub fn capture(request: Request, root: &Path) -> io::Result<Observation> {
         crate::jobs::unique_id()
     ));
     let shot = (|| -> io::Result<Vec<u8>> {
+        if !screenshot && !request.ocr {
+            return Ok(Vec::new());
+        }
         if screen_access == Some(false) {
             return Err(io::Error::other("нет разрешения записи экрана"));
         }
@@ -84,9 +192,9 @@ pub fn capture(request: Request, root: &Path) -> io::Result<Observation> {
         Ok(png) => result.png = png,
         Err(e) => result.warnings.push(e.to_string()),
     }
-    if input_access == Some(false) {
+    if legacy_ui && input_access == Some(false) {
         result.warnings.push("нет разрешения Accessibility".into());
-    } else {
+    } else if legacy_ui {
         match os::ui(&format!("@{}", window.id)) {
             Ok(ui) => {
                 result.ui_truncated = ui.len() > 24576 || ui.contains("1500");
