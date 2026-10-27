@@ -127,34 +127,71 @@ ferry rec win-10 6                       # 6 с кадрами → лист-об
 
 С ferry 0.1.19: `ferry update <цели> --file <пакет>` передаёт подписанный установщик напрямую и ждёт новый процесс с ожидаемой версией (180 с). `.sig` должен лежать рядом; Windows — `ferry_*_x64-setup.exe`, macOS — `ferry.app.tar.gz` с прежним сертификатом и подходящей архитектурой. Пакет той же версии допускается, откат — нет. Для своего мака цель опускается; Windows обновляй с другого устройства, чтобы CLI не блокировал замену своего exe. Перед раскаткой проверь свободные устройства: режим должен быть active. Ошибка/тайм-аут не запускают повторную установку. Перезапуск той же версии не доказывает побайтовое совпадение сборки. Старые узлы сначала обнови обычным способом до 0.1.19.
 
-## Профили, матрица, диагностика и безопасный шаг GUI (0.1.22)
+## Работа агента с ferry 0.1.23
 
-- `ferry check <profile> --devices local,WIN-11-2 --parallel 2`: профиль из `ferry.checks.json`
-  (или `--file <path>`). `platforms.{macos,windows,all}`: `command`, `shell`, `tools`;
-  `timeout` 1–3600, `ready_log`, `ready_port`, `junit`, `artifacts`, `window` необязательны.
-  Пример — `ferry.checks.example.json`. Файлы пишутся командой в подстановку `{output}`,
-  `junit`/`artifacts` — относительные пути внутри неё. Старые отчёты не засчитываются.
-  Проверка ждёт завершения команды: серверы запускай через обычный start.
-- Матрица выбирает только подходящие устройства и занимает собственную бронь; не отменяет
-  пользовательский запрет использования компьютера. `all` не доказывает отсутствие человека.
-  Все start требуют active. `--home` — домашний каталог; `--no-sync` — без синхронизации.
-  Успех только `state: succeeded` всей матрицы; unavailable/incomplete/failed — не успех.
-  Частичные результаты сохраняются по мере завершения в `~/.ferry/checks`.
-  После обрыва/завершения CLI задача может жить: сначала result, не слепой повтор check.
-- `ferry diagnose [device] job --run <id> [--window <своё окно>] [--junit <artifact_id>]`:
-  ограниченный лог, результат, список файлов, JUnit, окружение, версии инструментов,
-  явные ошибки источников. Пакет сохраняется в `~/.ferry/diagnostics`; полные удалённые файлы
-  отдельно через artifacts --get. Последнее падение по фильтру не обязательно относится к run.
-- `ferry history [device] job` — место; `--pin <id>` / `--unpin <id>` — сохранить важное.
-  `--older-than <days> --max-bytes <bytes>` — preview очистки архивов одной задачи.
-  Удаление только с теми же параметрами и `--apply <preview_token>`; при изменении архива
-  повтори preview. Текущий запуск и закреплённые не удаляются. В бюджет не входят исходные
-  `.ferry-checks`, пакеты диагностики, shots и runners; автоматической очистки нет.
-- `ferry act [device] --from <observe.json> --click 'Save' --expect 'Saved'`: сверить свежее
-  наблюдение, выполнить один ввод, проверить точное имя ожидаемого элемента и вернуть новое
-  наблюдение. Также `--key` и `--type`; `--timeout` 0–30; `--dry-run` без настоящего ввода.
-  Нужны своё окно в фокусе, неизменённые дерево и геометрия; наблюдение не старше 120 с.
-  При dry-run performed=false/verified=false. Иначе успех — performed=true/verified=true.
-  performed=true с ошибкой означает, что ввод мог частично выполниться. При обрыве/ошибке
-  не повторять автоматически: сначала observe. Смена фокуса человеком в момент ввода всё ещё
-  возможна; бронь и свободное устройство обязательны. Тесты выполняются без настоящего ввода.
+Перед началом: `select`/`info --json` дают возможности и возраст настоящего ввода. Неизвестный
+возраст или давно не было ввода не доказывает свободный стол. Ограничения пользователя имеют
+приоритет. Займи свой стол с понятной заметкой: `desk DEVICE take 10 --note 'гоняю e2e ~10 мин'`.
+Если нужен человек: `ask DEVICE 'Подтвердите системный запрос' --id UNIQUE --timeout 600`, затем
+`ask DEVICE --poll UNIQUE --wait 30`. Ответ done требует проверки реального результата;
+закрытие окна, expiry и cancel не означают согласие. Не проси пароль/код через ferry.
+
+Управляемая работа:
+
+```sh
+ferry session begin my-work --pid <PID_агента> --ttl 3600
+ferry start DEVICE app --session my-work --request my-app --timeout 600 --headless --home -- 'node server.js'
+ferry start-status DEVICE my-app
+ferry tunnel DEVICE 9322 --session my-work
+ferry session end my-work
+```
+
+Новые опции start возвращают JSON с точным run_id. Повтор одного request ID не запускает
+команду второй раз; смена параметров отклоняется. При обрыве сначала start-status. Не создавай
+новый ID вслепую. `--headless` не занимает стол, предел — две фоновые задачи. GUI требует
+active и бронь. Занятый workspace/ресурс даёт отказ, не очередь с автоматическим переносом.
+`--keep` сохраняет ресурс после конца сессии; `--timeout` всё равно ограничивает задачу.
+Уборка зависит от работающего пульта и доступности устройства; жёсткий срок задавай timeout.
+
+Из git новый управляемый start автоматически создаёт изолированную копию. Для продолжения:
+`workspace create DEVICE --id UNIQUE > workspace.json`, затем `start DEVICE job --workspace
+workspace.json --request UNIQUE --headless -- '…'`. `workspace diff workspace.json` сохраняет
+patch и preview; `workspace apply workspace.json --token TOKEN` применяет только проверенные
+байты к неизменённым исходникам. Конфликт не перезаписывается. Сохраняй manifest.
+
+`check PROFILE --devices local,WIN-11-2 --parallel 2 --id UNIQUE --detach` сохраняет профиль,
+снимок и матрицу до запуска; `check status|resume|collect|cancel UNIQUE` управляет этой же
+операцией. interrupted требует resume; отмена сохраняется даже для запоздавшего запуска.
+Никогда не называй running/incomplete/unavailable успехом. Сборщик переживает терминал,
+но не имеет watchdog. При недоступном устройстве сбор/уборку повторяют после возврата связи.
+
+Профили в ferry.checks.json: platforms.{macos,windows,all} с command (тест), необязательными
+build/launch, shell/tools; общие timeout, headless, junit/artifacts/window. launch требует
+ready_log/ready_port/ready_window/ready_http. HTTP: port/path/status/contains с `{run}`,
+launch должен передать этот уникальный маркер серверу. Открытый порт сам по себе не доказывает
+готовность нужного приложения. Окно ищется по точному заголовку и процессам задачи.
+Команда пишет отчёты в `{output}`, junit/artifacts относительны ему. В git build/launch
+автоматически изолированы; для остальных есть --isolated. После теста — сбор, затем cleanup.
+
+Для компактного GUI: `observe DEVICE --window OWN --structured --no-screenshot`,
+`--element JSON`, `--subtree JSON` или `--since previous.json`. Delta содержит snapshot_file
+для следующего act. Locator: точные role/name/id, необязательный within с родителем.
+`act --from observe.json --click-locator JSON --expect-json JSON` проверяет одну цель и
+предков; чужое изменение дерева не мешает. `--target JSON --type TEXT` требует уже
+сфокусированное поле. Assertion: locator, property exists/absent/value/enabled/focused/checked/
+selected; для value нужен value, для boolean — state. Условие должно измениться false→true;
+--allow-already явно разрешает исходно true. --expect-window разрешает только новое окно того
+же процесса с точным заголовком. Неполное дерево/неизвестное свойство не подтверждает успех.
+--dry-run не вводит; performed=false, verified=false. После ошибки сначала observe.
+
+`diagnose DEVICE job --run ID --bundle [--artifact ID]...` сохраняет переносимый пакет:
+метаданные запуска, результат, лог и выбранные файлы. Версии инструментов — текущие в оболочке
+запуска, не исторические. Предел 32 файла/64 МиБ на файл/128 МиБ суммарно; неполнота явна.
+Снимок только своего --window. Падение по имени окна не доказывает связь с run.
+
+`storage DEVICE` учитывает проекты, кеши, snapshots/recordings/reports/runners.
+`--kind caches --only ENTRY_ID --older-than 7` — preview, те же параметры + --apply TOKEN —
+удаление. Категории: caches/outputs/shots/recordings/checks/diagnostics/runners/questions/
+observations. Исходники и квитанции не удаляются, ссылки не обходятся; активное и свежее
+защищено. Перед чисткой кеша останови и сторонние сборки. Архивы одной задачи удаляй через
+history с preview; pin защищает важные запуски. Автоматической очистки нет.
