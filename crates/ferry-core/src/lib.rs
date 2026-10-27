@@ -18,8 +18,10 @@ pub mod power;
 pub mod project;
 pub mod relay;
 pub mod screen;
+pub mod session;
 pub mod sync;
 pub mod update;
+pub mod workspace;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

@@ -40,6 +40,15 @@ pub enum Action {
         shell: crate::desk::Shell,
         tools: Vec<String>,
     },
+    Metadata,
+    Probe {
+        http: Option<super::probe::HttpProbe>,
+        window: Option<String>,
+    },
+    StopOwned {
+        request_id: String,
+        session: String,
+    },
 }
 
 pub(super) fn guard(root: &Path, name: &str) -> io::Result<fs::File> {
@@ -76,7 +85,7 @@ pub(super) fn archive(root: &Path, name: &str) -> io::Result<()> {
     fs::rename(dir, dest)
 }
 
-fn locate(root: &Path, name: &str, id: Option<&str>) -> io::Result<PathBuf> {
+pub(super) fn locate(root: &Path, name: &str, id: Option<&str>) -> io::Result<PathBuf> {
     let current = root.join("jobs").join(name);
     match id {
         None => {
@@ -170,6 +179,31 @@ pub fn execute(root: &Path, query: Query) -> io::Result<Value> {
     let run_id = result::generation(&dir)?;
     let value = match query.action {
         Action::Runs | Action::Storage { .. } => unreachable!(),
+        Action::StopOwned {
+            request_id,
+            session,
+        } => {
+            if query.run_id.is_none() {
+                return Err(io::Error::other("остановка требует точный run_id"));
+            }
+            let saved = fs::read(dir.join("execution.json")).ok().and_then(|bytes| {
+                serde_json::from_slice::<super::execution::StartRequest>(&bytes).ok()
+            });
+            let owned = saved
+                .is_some_and(|r| r.request_id == request_id && r.session == session && !r.keep);
+            if !owned || dir != root.join("jobs").join(&query.name) {
+                json!({"stopped":false,"reason":"ownership-changed-or-archived"})
+            } else {
+                json!({"stopped":true,"message":super::stop_at(&query.name,&dir)?})
+            }
+        }
+        Action::Metadata => json!({"metadata":super::execution::metadata(&dir)?}),
+        Action::Probe { http, window } => {
+            if query.run_id.is_none() {
+                return Err(io::Error::other("probe требует точный run_id"));
+            }
+            super::probe::execute(&dir, http, window)?
+        }
         Action::Versions { shell, tools } => crate::capabilities::versions(shell, tools)?,
         Action::Stop => {
             if query.run_id.is_none() || dir != root.join("jobs").join(&query.name) {

@@ -297,6 +297,27 @@ mod job {
     }
 }
 
+pub fn force_kill_tree(pid: u32) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        kill_tree(pid)
+    }
+    #[cfg(unix)]
+    {
+        let status = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other("не удалось завершить группу процессов"))
+        }
+    }
+}
+
 /// Остановить команду вместе со всем, что она запустила.
 pub fn kill_tree(pid: u32) -> io::Result<()> {
     #[cfg(windows)]

@@ -56,10 +56,22 @@ pub fn repo_at(dir: &Path) -> io::Result<Option<Repo>> {
     }))
 }
 
+pub fn snapshot_lock(git_dir: &Path) -> io::Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(git_dir.join("ferry-snapshot.lock"))?;
+    file.lock()?;
+    Ok(file)
+}
+
 /// Снимок рабочего дерева: коммит без родителя и вне веток и его дерево. Автор и даты
 /// фиксированы, поэтому то же дерево даёт тот же хеш; без родителя на узел едет только дерево,
 /// а не вся история.
 pub fn snapshot(repo: &Repo) -> io::Result<(String, String)> {
+    let _lock = snapshot_lock(&repo.git_dir)?;
     let index = repo.git_dir.join("ferry-index");
     // Копия индекса: git переиспользует его stat-кэш и не перечитывает всё дерево.
     if fs::copy(repo.git_dir.join("index"), &index).is_err() {
