@@ -39,6 +39,7 @@ export type Activity = { at: number; who: string; what: string; desk: boolean }
 
 /// Доступы macOS: запись экрана и «Универсальный доступ» (ввод). На других системах — null.
 export type Permissions = { screen: boolean; input: boolean }
+export type HumanQuestion = { id: string; text: string; from: string; expires_at: number; state: string }
 
 export type Snapshot = {
   id: string
@@ -78,6 +79,8 @@ export const api = {
   permissions: () => invoke<Permissions | null>('permissions'),
   askPermission: (kind: 'screen' | 'input') => invoke<void>('ask_permission', { kind }),
   restartApp: () => invoke<void>('restart_app'),
+  questions: () => invoke<HumanQuestion[]>('questions'),
+  answerQuestion: (id: string, answer: 'done' | 'declined') => invoke<void>('answer', { id, answer }),
 }
 
 /// Почему с устройством сейчас нельзя работать; пусто — можно. `desk` — нужен ещё и рабочий
@@ -97,6 +100,8 @@ export const onState = (cb: (s: Snapshot) => void): Promise<UnlistenFn> =>
   listen<Snapshot>('state', (e) => cb(e.payload))
 
 export const onOpenPairing = (cb: () => void): Promise<UnlistenFn> => listen('open-pairing', cb)
+export const onHumanQuestions = (cb: (q: HumanQuestion[]) => void): Promise<UnlistenFn> =>
+  listen<HumanQuestion[]>('human-questions', (e) => cb(e.payload))
 
 export const modes: [Mode, string][] = [
   ['active', 'работает'],
