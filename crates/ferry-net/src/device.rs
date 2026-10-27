@@ -517,6 +517,24 @@ impl Device {
         files::recv_file(&mut rx, file).await
     }
 
+    pub async fn screen_stream(
+        &self,
+        request: ferry_core::screen::live::Request,
+    ) -> Reply<mpsc::Receiver<Reply<ferry_core::screen::live::Frame>>> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.24",
+            "трансляция экрана",
+        )?;
+        request.validate().map_err(Fail::from)?;
+        self.client
+            .0
+            .server_streaming(ScreenStream(request), 1)
+            .await
+            .map_err(lost)
+    }
+
     pub async fn shot(&self, file: &Path) -> Reply<()> {
         let mut rx = self
             .client

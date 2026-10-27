@@ -171,6 +171,9 @@ impl Node {
                 .await
                 .ok();
             }
+            DeviceMessage::ScreenStream(WithChannels { inner, tx, .. }) => {
+                self.screen_stream(inner.0, tx).await;
+            }
             DeviceMessage::ExecutionLookup(WithChannels { inner, tx, .. }) => {
                 let result = match self.check(false) {
                     Ok(()) => self.execution_lookup(inner.0).await,
@@ -635,6 +638,50 @@ impl Node {
             }
         }
         self.runs.lock().unwrap().remove(&pid);
+    }
+
+    pub async fn screen_stream(
+        self: &Arc<Self>,
+        request: screen::live::Request,
+        tx: mpsc::Sender<Reply<screen::live::Frame>>,
+    ) {
+        static CAPTURES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let Ok(_permit) = CAPTURES.try_acquire() else {
+            let _ = tx
+                .send(Err(Fail::new("устройство уже передаёт два потока экрана")))
+                .await;
+            return;
+        };
+        if let Err(e) = request.validate() {
+            let _ = tx.send(Err(e.into())).await;
+            return;
+        }
+        let node = self.clone();
+        let (frames, mut receive) = tokio::sync::mpsc::channel(1);
+        tokio::task::spawn_blocking(move || {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(request.fps));
+            for sequence in 0.. {
+                let started = std::time::Instant::now();
+                let frame = node.check(true).and_then(|()| {
+                    screen::live::frame(&node.dir, &request, sequence).map_err(Fail::from)
+                });
+                let failed = frame.is_err();
+                if frames.blocking_send(frame).is_err() || failed {
+                    break;
+                }
+                std::thread::sleep(interval.saturating_sub(started.elapsed()));
+            }
+        });
+        while let Some(frame) = receive.recv().await {
+            let failed = frame.is_err();
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(5), tx.send(frame)).await,
+                Ok(Ok(()))
+            ) || failed
+            {
+                break;
+            }
+        }
     }
 
     pub async fn storage(
