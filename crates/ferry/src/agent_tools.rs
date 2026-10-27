@@ -22,7 +22,8 @@ pub fn observe(args: &[&str]) -> io::Result<i32> {
         [name, tail @ ..] if !name.starts_with('-') => (Some((*name).to_string()), tail),
         _ => (None, args),
     };
-    let (mut window, mut ocr) = (String::new(), false);
+    let (mut window, mut ocr, mut screenshot, mut structured, mut query, mut subtree, mut since) =
+        (String::new(), false, true, false, None, false, None);
     while !rest.is_empty() {
         match rest {
             ["--window", name, tail @ ..] => {
@@ -33,27 +34,198 @@ pub fn observe(args: &[&str]) -> io::Result<i32> {
                 ocr = true;
                 rest = tail;
             }
+            ["--structured", tail @ ..] => {
+                structured = true;
+                rest = tail;
+            }
+            ["--no-screenshot", tail @ ..] => {
+                screenshot = false;
+                structured = true;
+                rest = tail;
+            }
+            [flag @ ("--element" | "--subtree"), value, tail @ ..] if query.is_none() => {
+                query = Some(json_arg::<ferry_core::screen::elements::Locator>(value)?);
+                subtree = *flag == "--subtree";
+                structured = true;
+                rest = tail;
+            }
+            ["--since", path, tail @ ..] if since.is_none() => {
+                since = Some(*path);
+                structured = true;
+                rest = tail;
+            }
             _ => return crate::usage(),
         }
     }
     finish((|| {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let file = ferry_core::ferry_home()?
-            .join("shots")
-            .join(format!("observe-{}-{nonce}.png", std::process::id()));
-        let mut value = report(Request::Observe {
-            device: device.clone(),
-            request: ferry_core::screen::observe::Request { window, ocr },
-            file,
-        })?;
+        let file = shot_path()?;
+        let mut value = if structured {
+            report(Request::ObserveV2 {
+                device: device.clone(),
+                request: ferry_core::screen::observe::RequestV2 {
+                    window,
+                    ocr,
+                    screenshot,
+                    query,
+                    subtree,
+                },
+                file,
+            })?
+        } else {
+            report(Request::Observe {
+                device: device.clone(),
+                request: ferry_core::screen::observe::Request { window, ocr },
+                file,
+            })?
+        };
         value["device"] = device.unwrap_or_else(|| "local".into()).into();
+        if structured {
+            value["schema_version"] = 2.into();
+            if let Some(path) = since {
+                let previous = read_observation(path)?;
+                let delta = observation_delta(&previous, &value)?;
+                value["snapshot_file"] = save_observation(&value)?
+                    .to_string_lossy()
+                    .into_owned()
+                    .into();
+                value.as_object_mut().unwrap().remove("elements");
+                value["delta"] = delta;
+            }
+        }
         println!("{value}");
         Ok(0)
     })())
 }
+fn json_arg<T: serde::de::DeserializeOwned>(text: &str) -> io::Result<T> {
+    if text.len() > 16384 {
+        return Err(io::Error::other("JSON аргумент больше 16 КиБ"));
+    }
+    serde_json::from_str(text).map_err(io::Error::other)
+}
+fn read_json(path: &Path) -> Result<Value, Fail> {
+    if std::fs::metadata(path)?.len() > 2 * 1024 * 1024 {
+        return Err(Fail::new("наблюдение больше 2 МиБ"));
+    }
+    serde_json::from_slice(&std::fs::read(path)?).map_err(|e| Fail::new(e.to_string()))
+}
+fn read_observation(path: &str) -> Result<Value, Fail> {
+    let value = read_json(Path::new(path))?;
+    if value["elements"].is_array() {
+        return Ok(value);
+    }
+    if let Some(snapshot) = value["snapshot_file"].as_str() {
+        let root = ferry_core::ferry_home()?
+            .join("observations")
+            .canonicalize()?;
+        let snapshot = Path::new(snapshot).canonicalize()?;
+        if !snapshot.starts_with(root) {
+            return Err(Fail::new(
+                "snapshot_file должен быть сохранён ferry в observations",
+            ));
+        }
+        return read_json(&snapshot);
+    }
+    Ok(value)
+}
+fn save_observation(value: &Value) -> Result<PathBuf, Fail> {
+    let root = ferry_core::ferry_home()?.join("observations");
+    std::fs::create_dir_all(&root)?;
+    let path = root.join(format!(
+        "{}-{}.json",
+        std::process::id(),
+        ferry_core::jobs::unique_id()
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options
+        .open(&path)?
+        .write_all(&serde_json::to_vec(value).map_err(|e| Fail::new(e.to_string()))?)?;
+    Ok(path)
+}
+fn observation_delta(previous: &Value, current: &Value) -> Result<Value, Fail> {
+    use ferry_core::screen::elements::{Element, ancestors};
+    use std::collections::BTreeMap;
+    for field in ["device", "query", "subtree"] {
+        if previous[field] != current[field] {
+            return Err(Fail::new(
+                "--since требует то же устройство и область элементов",
+            ));
+        }
+    }
+    if previous["window"]["id"] != current["window"]["id"]
+        || previous["window"]["pid"] != current["window"]["pid"]
+    {
+        return Err(Fail::new(
+            "--since требует то же окно; сделай новое observe",
+        ));
+    }
+    let parse = |v: &Value| {
+        serde_json::from_value::<Vec<Element>>(v["elements"].clone())
+            .map_err(|e| Fail::new(e.to_string()))
+    };
+    let old = parse(previous)?;
+    let new = parse(current)?;
+    let fields_complete = !old
+        .iter()
+        .chain(new.iter())
+        .any(|e| e.name_truncated || e.id_truncated || e.value_truncated);
+    let keyed = |all: &[Element]| {
+        let mut map: BTreeMap<String, Vec<Element>> = BTreeMap::new();
+        for e in all {
+            let identity = |e: &Element| (e.role.clone(), e.id.clone(), e.name.clone());
+            let mut parts: Vec<_> = ancestors(e, all)
+                .iter()
+                .rev()
+                .map(|e| identity(e))
+                .collect();
+            parts.push(identity(e));
+            let key = serde_json::to_string(&parts).unwrap();
+            map.entry(key).or_default().push(e.clone());
+        }
+        map
+    };
+    let mut old = keyed(&old);
+    let new = keyed(&new);
+    let (mut added, mut removed, mut changed, mut ambiguous) =
+        (Vec::new(), Vec::new(), Vec::new(), 0usize);
+    for (key, after) in new {
+        let before = old.remove(&key).unwrap_or_default();
+        match (before.as_slice(), after.as_slice()) {
+            ([before], [after]) => {
+                let mut a = before.clone();
+                let mut b = after.clone();
+                a.index = 0;
+                a.parent = None;
+                b.index = 0;
+                b.parent = None;
+                if a != b {
+                    changed.push(json!({"before":before,"after":after}));
+                }
+            }
+            ([], _) => added.extend(after),
+            _ => {
+                ambiguous += 1;
+                removed.extend(before);
+                added.extend(after);
+            }
+        }
+    }
+    for rows in old.into_values() {
+        removed.extend(rows);
+    }
+    Ok(
+        json!({"added":added,"removed":removed,"changed":changed,"ambiguous_groups":ambiguous,
+        "complete":previous["complete"]==true && current["complete"]==true && fields_complete,
+        "note":"Индексы относятся к одному наблюдению. Неоднозначные совпадения показаны как removed/added; исчезновение из неполного дерева не доказывает исчезновение из приложения."}),
+    )
+}
+
 fn target<'a>(args: &'a [&'a str]) -> Option<(Option<String>, String, &'a [&'a str])> {
     match args {
         [device, name, tail @ ..] if !name.starts_with("--") => {
@@ -168,7 +340,7 @@ pub fn historical_result(
         Ok(result.command_code())
     })())
 }
-fn download(
+pub(crate) fn download(
     device: &Option<String>,
     value: &mut Value,
     id: &str,
@@ -308,7 +480,11 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
                             _=>reasons.push("не удалось проверить инструменты".into()),
                         }
                     }
-                    json!({"device":peer.name,"eligible":reasons.is_empty(),"reasons":reasons,"capabilities":cap,"status":peer.status})
+                    let human = if peer.online {
+                        report(Request::Human { device:Some(peer.name.clone()), request:ferry_core::human::Request::Presence })
+                            .unwrap_or_else(|e|json!({"available":false,"error":e.to_string()}))
+                    } else { json!({"available":false,"error":"устройство не на связи"}) };
+                    json!({"device":peer.name,"eligible":reasons.is_empty(),"reasons":reasons,"capabilities":cap,"status":peer.status,"human":human})
                 })}).collect();
                 handles
                     .into_iter()
@@ -329,7 +505,7 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
         let code = i32::from(matches.is_empty());
         println!(
             "{}",
-            json!({"matches":matches,"rejected":rejections,"checked_at":ferry_core::now(),"requirements":request,"os":os,"reserved":false,"note":"Снимок доступности ferry; наличие человека не определяется. Перед GUI-прогоном займи стол через desk take."})
+            json!({"matches":matches,"rejected":rejections,"checked_at":ferry_core::now(),"requirements":request,"os":os,"reserved":false,"note":"Снимок доступности ferry. Human/idle — сигнал активности, не разрешение трогать рабочий стол. Перед GUI-прогоном учитывай указания пользователя и займи стол через desk take."})
         );
         Ok(code)
     })())
@@ -392,6 +568,25 @@ pub fn history(args: &[&str]) -> io::Result<i32> {
 }
 
 pub fn act(args: &[&str]) -> io::Result<i32> {
+    let structured = args.iter().any(|s| {
+        matches!(
+            *s,
+            "--click-locator"
+                | "--target"
+                | "--expect-json"
+                | "--expect-window"
+                | "--allow-already"
+                | "--no-screenshot"
+        )
+    }) || args
+        .windows(2)
+        .find(|w| w[0] == "--from")
+        .and_then(|w| read_observation(w[1]).ok())
+        .is_some_and(|v| v["elements"].is_array());
+    if structured {
+        return act_structured(args);
+    }
+
     let (device, mut rest) = match args {
         [d, tail @ ..] if !d.starts_with('-') => (Some((*d).to_string()), tail),
         _ => (None, args),
@@ -473,6 +668,127 @@ pub fn act(args: &[&str]) -> io::Result<i32> {
         Ok(i32::from(failed))
     })())
 }
+fn act_structured(args: &[&str]) -> io::Result<i32> {
+    use ferry_core::screen::{
+        act::{ActionV2, Assertion, Property, RequestV2, Snapshot},
+        elements::Locator,
+    };
+    let (device, mut rest) = match args {
+        [d, tail @ ..] if !d.starts_with('-') => (Some((*d).to_string()), tail),
+        _ => (None, args),
+    };
+    let (mut from, mut action, mut target, mut expect, mut new_window) =
+        (None, None, None, None, None);
+    let (mut timeout, mut dry_run, mut allow_already, mut screenshot) = (10, false, false, true);
+    while !rest.is_empty() {
+        match rest {
+            ["--from", s, tail @ ..] if from.is_none() => {
+                from = Some(*s);
+                rest = tail;
+            }
+            ["--click", s, tail @ ..] if action.is_none() => {
+                action = Some(ActionV2::Click(Locator {
+                    name: Some((*s).into()),
+                    ..Default::default()
+                }));
+                rest = tail;
+            }
+            ["--click-locator", s, tail @ ..] if action.is_none() => {
+                action = Some(ActionV2::Click(json_arg(s)?));
+                rest = tail;
+            }
+            ["--key", s, tail @ ..] if action.is_none() => {
+                action = Some(ActionV2::Key((*s).into()));
+                rest = tail;
+            }
+            ["--type", s, tail @ ..] if action.is_none() => {
+                action = Some(ActionV2::Type((*s).into()));
+                rest = tail;
+            }
+            ["--target", s, tail @ ..] if target.is_none() => {
+                target = Some(json_arg::<Locator>(s)?);
+                rest = tail;
+            }
+            ["--expect", s, tail @ ..] if expect.is_none() => {
+                expect = Some(Assertion {
+                    locator: Locator {
+                        name: Some((*s).into()),
+                        ..Default::default()
+                    },
+                    property: Property::Exists,
+                    value: None,
+                    state: None,
+                });
+                rest = tail;
+            }
+            ["--expect-json", s, tail @ ..] if expect.is_none() => {
+                expect = Some(json_arg::<Assertion>(s)?);
+                rest = tail;
+            }
+            ["--expect-window", s, tail @ ..] if new_window.is_none() => {
+                new_window = Some((*s).to_string());
+                rest = tail;
+            }
+            ["--timeout", s, tail @ ..] => {
+                timeout = s.parse().map_err(io::Error::other)?;
+                rest = tail;
+            }
+            ["--dry-run", tail @ ..] => {
+                dry_run = true;
+                rest = tail;
+            }
+            ["--allow-already", tail @ ..] => {
+                allow_already = true;
+                rest = tail;
+            }
+            ["--no-screenshot", tail @ ..] => {
+                screenshot = false;
+                rest = tail;
+            }
+            _ => return crate::usage(),
+        }
+    }
+    let (Some(from), Some(action)) = (from, action) else {
+        return crate::usage();
+    };
+    if expect.is_none() && new_window.is_none()
+        || matches!(action, ActionV2::Click(_)) && target.is_some()
+    {
+        return crate::usage();
+    }
+    finish((|| {
+        let value = read_observation(from)?;
+        if value["device"].as_str() != Some(device.as_deref().unwrap_or("local")) {
+            return Err(Fail::new("наблюдение другого устройства"));
+        }
+        let snapshot: Snapshot = serde_json::from_value(value)
+            .map_err(|e| Fail::new(format!("нужно observe --structured: {e}")))?;
+        let request = RequestV2 {
+            snapshot,
+            action,
+            target,
+            expect,
+            new_window,
+            allow_already,
+            timeout,
+            dry_run,
+            screenshot,
+        };
+        let mut result = report(Request::ActV2 {
+            device: device.clone(),
+            request: Box::new(request),
+            file: shot_path()?,
+        })?;
+        result["device"] = device.unwrap_or_else(|| "local".into()).into();
+        if result["observation"].is_object() {
+            result["observation"]["device"] = result["device"].clone();
+            result["observation"]["schema_version"] = 2.into();
+        }
+        let failed = result["error"].is_string() || !dry_run && result["verified"] != true;
+        println!("{result}");
+        Ok(i32::from(failed))
+    })())
+}
 pub(crate) fn shot_path() -> Result<PathBuf, Fail> {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -486,6 +802,57 @@ pub(crate) fn shot_path() -> Result<PathBuf, Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_delta_tracks_values_without_treating_indices_as_identity() {
+        use ferry_core::screen::elements::Element;
+        let e = Element {
+            index: 1,
+            parent: None,
+            role: "Edit".into(),
+            name: "Name".into(),
+            id: "input".into(),
+            rect: Some((0, 0, 20, 20)),
+            enabled: Some(true),
+            focused: Some(true),
+            checked: None,
+            selected: None,
+            value: Some("old".into()),
+            protected: false,
+            name_truncated: false,
+            id_truncated: false,
+            value_truncated: false,
+        };
+        let before = json!({"device":"local","window":{"id":1,"pid":2},"query":null,"subtree":false,"complete":true,"elements":[e]});
+        let mut after = before.clone();
+        after["elements"][0]["index"] = 99.into();
+        let delta = observation_delta(&before, &after).unwrap();
+        assert!(delta["changed"].as_array().unwrap().is_empty());
+        after["elements"][0]["value"] = "new".into();
+        assert_eq!(
+            observation_delta(&before, &after).unwrap()["changed"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        after["window"]["pid"] = 3.into();
+        assert!(observation_delta(&before, &after).is_err());
+    }
+    #[test]
+    fn unknown_locator_fields_and_ambiguous_diffs_are_not_silently_accepted() {
+        assert!(
+            json_arg::<ferry_core::screen::elements::Locator>(r#"{"automation_id":"typo"}"#)
+                .is_err()
+        );
+        assert!(
+            json_arg::<ferry_core::screen::act::Assertion>(
+                r#"{"locator":{"name":"Save"},"property":"enabled","state":false}"#
+            )
+            .unwrap()
+            .validate()
+            .is_ok()
+        );
+    }
     #[test]
     fn refuses_unknown_offline_and_wrong_os_before_probing() {
         let peer:PeerView=serde_json::from_value(json!({"id":"id","name":"test","online":false,"direct":null,"rtt_ms":null,"status":null})).unwrap();

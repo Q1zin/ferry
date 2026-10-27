@@ -4,7 +4,10 @@ mod agent_tools;
 mod checks;
 mod devices;
 mod diagnostics;
+mod execution;
+mod human;
 mod mcp;
+mod storage;
 
 use ferry_core::mode::{self, Mode};
 use ferry_core::{info, jobs, relay};
@@ -28,18 +31,26 @@ ferry — разработка и тесты на нескольких устр�
 На нескольких целях команда идёт параллельно, строки вывода — с [устройство], код выхода —
 первый ненулевой. Отказ устройства по режиму или роли — код 75.
 
-Проверки для агента (0.1.22):
+Проверки для агента (0.1.23):
   ferry check <профиль> [--devices local,WIN-11-2|all|os:windows] [--parallel 2]
-              [--file ferry.checks.json] [--home] [--no-sync]
-                                    профиль, готовность, JUnit и артефакты; JSON всей матрицы
+              [--file ferry.checks.json] [--home] [--no-sync] [--isolated] [--id <id>] [--detach]
+                                    build → launch → ready → test → collect → cleanup; JSON матрицы
+  ferry check status|resume|collect|cancel <id> [--detach]
+                                    читать / продолжить / собрать / отменить ту же операцию
   ferry diagnose [<устройство>] <задача> --run <id> [--window <окно>] [--junit <id>]
-                                    сохранить диагностический отчёт; снимок только указанного окна
+                                    отчёт запуска; --bundle [--artifact <id>]... — переносимые файлы
   ferry history [<устройство>] <задача> [--pin <run> | --unpin <run>]
   ferry history [<устройство>] <задача> [--older-than <дни>] [--max-bytes <байты>]
                                     место и preview очистки архивов; --apply <preview_token> удаляет
+  ferry storage [<устройство>] [--kind caches|outputs|shots|recordings|checks|diagnostics|runners|questions|observations]
+                [--only <entry_id>] [--older-than <дни>] [--max-bytes <байты>] [--apply <token>]
+                                    общий учёт диска и preview; исходники не удаляются
   ferry act [<устройство>] --from <observe.json> --click <имя>|--key <клавиша>|--type <текст>
             --expect <точное имя элемента> [--timeout 10] [--dry-run]
                                     сверить окно и дерево, одно действие, проверить результат
+  ferry act [<устройство>] --from <json> --click-locator <json>|--target <json> --key|--type <значение>
+            --expect-json <json> [--expect-window <заголовок>] [--allow-already] [--dry-run]
+                                    точная цель и её предки, проверка состояния или нового своего окна
 
 Команды на устройствах:
   ferry run <цели> [--desk] [--no-sync] [--home] [--shell <имя>] [--] <команда>
@@ -53,6 +64,17 @@ ferry — разработка и тесты на нескольких устр�
   ferry start <цели> <имя> [--no-sync] [--home] [--shell <имя>] [--] <команда>
                                     фоновая задача (приложение, dev-сервер, сборка): живёт
                                     после вызова, пишет лог; то же имя ещё раз — перезапуск
+  ferry start <устройство|local> <имя> --request <id> [--session <id>] [--keep] [--timeout <сек>]
+              [--headless] [--workspace <manifest.json>] [--home] [--shell <имя>] -- <команда>
+                                    точный run_id, повтор запроса без повторного запуска
+  ferry start-status <устройство|local> <request_id>
+  ferry session begin [<id>] [--pid <PID_агента>] [--ttl <сек>]
+  ferry session renew|show|end <id> [--ttl <сек>]
+                                    срок работы агента; задачи и туннели убираются по концу сессии
+  ferry workspace create [<устройство|local>] [--id <id>] [--root <проект>]
+  ferry workspace diff <manifest.json> [--root <проект>]
+  ferry workspace apply <manifest.json> --token <preview_token> [--root <проект>]
+                                    изолированная копия, проверка и применение patch
   ferry jobs <цели> [--json]        задачи: работает, код выхода, когда запущена
   ferry log <устройство> <имя> [-f] лог задачи; -f — следить до конца и выйти с её кодом
   ferry result [<устройство>] <имя> [--wait <сек>] [--cursor <курсор>] [--max-bytes <байт>]
@@ -70,7 +92,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry get <устройство> <путь> [куда]
                                     файл или каталог с устройства — сюда (~/… — от его дома)
   ferry pull <устройство>           правки, сделанные на устройстве, — сюда
-  ferry tunnel [<устройство> <порт>] [--close]
+  ferry tunnel [<устройство> <порт>] [--close] [--session <id>] [--keep]
                                     127.0.0.1:<порт> здесь → <порт> устройства (CDP,
                                     dev-сервер); без аргументов — открытые туннели
   ferry info <цели> [--json]        свойства: система, железо, питание, экран, ferry
@@ -82,10 +104,13 @@ ferry — разработка и тесты на нескольких устр�
                                     на связь
   ferry logs [<цели>] [-n <строк>]  лог приложения ferry на устройствах или (без целей) здесь:
                                     последние строки, по умолчанию 100
-  ferry desk <устройство> [take [<минут>] | free [--force]]
+  ferry desk <устройство> [take [<минут>] [--note <намерение>] | free [--force]]
                                     бронь рабочего стола: окна и ввод одной сессии (агента или
                                     терминала) — любое действие само занимает стол на 3 мин, take —
                                     надольше (по умолчанию 30 мин), free — снять, --force — чужую
+  ferry ask <устройство|local> <вопрос> [--id <id>] [--timeout 600] [--wait 0]
+  ferry ask <устройство|local> --poll <id> [--wait 30] | --cancel <id>
+                                    вопрос человеку; ответ done требует проверки результата
   ferry crashes <устройство> [<программа>] [--last]
                                     падения программ на устройстве, свежие сверху; --last —
                                     разбор последнего: исключение, стек (macOS — отчёты .ips,
@@ -94,7 +119,8 @@ ferry — разработка и тесты на нескольких устр�
                                     (только чтение); без аргумента — доверенные хосты
 
 Экран устройства (координаты — пиксели снимка ferry shot):
-  ferry observe [<устройство>] [--window <окно>] [--ocr]
+  ferry observe [<устройство>] [--window <окно>] [--ocr] [--structured] [--no-screenshot]
+                [--element <locator.json> | --subtree <locator.json>] [--since <observe.json>]
                                     JSON: окно, фокус, элементы и путь снимка; OCR — координаты в снимке
   ferry shot <цели> [файл.png] [--window <окно> | --region x,y,ширина,высота]
                                     снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png);
@@ -152,6 +178,21 @@ ferry — разработка и тесты на нескольких устр�
 задачи), ferry job-supervise <имя> (надсмотрщик задачи).
 ";
 
+fn managed_flags(mut args: &[&str]) -> bool {
+    loop {
+        match args {
+            [
+                "--request" | "--session" | "--keep" | "--timeout" | "--headless" | "--workspace",
+                ..,
+            ] => return true,
+            ["--shell", _, rest @ ..] | ["--home" | "--no-sync" | "--close", rest @ ..] => {
+                args = rest
+            }
+            _ => return false,
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -164,11 +205,8 @@ fn main() {
         ["role", device, role] => devices::role(Some(device), role),
         ["forget", device] => devices::forget(device),
         ["desk", device] => devices::desk(device, "show", 0),
-        ["desk", device, "take"] => devices::desk(device, "take", 30),
-        ["desk", device, "take", minutes] => match minutes.parse() {
-            Ok(minutes) => devices::desk(device, "take", minutes),
-            Err(_) => usage(),
-        },
+        ["desk", device, "take", rest @ ..] => human::desk_take(device, rest),
+        ["ask", rest @ ..] => human::ask(rest),
         ["desk", device, "free"] => devices::desk(device, "free", 0),
         ["desk", device, "free", "--force"] => devices::desk(device, "force", 0),
         ["crashes", device] => devices::crashes(device, "", false),
@@ -187,6 +225,23 @@ fn main() {
         ["shot", spec, rest @ ..] => shot(spec, rest),
         ["wait", device, rest @ ..] => wait(device, rest),
         ["stop", spec] => devices::stop(spec),
+        ["session", rest @ ..] => execution::session(rest),
+        ["workspace", rest @ ..] => execution::workspace(rest),
+        ["storage", rest @ ..] => storage::run(rest),
+        ["start-status", rest @ ..] => execution::start_status(rest),
+        ["start", who, _, ..]
+            if !ferry_core::control::session().is_empty()
+                && (*who == "all" || who.starts_with("os:") || who.contains(',')) =>
+        {
+            Err(io::Error::other(
+                "start в сессии агента принимает одно устройство; для нескольких используй check",
+            ))
+        }
+        ["start", _, _, rest @ ..]
+            if managed_flags(rest) || !ferry_core::control::session().is_empty() =>
+        {
+            execution::start(&args[1..])
+        }
         ["start", spec, name, rest @ ..] => start(spec, name, rest),
         // Раньше `jobs <цели>`: иначе `--tsv` приняли бы за имя устройства.
         ["jobs", "--tsv"] => jobs::list(true),
@@ -204,6 +259,11 @@ fn main() {
         ["log", device, name, "-f"] => devices::log(device, name, true),
         ["kill", spec, name] => devices::kill(spec, name),
         ["tunnel"] => devices::tunnel(None, false),
+        ["tunnel", _, _, rest @ ..]
+            if managed_flags(rest) || !ferry_core::control::session().is_empty() =>
+        {
+            execution::tunnel(&args[1..])
+        }
         ["tunnel", device, port] => devices::tunnel(Some((device, port)), false),
         ["tunnel", device, port, "--close"] => devices::tunnel(Some((device, port)), true),
         ["windows", device] => devices::input(device, owned(&["windows"])),
