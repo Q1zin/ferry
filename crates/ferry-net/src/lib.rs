@@ -9,6 +9,7 @@ pub mod device;
 pub mod files;
 pub mod lan;
 mod node;
+mod ownership;
 pub mod pair;
 pub mod proto;
 mod relay;

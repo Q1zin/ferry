@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ferry_core::jobs::Job;
 use iroh::EndpointId;
@@ -87,6 +86,155 @@ impl Device {
             .map_err(|_| Fail::new("устройство не ответило; повтори result с тем же курсором"))?
     }
 
+    pub async fn storage(&self, request: ferry_core::storage::Request) -> Reply<String> {
+        need(&self.name, self.version.as_deref(), "0.1.23", "storage")?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(75),
+            self.client.ask(Storage(request)),
+        )
+        .await
+        .map_err(|_| {
+            Fail::new("storage: ответ потерян; проверь preview перед повторным удалением")
+        })?
+    }
+    pub async fn human(&self, request: ferry_core::human::Request, session: &str) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "вопрос человеку",
+        )?;
+        self.client
+            .ask(Human {
+                session: session.into(),
+                request,
+            })
+            .await
+    }
+    pub async fn atomic_start(
+        &self,
+        request: ferry_core::jobs::execution::StartRequest,
+    ) -> Reply<ferry_core::jobs::execution::Started> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "durable start",
+        )?;
+        self.client
+            .ask(AtomicStart {
+                request,
+                trust: self.trust(),
+            })
+            .await
+    }
+    pub async fn execution_cancel(&self, id: String, session: String) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "durable cancel",
+        )?;
+        self.client
+            .ask(ExecutionCancel {
+                request_id: id,
+                session,
+            })
+            .await
+    }
+    pub async fn execution_cancel_owned(&self, id: String, session: String) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "owned cancel",
+        )?;
+        self.client
+            .ask(ExecutionCancelOwned {
+                request_id: id,
+                session,
+            })
+            .await
+    }
+    pub async fn execution_lookup(
+        &self,
+        id: String,
+    ) -> Reply<Option<ferry_core::jobs::execution::Started>> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "durable lookup",
+        )?;
+        self.client.ask(ExecutionLookup(id)).await
+    }
+    pub async fn workspace(&self, request: ferry_core::workspace::Request) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "isolated workspace",
+        )?;
+        self.client.ask(Workspace(request)).await
+    }
+    pub async fn workspace_patch(
+        &self,
+        source: &ferry_core::jobs::execution::Source,
+    ) -> Reply<std::path::PathBuf> {
+        let status = self
+            .workspace(ferry_core::workspace::Request {
+                source: source.clone(),
+                action: ferry_core::workspace::Action::Status,
+            })
+            .await?;
+        let status: serde_json::Value = serde_json::from_str(&status).map_err(Fail::new)?;
+        if status["ready"] != true {
+            return Err(Fail::new("workspace не готова"));
+        }
+        let prepared = self
+            .client
+            .ask(SyncPrepare {
+                project: source.workspace.clone(),
+                keep: String::new(),
+            })
+            .await?;
+        self.save_patch(&source.workspace, &prepared.changes)
+    }
+    pub async fn act_v2(
+        &self,
+        request: ferry_core::screen::act::RequestV2,
+    ) -> Reply<ferry_core::screen::act::ReportV2> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "semantic act",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(80),
+            self.client.ask(ActV2(Box::new(request))),
+        )
+        .await
+        .map_err(|_| Fail::new("act: ответ потерян; сначала observe, не повторяй действие"))?
+    }
+    pub async fn observe_v2(
+        &self,
+        request: ferry_core::screen::observe::RequestV2,
+    ) -> Reply<ferry_core::screen::observe::ObservationV2> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            "0.1.23",
+            "structured observe",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(75),
+            self.client.ask(ObserveV2(request)),
+        )
+        .await
+        .map_err(|_| Fail::new("observe: устройство не ответило за 75 с"))?
+    }
+
     pub async fn act(
         &self,
         request: ferry_core::screen::act::Request,
@@ -125,6 +273,13 @@ impl Device {
             &self.name,
             self.version.as_deref(),
             if matches!(
+                query.action,
+                ferry_core::jobs::evidence::Action::Metadata
+                    | ferry_core::jobs::evidence::Action::Probe { .. }
+                    | ferry_core::jobs::evidence::Action::StopOwned { .. }
+            ) {
+                "0.1.23"
+            } else if matches!(
                 query.action,
                 ferry_core::jobs::evidence::Action::Storage { .. }
                     | ferry_core::jobs::evidence::Action::Pin { .. }
@@ -198,6 +353,17 @@ impl Device {
 
     /// Бронь рабочего стола устройства для сессии `session`.
     pub async fn desk(&self, session: &str, action: DeskAction) -> Reply<String> {
+        if matches!(
+            action,
+            DeskAction::HoldNote { .. } | DeskAction::ReleaseOwned
+        ) {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.23",
+                "заметка стола",
+            )?;
+        }
         need(
             &self.name,
             self.version.as_deref(),
@@ -550,11 +716,16 @@ impl Device {
     fn save_patch(&self, project: &str, patch: &[u8]) -> Reply<PathBuf> {
         let dir = self.dir.join("saved");
         std::fs::create_dir_all(&dir)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        let path = dir.join(format!("{}-{project}-{now}.patch", self.name));
-        std::fs::write(&path, patch)?;
+        let path = dir.join(format!(
+            "{}-{project}-{}.patch",
+            self.name,
+            ferry_core::jobs::unique_id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, patch)?;
         Ok(path)
     }
 
@@ -574,6 +745,9 @@ impl Device {
 /// Бандл со снимком `commit` под ссылкой `refs/ferry/snapshot`. Есть у устройства снимок `head`,
 /// и он есть здесь — бандл только с недостающим.
 fn make_bundle(root: &Path, commit: &str, head: Option<&str>, out: &Path) -> std::io::Result<()> {
+    let repo =
+        ferry_core::sync::repo_at(root)?.ok_or_else(|| std::io::Error::other("нет репозитория"))?;
+    let _lock = ferry_core::sync::snapshot_lock(&repo.git_dir)?;
     let git = |args: &[&str]| -> std::io::Result<std::process::Output> {
         Command::new("git").arg("-C").arg(root).args(args).output()
     };

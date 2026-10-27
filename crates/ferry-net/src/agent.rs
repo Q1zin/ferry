@@ -84,6 +84,11 @@ pub struct Agent {
     _router: Arc<Router>,
 }
 
+struct Tunnel {
+    task: AbortHandle,
+    owner: Option<String>,
+}
+
 struct Inner {
     dir: PathBuf,
     endpoint: Endpoint,
@@ -99,7 +104,7 @@ struct Inner {
     /// Команды, которые это устройство выполняет для других.
     node: Arc<Node>,
     /// Открытые туннели: (устройство, порт).
-    tunnels: Mutex<BTreeMap<(String, u16), AbortHandle>>,
+    tunnels: Mutex<BTreeMap<(String, u16), Tunnel>>,
     /// Бронь рабочего стола этого устройства.
     desk: Mutex<crate::desk::Lease>,
     /// Кто сейчас действует на рабочем столе — для рамки управления.
@@ -524,9 +529,20 @@ impl Agent {
     /// `127.0.0.1:<port>` здесь → тот же порт устройства (CDP, dev-сервер). Порт тот же с обеих
     /// сторон: CDP отдаёт в `/json/version` ws-адрес со своим портом.
     pub async fn open_tunnel(&self, who: &str, port: u16) -> Result<String, Fail> {
+        self.open_tunnel_owned(who, port, None).await
+    }
+    pub async fn open_tunnel_owned(
+        &self,
+        who: &str,
+        port: u16,
+        owner: Option<String>,
+    ) -> Result<String, Fail> {
         let device = self.device(who)?;
         let key = (device.name.clone(), port);
-        if self.inner.tunnels.lock().unwrap().contains_key(&key) {
+        if let Some(existing) = self.inner.tunnels.lock().unwrap().get(&key) {
+            if owner != existing.owner {
+                return Err(Fail::refused("туннель уже принадлежит другой сессии"));
+            }
             return Ok(format!(
                 "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{port}",
                 device.name
@@ -542,23 +558,25 @@ impl Agent {
         let agent = self.clone();
         let name = device.name.clone();
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                // Устройство могло переподключиться — клиент берём свежий на каждое соединение.
-                let Ok(device) = agent.device(&name) else {
-                    continue;
-                };
-                tokio::spawn(async move {
-                    if let Ok((tx, rx)) = device.tunnel(port).await {
-                        crate::node::pipe(stream, tx, rx).await;
-                    }
-                });
+            let mut streams = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted=listener.accept()=>{
+                        let Ok((stream,_))=accepted else{break};
+                        let Ok(device)=agent.device(&name)else{continue;};
+                        streams.spawn(async move {if let Ok((tx,rx))=device.tunnel(port).await{crate::node::pipe(stream,tx,rx).await;}});
+                    },
+                    _=streams.join_next(),if !streams.is_empty()=>{}
+                }
             }
         });
-        self.inner
-            .tunnels
-            .lock()
-            .unwrap()
-            .insert(key, task.abort_handle());
+        self.inner.tunnels.lock().unwrap().insert(
+            key,
+            Tunnel {
+                task: task.abort_handle(),
+                owner,
+            },
+        );
         Ok(format!("ferry: 127.0.0.1:{port} → {}:{port}", device.name))
     }
 
@@ -569,8 +587,8 @@ impl Agent {
             .find(|(name, p)| *p == port && (name == who || who.is_empty()))
             .cloned();
         match key.and_then(|key| tunnels.remove(&key).map(|task| (key, task))) {
-            Some(((name, port), task)) => {
-                task.abort();
+            Some(((name, port), tunnel)) => {
+                tunnel.task.abort();
                 Ok(format!("ferry: туннель {name}:{port} закрыт"))
             }
             None => Err(Fail::new(format!("туннеля {who}:{port} нет"))),
@@ -578,6 +596,25 @@ impl Agent {
     }
 
     /// Открытые туннели: устройство и порт.
+    pub fn close_tunnel_owned(&self, who: &str, port: u16, owner: &str) -> Result<bool, Fail> {
+        let mut tunnels = self.inner.tunnels.lock().unwrap();
+        let key = tunnels
+            .keys()
+            .find(|(name, p)| *p == port && name == who)
+            .cloned();
+        if let Some(key) = key
+            && tunnels
+                .get(&key)
+                .is_some_and(|tunnel| tunnel.owner.as_deref() == Some(owner))
+            && let Some(tunnel) = tunnels.remove(&key)
+        {
+            tunnel.task.abort();
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
     pub fn tunnels(&self) -> Vec<(String, u16)> {
         self.inner.tunnels.lock().unwrap().keys().cloned().collect()
     }
@@ -585,7 +622,12 @@ impl Agent {
     /// Кто сейчас действует на рабочем столе этого устройства (и только что закончил).
     pub fn acting(&self) -> Option<String> {
         let acting = self.inner.acting.lock().unwrap();
-        acting.who(std::time::Instant::now())
+        acting
+            .who(std::time::Instant::now())
+            .map(|who| match self.desk_note() {
+                Some(note) => format!("{who} · {note}"),
+                None => who,
+            })
     }
 
     /// Обновить ferry на этом устройстве (`ferry update` без целей).
@@ -598,7 +640,8 @@ impl Agent {
         session: &str,
         action: crate::proto::DeskAction,
     ) -> Result<String, Fail> {
-        self.inner
+        let result = self
+            .inner
             .desk
             .lock()
             .unwrap()
@@ -621,7 +664,77 @@ impl Agent {
                     }
                 },
             )
-            .map_err(Fail::refused)
+            .map_err(Fail::refused);
+        self.inner.notify();
+        result
+    }
+
+    pub fn desk_note(&self) -> Option<String> {
+        self.inner
+            .desk
+            .lock()
+            .unwrap()
+            .note(std::time::Instant::now())
+    }
+    pub async fn storage_self(
+        &self,
+        request: ferry_core::storage::Request,
+    ) -> Result<String, Fail> {
+        self.inner.node.storage(request, false).await
+    }
+    pub async fn human_self(
+        &self,
+        request: ferry_core::human::Request,
+        session: &str,
+    ) -> Result<String, Fail> {
+        self.inner
+            .node
+            .human(
+                request,
+                format!("{}:{session}", self.id()),
+                self.snapshot().me.name,
+                false,
+            )
+            .await
+    }
+
+    pub async fn atomic_start_self(
+        &self,
+        request: ferry_core::jobs::execution::StartRequest,
+        cwd: Option<PathBuf>,
+    ) -> Result<ferry_core::jobs::execution::Started, Fail> {
+        self.inner.node.atomic_start(request, cwd, None).await
+    }
+    pub async fn execution_cancel_self(&self, id: String, session: String) -> Result<String, Fail> {
+        self.inner.node.execution_cancel(id, session, false).await
+    }
+    pub async fn execution_cancel_owned_self(
+        &self,
+        id: String,
+        session: String,
+    ) -> Result<String, Fail> {
+        self.inner
+            .node
+            .execution_cancel_owned(id, session, false)
+            .await
+    }
+    pub async fn execution_lookup_self(
+        &self,
+        id: String,
+    ) -> Result<Option<ferry_core::jobs::execution::Started>, Fail> {
+        self.inner.node.execution_lookup(id).await
+    }
+    pub async fn act_v2_self(
+        &self,
+        request: ferry_core::screen::act::RequestV2,
+    ) -> Result<ferry_core::screen::act::ReportV2, Fail> {
+        self.inner.node.act_v2(request, false).await
+    }
+    pub async fn observe_v2_self(
+        &self,
+        request: ferry_core::screen::observe::RequestV2,
+    ) -> Result<ferry_core::screen::observe::ObservationV2, Fail> {
+        self.inner.node.observe_v2(request, false).await
     }
 
     pub async fn act_self(
@@ -963,6 +1076,31 @@ impl Inner {
                     .and_then(|name| self.remote_change(|| self.rename(name)));
                 tx.send(result).await.ok();
             }
+            DeviceMessage::Human(WithChannels { inner, tx, .. }) => {
+                let label = self
+                    .store
+                    .lock()
+                    .unwrap()
+                    .peer(from)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| from.fmt_short().to_string());
+                let label = if inner.session.is_empty() {
+                    label
+                } else {
+                    format!("{label} ({})", inner.session)
+                };
+                let result = self
+                    .node
+                    .human(
+                        inner.request,
+                        format!("{from}:{}", inner.session),
+                        label,
+                        true,
+                    )
+                    .await;
+                self.notify();
+                tx.send(result).await.ok();
+            }
             DeviceMessage::Desk(WithChannels { tx, inner, .. }) => {
                 let name = |id: EndpointId| {
                     let store = self.store.lock().unwrap();
@@ -987,6 +1125,7 @@ impl Inner {
                             format!("рабочий стол {me} {why}").replace("<устройство>", &me),
                         )
                     });
+                self.notify();
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,
@@ -1085,6 +1224,20 @@ fn describe(msg: &DeviceMessage) -> Option<(String, bool)> {
             Some("text") => ("текст с экрана".into(), true),
             _ => (format!("ввод: {}", m.inner.args.join(" ")), true),
         },
+        DeviceMessage::AtomicStart(m) => (
+            format!(
+                "задача {}: {}",
+                m.inner.request.name,
+                line(&m.inner.request.command)
+            ),
+            m.inner.request.resource == ferry_core::jobs::execution::Resource::Desktop,
+        ),
+        DeviceMessage::Human(m) => match &m.inner.request {
+            ferry_core::human::Request::Ask { .. } => ("вопрос человеку".into(), false),
+            _ => return None,
+        },
+        DeviceMessage::ActV2(_) => ("проверяемое действие".into(), true),
+        DeviceMessage::ObserveV2(_) => ("наблюдение окна".into(), true),
         DeviceMessage::Act(_) => ("проверяемое действие".into(), true),
         DeviceMessage::Observe(_) => ("наблюдение окна".into(), true),
         DeviceMessage::Shot(_) => ("снимок экрана".into(), true),

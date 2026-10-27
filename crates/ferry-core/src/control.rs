@@ -19,6 +19,65 @@ use crate::jobs::Job;
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
     State,
+    ExecutionCancel {
+        device: Option<String>,
+        request_id: String,
+    },
+    Storage {
+        device: Option<String>,
+        request: crate::storage::Request,
+    },
+    Human {
+        device: Option<String>,
+        request: crate::human::Request,
+    },
+    DeskNote {
+        device: String,
+        minutes: u32,
+        note: String,
+    },
+    Session {
+        request: crate::session::Request,
+    },
+    OwnedTunnel {
+        device: String,
+        port: u16,
+        close: bool,
+        keep: bool,
+    },
+    AtomicStart {
+        device: Option<String>,
+        request: crate::jobs::execution::StartRequest,
+        local_cwd: Option<PathBuf>,
+    },
+    ExecutionLookup {
+        device: Option<String>,
+        request_id: String,
+    },
+    WorkspaceSync {
+        device: Option<String>,
+        root: PathBuf,
+        project: String,
+        id: String,
+        commit: String,
+        tree: String,
+    },
+    WorkspacePatch {
+        device: Option<String>,
+        root: PathBuf,
+        source: crate::jobs::execution::Source,
+        apply: Option<String>,
+    },
+    ObserveV2 {
+        device: Option<String>,
+        request: crate::screen::observe::RequestV2,
+        file: PathBuf,
+    },
+    ActV2 {
+        device: Option<String>,
+        request: Box<crate::screen::act::RequestV2>,
+        file: PathBuf,
+    },
     Act {
         device: Option<String>,
         request: crate::screen::act::Request,
@@ -445,7 +504,10 @@ pub fn open_in(dir: &Path, request: Request) -> io::Result<Answer> {
     open_session(dir, request, &session(), None)
 }
 pub fn call_session(request: Request, session: &str) -> io::Result<Response> {
-    let timeout = if matches!(request, Request::Sync { .. }) {
+    let timeout = if matches!(
+        request,
+        Request::Sync { .. } | Request::WorkspaceSync { .. }
+    ) {
         600
     } else {
         90
@@ -485,6 +547,9 @@ fn open_session(
         &request,
         Request::Info { .. }
             | Request::Crashes { .. }
+            | Request::ActV2 { .. }
+            | Request::ObserveV2 { .. }
+            | Request::AtomicStart { .. }
             | Request::Act { .. }
             | Request::Observe { .. }
             | Request::Evidence { .. }

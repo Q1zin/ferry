@@ -18,6 +18,7 @@ struct Holder {
     from: EndpointId,
     session: String,
     until: Instant,
+    note: Option<String>,
 }
 
 impl Holder {
@@ -33,6 +34,13 @@ impl Holder {
 pub struct Lease(Option<Holder>);
 
 impl Lease {
+    pub fn note(&self, now: Instant) -> Option<String> {
+        self.0
+            .as_ref()
+            .filter(|h| h.until > now)
+            .and_then(|h| h.note.clone())
+    }
+
     /// Применить действие `session` с устройства `from`. Ответ — для человека; отказ — если стол
     /// держит другой. `name` — как назвать устройство в ответе.
     pub fn apply(
@@ -43,6 +51,16 @@ impl Lease {
         now: Instant,
         name: impl Fn(EndpointId) -> String,
     ) -> Result<String, String> {
+        if let DeskAction::HoldNote { seconds, note } = action {
+            if note.chars().count() > 160 || note.chars().any(char::is_control) {
+                return Err("заметка: до 160 символов, без управляющих символов".into());
+            }
+            let said = self.apply(from, session, DeskAction::Hold(seconds), now, name)?;
+            if let Some(holder) = &mut self.0 {
+                holder.note = (!note.is_empty()).then_some(note);
+            }
+            return Ok(said);
+        }
         if self.0.as_ref().is_some_and(|h| h.until <= now) {
             self.0 = None;
         }
@@ -50,6 +68,7 @@ impl Lease {
         let who = |h: &Holder| h.who(&name);
         let left = |h: &Holder| h.until.saturating_duration_since(now).as_secs();
         match (action, &self.0) {
+            (DeskAction::HoldNote { .. }, _) => unreachable!(),
             (DeskAction::Show, None) => Ok("свободен".into()),
             (DeskAction::Show, Some(h)) => Ok(format!("занят: {} — ещё {} с", who(h), left(h))),
             (DeskAction::ForceFree, None) => Ok("свободен".into()),
@@ -58,12 +77,13 @@ impl Lease {
                 self.0 = None;
                 Ok(format!("свободен — бронь {was} снята"))
             }
+            (DeskAction::ReleaseOwned, Some(h)) if !mine(h) => Ok("своей брони нет".into()),
             (DeskAction::Free | DeskAction::Hold(_), Some(h)) if !mine(h) => Err(format!(
                 "занят: {} — ещё {} с; подожди или сними чужую бронь: ferry desk <устройство> free --force",
                 who(h),
                 left(h)
             )),
-            (DeskAction::Free, _) => {
+            (DeskAction::Free | DeskAction::ReleaseOwned, _) => {
                 self.0 = None;
                 Ok("свободен".into())
             }
@@ -71,7 +91,18 @@ impl Lease {
                 let holder = Holder {
                     from,
                     session: session.into(),
-                    until: now + Duration::from_secs(secs.into()),
+                    until: self
+                        .0
+                        .as_ref()
+                        .filter(|h| mine(h))
+                        .map_or(now + Duration::from_secs(secs.into()), |h| {
+                            h.until.max(now + Duration::from_secs(secs.into()))
+                        }),
+                    note: self
+                        .0
+                        .as_ref()
+                        .filter(|h| mine(h))
+                        .and_then(|h| h.note.clone()),
                 };
                 let said = format!("занят тобой — ещё {} с", left(&holder));
                 self.0 = Some(holder);
@@ -115,6 +146,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn note_survives_renewal_without_shortening_explicit_lease() {
+        let from = iroh::SecretKey::generate().public();
+        let now = Instant::now();
+        let mut lease = Lease::default();
+        lease
+            .apply(
+                from,
+                "agent:one",
+                DeskAction::HoldNote {
+                    seconds: 600,
+                    note: "checking settings".into(),
+                },
+                now,
+                |_| "test".into(),
+            )
+            .unwrap();
+        lease
+            .apply(from, "agent:one", DeskAction::Hold(180), now, |_| {
+                "test".into()
+            })
+            .unwrap();
+        assert_eq!(
+            lease.note(now + Duration::from_secs(500)).as_deref(),
+            Some("checking settings")
+        );
+        assert_eq!(lease.note(now + Duration::from_secs(601)), None);
+        lease
+            .apply(from, "agent:one", DeskAction::Free, now, |_| "test".into())
+            .unwrap();
+        assert_eq!(lease.note(now), None);
+    }
+
+    #[test]
+    fn release_owned_preserves_a_replacement_lease() {
+        let from = iroh::SecretKey::generate().public();
+        let now = Instant::now();
+        let mut lease = Lease::default();
+        lease
+            .apply(from, "agent:new", DeskAction::Hold(300), now, |_| {
+                "test".into()
+            })
+            .unwrap();
+        lease
+            .apply(from, "agent:old", DeskAction::ReleaseOwned, now, |_| {
+                "test".into()
+            })
+            .unwrap();
+        assert!(
+            lease
+                .apply(from, "agent:other", DeskAction::Hold(10), now, |_| "test"
+                    .into())
+                .is_err()
+        );
+        lease
+            .apply(from, "agent:new", DeskAction::ReleaseOwned, now, |_| {
+                "test".into()
+            })
+            .unwrap();
+        lease
+            .apply(from, "agent:other", DeskAction::Hold(10), now, |_| {
+                "test".into()
+            })
+            .unwrap();
+    }
+    #[test]
     fn one_holder_at_a_time() {
         let (mac, win) = (
             iroh::SecretKey::generate().public(),
@@ -135,18 +231,30 @@ mod tests {
             lease.apply(mac, "claude:1", DeskAction::Show, t0, name),
             Ok("свободен".into())
         );
-        assert!(lease.apply(mac, "claude:1", hold, t0, name).is_ok());
+        assert!(lease.apply(mac, "claude:1", hold.clone(), t0, name).is_ok());
         // Та же сессия — продлевает; другая сессия того же мака и другое устройство — отказ.
         assert!(
             lease
-                .apply(mac, "claude:1", hold, t0 + Duration::from_secs(60), name)
+                .apply(
+                    mac,
+                    "claude:1",
+                    hold.clone(),
+                    t0 + Duration::from_secs(60),
+                    name
+                )
                 .is_ok()
         );
-        let other = lease.apply(mac, "claude:2", hold, t0 + Duration::from_secs(61), name);
+        let other = lease.apply(
+            mac,
+            "claude:2",
+            hold.clone(),
+            t0 + Duration::from_secs(61),
+            name,
+        );
         assert!(other.unwrap_err().contains("mac (claude:1) — ещё 179 с"));
         assert!(
             lease
-                .apply(win, "", hold, t0 + Duration::from_secs(61), name)
+                .apply(win, "", hold.clone(), t0 + Duration::from_secs(61), name)
                 .is_err()
         );
         assert!(
@@ -167,7 +275,7 @@ mod tests {
         // Бронь истекла — стол свободен для любого.
         assert!(
             lease
-                .apply(win, "", hold, t0 + Duration::from_secs(300), name)
+                .apply(win, "", hold.clone(), t0 + Duration::from_secs(300), name)
                 .is_ok()
         );
         // Снять чужую — только силой; своя снимается просто.
@@ -181,7 +289,13 @@ mod tests {
         assert_eq!(forced, Ok("свободен — бронь win снята".into()));
         assert!(
             lease
-                .apply(mac, "claude:1", hold, t0 + Duration::from_secs(302), name)
+                .apply(
+                    mac,
+                    "claude:1",
+                    hold.clone(),
+                    t0 + Duration::from_secs(302),
+                    name
+                )
                 .is_ok()
         );
         assert!(
@@ -197,7 +311,7 @@ mod tests {
         );
         assert!(
             lease
-                .apply(win, "", hold, t0 + Duration::from_secs(304), name)
+                .apply(win, "", hold.clone(), t0 + Duration::from_secs(304), name)
                 .is_ok()
         );
     }

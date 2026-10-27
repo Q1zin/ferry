@@ -135,6 +135,62 @@ impl Node {
             DeviceMessage::JobResult(WithChannels { inner, tx, .. }) => {
                 tx.send(self.job_result(inner, true).await).await.ok();
             }
+            DeviceMessage::Storage(WithChannels { inner, tx, .. }) => {
+                tx.send(self.storage(inner.0, true).await).await.ok();
+            }
+            DeviceMessage::Human(WithChannels { inner, tx, .. }) => {
+                let owner = format!("{from}:{}", inner.session);
+                tx.send(
+                    self.human(inner.request, owner, from.fmt_short().to_string(), true)
+                        .await,
+                )
+                .await
+                .ok();
+            }
+            DeviceMessage::AtomicStart(WithChannels { inner, tx, .. }) => {
+                tx.send(
+                    self.atomic_start(inner.request, None, Some((from, inner.trust)))
+                        .await,
+                )
+                .await
+                .ok();
+            }
+            DeviceMessage::ExecutionCancel(WithChannels { inner, tx, .. }) => {
+                tx.send(
+                    self.execution_cancel(inner.request_id, inner.session, true)
+                        .await,
+                )
+                .await
+                .ok();
+            }
+            DeviceMessage::ExecutionCancelOwned(WithChannels { inner, tx, .. }) => {
+                tx.send(
+                    self.execution_cancel_owned(inner.request_id, inner.session, true)
+                        .await,
+                )
+                .await
+                .ok();
+            }
+            DeviceMessage::ExecutionLookup(WithChannels { inner, tx, .. }) => {
+                let result = match self.check(false) {
+                    Ok(()) => self.execution_lookup(inner.0).await,
+                    Err(e) => Err(e),
+                };
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::Workspace(WithChannels { inner, tx, .. }) => {
+                let result = match self.check(false) {
+                    Ok(()) => self.workspace(inner.0).await,
+                    Err(e) => Err(e),
+                };
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::ActV2(WithChannels { inner, tx, .. }) => {
+                tx.send(self.act_v2(*inner.0, true).await).await.ok();
+            }
+            DeviceMessage::ObserveV2(WithChannels { inner, tx, .. }) => {
+                tx.send(self.observe_v2(inner.0, true).await).await.ok();
+            }
             DeviceMessage::Act(WithChannels { inner, tx, .. }) => {
                 tx.send(self.act(inner.0, true).await).await.ok();
             }
@@ -581,6 +637,128 @@ impl Node {
         self.runs.lock().unwrap().remove(&pid);
     }
 
+    pub async fn storage(
+        &self,
+        request: ferry_core::storage::Request,
+        remote: bool,
+    ) -> Reply<String> {
+        if remote {
+            self.check(false)?;
+        }
+        let root = self.dir.clone();
+        let home = self.home.clone();
+        blocking(move || Ok(ferry_core::storage::execute(&root, &home, request)?.to_string())).await
+    }
+    pub async fn human(
+        &self,
+        request: ferry_core::human::Request,
+        owner: String,
+        label: String,
+        remote: bool,
+    ) -> Reply<String> {
+        if remote {
+            self.check(matches!(request, ferry_core::human::Request::Ask { .. }))?;
+        }
+        let root = self.dir.clone();
+        blocking(
+            move || Ok(ferry_core::human::execute(&root, &owner, &label, request)?.to_string()),
+        )
+        .await
+    }
+    pub async fn atomic_start(
+        &self,
+        request: jobs::execution::StartRequest,
+        local_cwd: Option<PathBuf>,
+        remote: Option<(iroh::EndpointId, Vec<String>)>,
+    ) -> Reply<jobs::execution::Started> {
+        let desktop = request.resource == jobs::execution::Resource::Desktop;
+        self.check(desktop)?;
+        if remote.is_some() && local_cwd.is_some() {
+            return Err(Fail::new("remote start не принимает local_cwd"));
+        }
+        let cwd = match local_cwd {
+            Some(path) => path,
+            None => self.resolve(&request.dir)?,
+        };
+        let state = self.dir.clone();
+        let source = self.supervisor.clone();
+        let supervisor = blocking(move || jobs::prepare_supervisor(&state, &source)).await?;
+        let env = match remote {
+            Some((from, trust)) => self
+                .relay
+                .env(from, &trust, &supervisor)
+                .map_err(Fail::new)?,
+            None => Vec::new(),
+        };
+        let root = self.dir.clone();
+        tokio::task::spawn_blocking(move || {
+            jobs::execution::start_at(&root, request, &cwd, &env, &supervisor)
+        })
+        .await
+        .map_err(Fail::new)?
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                Fail::refused(e)
+            } else {
+                Fail::new(e)
+            }
+        })
+    }
+    pub async fn execution_cancel(
+        &self,
+        id: String,
+        session: String,
+        remote: bool,
+    ) -> Reply<String> {
+        if remote {
+            self.check(false)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || Ok(jobs::execution::cancel(&root, &id, &session)?.to_string())).await
+    }
+    pub async fn execution_cancel_owned(
+        &self,
+        id: String,
+        session: String,
+        remote: bool,
+    ) -> Reply<String> {
+        if remote {
+            self.check(false)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || Ok(jobs::execution::cancel_owned(&root, &id, &session)?.to_string())).await
+    }
+    pub async fn execution_lookup(&self, id: String) -> Reply<Option<jobs::execution::Started>> {
+        let root = self.dir.clone();
+        blocking(move || jobs::execution::lookup(&root, &id)).await
+    }
+    pub async fn workspace(&self, request: ferry_core::workspace::Request) -> Reply<String> {
+        let home = self.home.clone();
+        blocking(move || Ok(ferry_core::workspace::execute(&home, request)?.to_string())).await
+    }
+    pub async fn act_v2(
+        &self,
+        request: screen::act::RequestV2,
+        remote: bool,
+    ) -> Reply<screen::act::ReportV2> {
+        if remote {
+            self.check(true)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || screen::act::execute_v2(request, &root)).await
+    }
+    pub async fn observe_v2(
+        &self,
+        request: screen::observe::RequestV2,
+        remote: bool,
+    ) -> Reply<screen::observe::ObservationV2> {
+        if remote {
+            self.check(true)?;
+        }
+        let root = self.dir.clone();
+        blocking(move || screen::observe::capture_v2(request, &root)).await
+    }
+
     pub async fn act(
         &self,
         request: ferry_core::screen::act::Request,
@@ -610,7 +788,13 @@ impl Node {
         remote: bool,
     ) -> Reply<String> {
         if remote {
-            self.check(false)?;
+            self.check(matches!(
+                &query.action,
+                jobs::evidence::Action::Probe {
+                    window: Some(_),
+                    ..
+                }
+            ))?;
         }
         let root = self.dir.clone();
         blocking(move || {
