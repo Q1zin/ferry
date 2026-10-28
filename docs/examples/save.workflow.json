@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "name": "save-document",
+  "parameters": { "text": null },
+  "preconditions": [
+    { "locator": { "id": "editor" }, "property": "enabled", "state": true },
+    { "locator": { "id": "editor" }, "property": "focused", "state": true }
+  ],
+  "steps": [
+    {
+      "id": "type_text",
+      "action": { "type": "${text}" },
+      "target": { "id": "editor" },
+      "expect": { "locator": { "id": "editor" }, "property": "value", "value": "${text}" }
+    },
+    {
+      "id": "save",
+      "action": { "click": { "name": "Save" } },
+      "expect": { "locator": { "name": "Saved" }, "property": "exists" },
+      "timeout": 10
+    }
+  ]
+}

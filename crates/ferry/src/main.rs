@@ -1,18 +1,18 @@
 use std::io;
 
 mod agent_tools;
-mod checks;
 mod capture;
-mod workflows;
-mod queue;
-mod server;
+mod checks;
 mod devices;
 mod diagnostics;
 mod execution;
 mod human;
 mod mcp;
+mod queue;
+mod server;
 mod setup;
 mod storage;
+mod workflows;
 
 use ferry_core::mode::{self, Mode};
 use ferry_core::{info, jobs, relay};
@@ -36,7 +36,23 @@ ferry — разработка и тесты на нескольких устр�
 На нескольких целях команда идёт параллельно, строки вывода — с [устройство], код выхода —
 первый ненулевой. Отказ устройства по режиму или роли — код 75.
 
-Проверки для агента (0.1.23):
+Новые возможности (0.1.24):
+  ferry setup status|install claude|codex|smoke DEVICE
+  ferry init --template smoke|tauri|electron|web [--root PATH]
+  ferry check list [--limit 50] [--before CREATED:ID]
+  ferry check compare BASE_ID CANDIDATE_ID
+  ferry check export ID [--dest DIR]  общий отчёт, все тесты, логи и ZIP доказательств
+  ferry queue add PROFILE --file PATH --devices SELECTOR [--os windows|macos] [--wait SEC]
+  ferry queue status|cancel|resume ID; ferry queue list
+  ferry workflow validate FILE [--param K=V]
+  ferry workflow run FILE --device DEVICE --job JOB --run RUN --window TITLE [--dry-run]
+  ferry capture start DEVICE --job JOB --run RUN --window TITLE --id ID [--fps 10] [--max-seconds 300]
+  ferry capture status|stop ID      MP4 и manifest конкретного окна запуска
+  ferry server [--port 8080] [--allow-actions]  локальная панель запусков с токеном
+  ferry run all --grouped [--device NAME] -- COMMAND
+  ferry logs [--device NAME] [-n 100]
+
+Проверки для агента:
   ferry check <профиль> [--devices local,WIN-11-2|all|os:windows] [--parallel 2]
               [--file ferry.checks.json] [--home] [--no-sync] [--isolated] [--id <id>] [--detach]
                                     build → launch → ready → test → collect → cleanup; JSON матрицы
