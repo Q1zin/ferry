@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { api, blocked as why, type DeviceRef } from '../api'
 
 const props = defineProps<{ device: DeviceRef }>()
@@ -8,6 +9,27 @@ const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
 const image = ref('')
 const loading = ref(false)
 const live = ref(false)
+const controlling = ref(false)
+const following = ref(false)
+const fps = ref(0)
+const frame = ref<{source_width:number;source_height:number;origin_x:number;origin_y:number}|null>(null)
+let streamToken:number|null=null
+let generation=0
+let lastFrame=0
+let heartbeat=0
+let pendingMove:{x:number;y:number}|null=null
+let moving=false
+let controlTail:Promise<unknown>=Promise.resolve()
+let controlGeneration=0
+function control(args:string[]|null, epoch=controlGeneration) {
+  const id=props.device.id
+  const operation=controlTail.catch(()=>{}).then(()=>{
+    if(args!==null && epoch!==controlGeneration) return
+    return invoke('control_screen',{id,args})
+  })
+  controlTail=operation
+  return operation
+}
 const text = ref('')
 const combo = ref('')
 const pointer = ref<{ x: number; y: number } | null>(null)
@@ -33,6 +55,7 @@ async function shoot() {
   loading.value = true
   try {
     image.value = await api.screenshot(props.device.id!)
+    frame.value=null
   } catch (e) {
     emit('say', String(e), true)
     live.value = false
@@ -41,26 +64,81 @@ async function shoot() {
   }
 }
 
-// Живой экран: следующий снимок — после того, как пришёл предыдущий, запросы не копятся.
-let liveTimer = 0
-async function tick() {
-  if (!live.value) return
-  await shoot()
-  if (live.value) liveTimer = window.setTimeout(tick, 1500)
+async function stopLive() {
+  generation++
+  live.value=false
+  const token=streamToken
+  streamToken=null
+  if (token!==null) await invoke('stop_stream',{token}).catch(()=>{})
 }
-function toggleLive() {
-  live.value = !live.value
-  clearTimeout(liveTimer)
-  if (live.value) tick()
+async function toggleLive() {
+  if (live.value) { await stopLive(); return }
+  const current=++generation
+  live.value=true
+  const channel=new Channel<{frame?:{jpeg:string;source_width:number;source_height:number;origin_x:number;origin_y:number};error?:string}>()
+  channel.onmessage=(event)=>{
+    if (current!==generation) return
+    if (event.error) { emit('say',event.error,true); stopLive(); return }
+    if (!event.frame) return
+    frame.value=event.frame
+    const next='data:image/jpeg;base64,'+event.frame.jpeg
+    if(image.value===next) acknowledge()
+    else image.value=next
+    const now=performance.now()
+    if(lastFrame) fps.value=Math.round(10000/(now-lastFrame))/10
+    lastFrame=now
+  }
+  try {
+    const token=await invoke<number>('start_stream',{id:props.device.id,channel})
+    if(current!==generation) { await invoke('stop_stream',{token}); return }
+    streamToken=token
+    // The first image may finish decoding before start_stream returns.
+    if(img.value?.complete) await acknowledge()
+  } catch(e) { if(current===generation) {emit('say',String(e),true);await stopLive()} }
+}
+async function acknowledge() { if(streamToken!==null) await invoke('stream_ack',{token:streamToken}).catch(()=>{}) }
+async function stopControl() {
+  controlGeneration++
+  controlling.value=false
+  following.value=false
+  pendingMove=null
+  clearInterval(heartbeat)
+  await control(null).catch(()=>{})
+}
+async function toggleControl() {
+  if(controlling.value) return stopControl()
+  const epoch=++controlGeneration
+  try {
+    await control([],epoch)
+    if(epoch!==controlGeneration) return
+    controlling.value=true
+    heartbeat=window.setInterval(()=>{if(controlling.value) control([]).catch(e=>{emit('say',String(e),true);stopControl()})},10000)
+  } catch(e) {emit('say',String(e),true)}
+}
+function pointerMove(event:MouseEvent) {
+  pointer.value=where(event)
+  if(!controlling.value || !following.value || !pointer.value) return
+  pendingMove=pointer.value
+  if(!moving) flushMove()
+}
+async function flushMove() {
+  moving=true
+  while(pendingMove && controlling.value && following.value) {
+    const p=pendingMove;pendingMove=null
+    await send(['move',String(p.x),String(p.y)])
+  }
+  moving=false
 }
 
 async function send(args: string[]) {
+  if(!controlling.value || blocked.value) return
   try {
-    await api.input(props.device.id!, args)
+    await control(args)
     // Показать результат: снимок чуть погодя, когда узел успеет отрисовать.
     if (!live.value) window.setTimeout(shoot, 600)
   } catch (e) {
     emit('say', String(e), true)
+    await stopControl()
   }
 }
 
@@ -70,8 +148,8 @@ function where(event: MouseEvent) {
   if (!el || !el.naturalWidth) return null
   const box = el.getBoundingClientRect()
   return {
-    x: Math.round(((event.clientX - box.left) * el.naturalWidth) / box.width),
-    y: Math.round(((event.clientY - box.top) * el.naturalHeight) / box.height),
+    x: (frame.value?.origin_x ?? 0)+Math.min((frame.value?.source_width ?? el.naturalWidth)-1,Math.max(0,Math.floor(((event.clientX-box.left)*(frame.value?.source_width ?? el.naturalWidth))/box.width))),
+    y: (frame.value?.origin_y ?? 0)+Math.min((frame.value?.source_height ?? el.naturalHeight)-1,Math.max(0,Math.floor(((event.clientY-box.top)*(frame.value?.source_height ?? el.naturalHeight))/box.height))),
   }
 }
 
@@ -79,7 +157,7 @@ function where(event: MouseEvent) {
 let clickTimer = 0
 function onClick(event: MouseEvent) {
   const p = where(event)
-  if (!p) return
+  if (!p || !controlling.value) return
   if (clickTimer) {
     clearTimeout(clickTimer)
     clickTimer = 0
@@ -114,13 +192,14 @@ function pressCombo() {
 watch(
   blocked,
   (b) => {
-    if (!b && !image.value) shoot()
+    if (b) { stopLive(); stopControl() }
+    else if (!image.value) shoot()
   },
   { immediate: true },
 )
 onUnmounted(() => {
-  live.value = false
-  clearTimeout(liveTimer)
+  stopLive()
+  stopControl()
   clearTimeout(clickTimer)
 })
 </script>
@@ -132,7 +211,9 @@ onUnmounted(() => {
       <div class="row toolbar">
         <button :disabled="loading || live" :aria-busy="loading && !live" @click="shoot">Обновить</button>
         <button :class="{ primary: live }" :aria-pressed="live" @click="toggleLive">Живой экран</button>
-        <span class="muted">Клики по снимку уходят на устройство.</span>
+        <button :class="{primary:controlling}" :aria-pressed="controlling" @click="toggleControl">{{controlling ? 'Отключить управление' : 'Управлять'}}</button>
+        <label v-if="controlling"><input v-model="following" type="checkbox" /> Курсор за мышью</label>
+        <span class="muted">{{live ? `${fps} кадров/с · основной экран` : 'Просмотр'}} · {{controlling ? 'Управление включено' : 'Ввод выключен'}}</span>
       </div>
 
       <div class="frame">
@@ -143,20 +224,21 @@ onUnmounted(() => {
           alt="экран устройства"
           @click="onClick"
           @contextmenu.prevent="onRightClick"
-          @mousemove="(e) => (pointer = where(e))"
-          @mouseleave="pointer = null"
+          @load="acknowledge"
+          @mousemove="pointerMove"
+          @mouseleave="pointer = null; pendingMove = null"
         />
         <p v-else class="muted placeholder">{{ loading ? 'Снимаю экран устройства…' : 'Снимка ещё нет' }}</p>
         <span v-if="pointer" class="pointer">{{ pointer.x }}, {{ pointer.y }}</span>
       </div>
 
-      <div class="row">
+      <div v-if="controlling" class="row">
         <input v-model="text" class="grow" placeholder="Ввести текст на устройстве" @keydown.enter="typeText" />
         <button :disabled="!text" @click="typeText">Ввести</button>
         <input v-model="combo" class="combo" placeholder="клавиши: ctrl+shift+s" @keydown.enter="pressCombo" />
         <button :disabled="!combo.trim()" @click="pressCombo">Нажать</button>
       </div>
-      <div class="row keys">
+      <div v-if="controlling" class="row keys">
         <button v-for="[title, k] in keys" :key="k" @click="send(['key', k])">{{ title }}</button>
       </div>
     </template>

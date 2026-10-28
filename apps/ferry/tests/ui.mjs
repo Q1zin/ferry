@@ -71,6 +71,18 @@ const fixtures = {
   install_update: 'ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
 }
 
+const runBase = { id: 'check-first', profile: 'smoke', created: 1792335600, finished_at: 1792335641, duration_seconds: 41, state: 'succeeded', worker_active: false, total: 1, succeeded: 1, devices: [{device:'win-10',state:'succeeded'}], summary:{tests:3,passed:3,failed:0,errors:0,skipped:0,artifacts:1} }
+const report = { ...runBase, results: [{device:'win-10',state:'succeeded',phases:[{name:'test',job:'test',run_id:'run-one',started:1792335600,finished_seen:1792335641,result:{exit_code:0,stdout:'<script>literal output</script>'}}],tests:runBase.summary,artifacts:[{id:'junit-1',name:'junit.xml',bytes:1024}],test_cases:{count:3,complete:true,preview:{cases:[{suite:['smoke'],class:'connection',name:'execution',state:'passed',duration_seconds:0.1}],more:2,complete:true}}}] }
+fixtures.dashboard = {
+  about: {read_only:false,web:false},
+  runs: {checks:[{...runBase,id:'check-second',state:'failed',duration_seconds:58,succeeded:0},runBase],next_cursor:null,errors:[]},
+  run: report,
+  compare: {comparable:true,regressions:[{identity:'suite:test',before:{state:'passed'},after:{state:'failed'}}],improvements:[],unchanged:2,errors:[]},
+  export: {archive_file:'/Downloads/ferry-reports/report.zip',complete:true,errors:[]},
+  setup_status: {cli_available:true,app_available:true,agents:[{id:'claude',available:true,skill_installed:false,mcp_configured:false,command:'ferry setup install claude'},{id:'codex',available:true,skill_installed:true,mcp_configured:true,command:'ferry setup install codex'}]},
+  setup_install: {installed:true},setup_smoke:{id:'smoke-first',state:'running'},
+}
+
 const server = createServer((req, res) => {
   const path = join(DIST, req.url === '/' ? 'index.html' : decodeURIComponent(req.url.split('?')[0]))
   if (!existsSync(path)) return res.writeHead(404).end()
@@ -109,6 +121,8 @@ try {
             return next
           }
           window.__calls.push([cmd, args])
+          if (cmd === 'dashboard') return fx.dashboard[args.request.action]
+          if (cmd === 'start_stream') { window.__stream = args.channel; return 42 }
           return cmd in fx ? fx[cmd] : null
         },
       }
@@ -184,16 +198,30 @@ try {
     const box = await img.boundingBox()
     await calls()
     const [cx, cy] = [Math.round(box.x + box.width * 0.5), Math.round(box.y + box.height * 0.25)]
-    const want = [Math.round(((cx - box.x) * 1366) / box.width), Math.round(((cy - box.y) * 768) / box.height)]
+    let want = [Math.round(((cx - box.x) * 1366) / box.width), Math.round(((cy - box.y) * 768) / box.height)]
     await page.mouse.click(cx, cy)
-    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'input'))
-    const [, click] = (await calls()).find(([c]) => c === 'input')
+    await page.waitForTimeout(300)
+    assert.equal((await calls()).filter(([c,a])=>c==='control_screen' && a.args?.length).length,0,'просмотр не должен вводить')
+    await page.getByRole('button',{name:'Живой экран',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c])=>c==='start_stream'))
+    await page.evaluate(()=>window.__stream.onmessage({frame:{jpeg:'',source_width:1366,source_height:768,origin_x:0,origin_y:0}}))
+    await page.getByRole('button',{name:'Живой экран',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='stop_stream' && a.token===42))
+    await page.getByRole('button',{name:'Обновить',exact:true}).click()
+    await page.waitForFunction(()=>document.querySelector('.frame img')?.naturalWidth>0)
+    await page.getByRole('button',{name:'Управлять',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='control_screen' && a.args?.length===0))
+    const activeBox=await img.boundingBox()
+    want=[Math.floor(((cx-activeBox.x)*1366)/activeBox.width),Math.floor(((cy-activeBox.y)*768)/activeBox.height)]
+    await page.mouse.click(cx, cy)
+    await page.waitForFunction(() => window.__calls.some(([c,a]) => c === 'control_screen' && a.args?.[0]==='click'))
+    const [, click] = (await calls()).find(([c,a]) => c === 'control_screen' && a.args?.[0]==='click')
     assert.equal(click.id, WIN)
     assert.equal(click.args[0], 'click')
     assert.ok(Math.abs(click.args[1] - want[0]) <= 1 && Math.abs(click.args[2] - want[1]) <= 1, `клик ${click.args}, ждали ${want}`)
     await page.getByPlaceholder('Ввести текст на устройстве').fill('Привет')
     await page.getByRole('button', { name: 'Ввести' }).click()
-    await page.waitForFunction(() => window.__calls.some(([c, a]) => c === 'input' && a.args[0] === 'type'))
+    await page.waitForFunction(() => window.__calls.some(([c, a]) => c === 'control_screen' && a.args?.[0] === 'type'))
     await fits('экран')
     await shot('screen')
 
@@ -275,6 +303,61 @@ try {
     await page.getByText('ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь', { exact: true }).waitFor()
     await fits('настройки')
     await shot('settings')
+
+    await page.getByRole('button',{name:'Прогоны',exact:true}).click()
+    await page.locator('.run-row').first().waitFor()
+    assert.equal(await page.locator('.run-row').count(),2)
+    await page.getByLabel('Поиск прогонов').fill('check-first')
+    assert.equal(await page.locator('.run-row').count(),1)
+    await page.getByLabel('Поиск прогонов').fill('')
+    await page.locator('.run-row').last().click()
+    await page.getByRole('article',{name:'Результаты прогона'}).waitFor()
+    await page.getByText('junit.xml',{exact:true}).waitFor()
+    await page.getByText('Тесты · 1 в предпросмотре',{exact:true}).click()
+    await page.getByText('execution',{exact:true}).waitFor()
+    await page.getByText('Ещё 2 тестов доступны в ZIP-отчёте.',{exact:true}).waitFor()
+    await page.getByText('Результат этапа',{exact:true}).click()
+    assert.equal(await page.locator('.run-detail script').count(),0)
+    await page.getByLabel('Базовый прогон').selectOption('check-second')
+    await page.getByRole('button',{name:'Сравнить',exact:true}).click()
+    await page.getByText('Сопоставимые testcase',{exact:true}).waitFor()
+    await page.getByRole('button',{name:'Скачать отчёт ZIP',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='dashboard' && a.request.action==='export' && a.request.id==='check-first'))
+    await fits('центр прогонов'); await shot('runs')
+    await page.getByRole('button',{name:'Подключить агента',exact:true}).click()
+    await page.getByRole('heading',{name:'Claude Code'}).waitFor()
+    await page.locator('.agent-option').first().getByRole('button',{name:'Настроить',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='dashboard' && a.request.action==='setup_install' && a.request.value==='claude'))
+    await page.getByLabel('Устройство первой проверки').selectOption('win-10')
+    await page.getByRole('button',{name:'Запустить проверку',exact:true}).click()
+    await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='dashboard' && a.request.action==='setup_smoke' && a.request.value==='win-10'))
+    await fits('онбординг'); await shot('onboarding')
+    await page.close()
+  }
+
+  {
+    const page=await browser.newPage({viewport:{width:390,height:844},colorScheme:'dark'})
+    page.on('pageerror',e=>failures.push(`web: ${e.message}`))
+    const calls=[]
+    await page.route('**/api',async route=>{
+      const request=route.request();assert.equal(request.headers().authorization,'Bearer web-test')
+      const body=request.postDataJSON();calls.push(body)
+      const value=body.action==='snapshot' ? snapshot : body.action==='about' ? {read_only:true,web:true} : fixtures.dashboard[body.action]
+      await route.fulfill({contentType:'application/json',body:JSON.stringify(value)})
+    })
+    await page.goto(url+'#token=web-test')
+    await page.locator('.tile').first().waitFor()
+    assert.equal(new URL(page.url()).hash,'','token must leave address bar')
+    assert.equal(await page.getByRole('button',{name:'Настройки'}).count(),0)
+    await page.getByRole('button',{name:'Прогоны',exact:true}).click()
+    await page.locator('.run-row').last().click()
+    await page.getByText('Панель открыта для просмотра.',{exact:false}).waitFor()
+    assert.equal(await page.getByRole('button',{name:'Отменить прогон',exact:true}).count(),0)
+    const [scroll,client]=await page.locator('main').evaluate(m=>[m.scrollWidth,m.clientWidth]);assert.ok(scroll<=client,'narrow web overflows')
+    if(SHOTS) await page.screenshot({path:join(SHOTS,'web-narrow.png')})
+    await page.getByRole('button',{name:'Подключить агента',exact:true}).click()
+    await page.getByRole('heading',{name:'Настройка на компьютере с ferry'}).waitFor()
+    assert.equal(calls.filter(c=>c.action.startsWith('setup')).length,0,'web must not install')
     await page.close()
   }
 
