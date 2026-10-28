@@ -202,6 +202,21 @@ impl Active {
                 }
             }
         }
+        for folder in ["captures", "workflows", "outputs"] {
+            for item in children(&state.join(folder))? {
+                if !fs::symlink_metadata(&item)?.is_dir() {
+                    continue;
+                }
+                let unfinished_capture = folder == "captures"
+                    && json_file(&item.join("report.json")).map_or(true, |r| {
+                        !matches!(r["state"].as_str(), Some("completed" | "failed"))
+                    });
+                if locked(&item.join("worker.lock"))? || unfinished_capture {
+                    active.running = true;
+                    active.checks.push(item);
+                }
+            }
+        }
         for workspace in children(&home.join("ferry"))? {
             if let Some(name) = workspace.file_name()
                 && locked(&state.join("workspace-locks").join(name))?
@@ -227,7 +242,7 @@ impl Active {
             .iter()
             .any(|p| path.starts_with(p) || p.starts_with(path))
         {
-            return Some("незавершённая проверка: сначала check resume/cancel".into());
+            return Some("активная операция или незавершённая проверка/запись".into());
         }
         if kind == Kind::Runners && self.running {
             return Some("есть активные задачи или проверки".into());
@@ -252,7 +267,8 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
             .into(),
         );
     }
-    if matches!(kind, Kind::Caches | Kind::Outputs)
+    if (kind == Kind::Caches
+        || (kind == Kind::Outputs && path.components().any(|c| c.as_os_str() == ".ferry-checks")))
         && let Some(reason) = source_protection(path, kind)
     {
         protected = Some(reason);
@@ -398,6 +414,9 @@ fn inventory(state: &Path, home: &Path) -> io::Result<Vec<Unit>> {
         ("shots", Kind::Shots),
         ("observations", Kind::Observations),
         ("recs", Kind::Recordings),
+        ("captures", Kind::Recordings),
+        ("workflows", Kind::Diagnostics),
+        ("outputs", Kind::Outputs),
         ("checks", Kind::Checks),
         ("diagnostics", Kind::Diagnostics),
         ("runners", Kind::Runners),
@@ -702,6 +721,42 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn new_controller_outputs_stay_protected_until_workers_finish() {
+        let (root, state, home) = fixture();
+        for (folder, kind) in [
+            ("captures", Kind::Recordings),
+            ("workflows", Kind::Diagnostics),
+            ("outputs", Kind::Outputs),
+        ] {
+            let item = state.join(folder).join("own-fixture");
+            fs::create_dir_all(&item).unwrap();
+            fs::write(item.join("report.json"), "{\"state\":\"completed\"}").unwrap();
+            let guard = lock(&item.join("worker.lock")).unwrap();
+            guard.lock().unwrap();
+            old(&item);
+            assert!(
+                execute(&state, &home, request(kind)).unwrap()["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(guard);
+            let preview = execute(&state, &home, request(kind)).unwrap();
+            assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+            if folder == "captures" {
+                fs::write(item.join("report.json"), "{\"state\":\"recording\"}").unwrap();
+                old(&item);
+                assert!(
+                    execute(&state, &home, request(kind)).unwrap()["candidates"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)]
