@@ -55,6 +55,8 @@ pub(super) struct Target {
     pub cleanup_pending: bool,
     pub outcome: Option<String>,
     pub deadline: Option<u64>,
+    #[serde(default)]
+    pub finished_at: Option<u64>,
     pub row: Value,
 }
 
@@ -138,6 +140,8 @@ pub(super) fn report(root: &Path) -> Result<Value, Fail> {
         let mut row = target.row;
         row["state"] = target.state.into();
         row["phases"] = json!(target.phases);
+        row["finished_at"] = json!(target.finished_at);
+        row["duration_seconds"] = json!(target.finished_at.map(|at| at.saturating_sub(op.created)));
         row["cleanup_pending"] = target.cleanup_pending.into();
         if let Some(source) = target.source {
             row["source"] = source;
@@ -159,8 +163,11 @@ pub(super) fn report(root: &Path) -> Result<Value, Fail> {
         "failed"
     };
     let worker = read::<Value>(&root.join("worker.json")).ok();
+    let finished_at = (!pending && rows.iter().all(|r| r["finished_at"].is_u64()))
+        .then(|| rows.iter().filter_map(|r| r["finished_at"].as_u64()).max())
+        .flatten();
     Ok(
-        json!({"id":op.id,"profile":op.profile_name,"state":state,"worker_active":active,"worker":worker,"cancel_requested":cancelled,"succeeded":succeeded,"total":rows.len(),"results":rows,"report_file":root.join("report.json"),"journal":root.join("operation.json")}),
+        json!({"schema_version":1,"id":op.id,"profile":op.profile_name,"created":op.created,"finished_at":finished_at,"duration_seconds":finished_at.map(|at|at.saturating_sub(op.created)),"project":op.project,"isolated":op.isolated,"state":state,"worker_active":active,"worker":worker,"cancel_requested":cancelled,"succeeded":succeeded,"total":rows.len(),"results":rows,"report_file":root.join("report.json"),"journal":root.join("operation.json")}),
     )
 }
 
