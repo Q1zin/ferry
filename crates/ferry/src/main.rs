@@ -4,6 +4,7 @@ mod agent_tools;
 mod checks;
 mod capture;
 mod workflows;
+mod queue;
 mod devices;
 mod diagnostics;
 mod execution;
@@ -253,6 +254,7 @@ fn main() {
         ["check", rest @ ..] => checks::run(rest),
         ["capture", rest @ ..] => capture::run(rest),
         ["workflow", rest @ ..] => workflows::run(rest),
+        ["queue", rest @ ..] => queue::run(rest),
         ["diagnose", rest @ ..] => diagnostics::run(rest),
         ["act", rest @ ..] => agent_tools::act(rest),
         ["history", rest @ ..] => agent_tools::history(rest),
@@ -388,10 +390,21 @@ fn job_result(args: &[&str]) -> io::Result<i32> {
 
 /// `run <цели> [--desk] [--no-sync] [--] <команда>`: флаги — только до команды.
 fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
+    let mut grouped = false;
+    let mut device = None;
     let mut shell = ferry_core::desk::Shell::Default;
     let (mut desk, mut sync, mut home) = (false, true, false);
     loop {
         match rest.first() {
+            Some(&"--grouped") => grouped = true,
+            Some(&"--device") => {
+                device = Some(
+                    *rest
+                        .get(1)
+                        .ok_or_else(|| io::Error::other("--device требует имя"))?,
+                );
+                rest = &rest[1..];
+            }
             Some(&"--desk") => desk = true,
             Some(&"--no-sync") => sync = false,
             Some(&"--home") => home = true,
@@ -413,7 +426,15 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
     if rest.is_empty() {
         return usage();
     }
-    devices::run(spec, desk, sync, home, &rest.join(" "), shell)
+    devices::run_with_output(
+        spec,
+        desk,
+        sync,
+        home,
+        &rest.join(" "),
+        shell,
+        devices::OutputOptions { grouped, device },
+    )
 }
 
 /// `start <цели> <имя> [--no-sync] [--] <команда>`.
@@ -527,18 +548,30 @@ fn wait(device: &str, mut rest: &[&str]) -> io::Result<i32> {
 }
 
 /// `logs [<цели>] [-n <строк>]`.
-fn logs(rest: &[&str]) -> io::Result<i32> {
-    let (spec, lines) = match rest {
-        [] => (None, "100"),
-        ["-n", n] => (None, *n),
-        [spec] => (Some(*spec), "100"),
-        [spec, "-n", n] => (Some(*spec), *n),
-        _ => return usage(),
-    };
-    match lines.parse() {
-        Ok(lines) => devices::logs(spec, lines),
-        Err(_) => usage(),
+fn logs(mut rest: &[&str]) -> io::Result<i32> {
+    let mut spec = None;
+    let mut lines = 100;
+    while !rest.is_empty() {
+        match rest {
+            ["--device", name, tail @ ..] if spec.is_none() => {
+                spec = Some(*name);
+                rest = tail;
+            }
+            ["-n", n, tail @ ..] => {
+                lines = n.parse().map_err(io::Error::other)?;
+                rest = tail;
+            }
+            [name, tail @ ..] if spec.is_none() && !name.starts_with('-') => {
+                spec = Some(*name);
+                rest = tail;
+            }
+            _ => return usage(),
+        }
     }
+    if lines > 10000 {
+        return Err(io::Error::other("logs: максимум 10000 строк"));
+    }
+    devices::logs(spec, lines)
 }
 
 /// `ferry skill`: скилл едет внутри CLI — ставится туда, где его найдёт Claude Code.

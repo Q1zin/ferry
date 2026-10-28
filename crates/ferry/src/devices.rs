@@ -5,6 +5,8 @@
 //! целях команда идёт параллельно, строки вывода подписаны `[устройство]`, код выхода — первый
 //! ненулевой по порядку целей.
 
+mod grouped;
+
 use ferry_core::desk::Shell;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -86,11 +88,30 @@ fn targets(spec: &str, any_role: bool) -> Result<Vec<String>, Fail> {
     Ok(names)
 }
 
+fn filtered_targets(spec: &str, filter: Option<&str>) -> Result<Vec<String>, Fail> {
+    let names = targets(spec, false)?;
+    if names.len() > 64 {
+        return Err(Fail::new("run: не более 64 устройств"));
+    }
+    let Some(filter) = filter else {
+        return Ok(names);
+    };
+    let selected = targets(filter, false)?;
+    let names: Vec<_> = names
+        .into_iter()
+        .filter(|name| selected.contains(name))
+        .collect();
+    if names.is_empty() {
+        return Err(Fail::new("--device не совпадает с выбранными устройствами"));
+    }
+    Ok(names)
+}
 /// Вывод одной цели: как есть или строками с подписью устройства.
 struct Printer {
     prefix: Option<String>,
     out: Mutex<Vec<u8>>,
     err: Mutex<Vec<u8>>,
+    spool: Option<Mutex<grouped::Spool>>,
 }
 
 /// Строки разных устройств не перемешиваются внутри строки.
@@ -102,7 +123,22 @@ impl Printer {
             prefix: prefix.map(|p| format!("[{p}] ")),
             out: Mutex::default(),
             err: Mutex::default(),
+            spool: None,
         }
+    }
+
+    fn spooled(path: &Path) -> io::Result<Self> {
+        Ok(Self {
+            prefix: None,
+            out: Mutex::default(),
+            err: Mutex::default(),
+            spool: Some(Mutex::new(grouped::Spool::new(path)?)),
+        })
+    }
+    fn check(&self) -> Result<(), Fail> {
+        self.spool
+            .as_ref()
+            .map_or(Ok(()), |spool| spool.lock().unwrap().check())
     }
 
     fn out(&self, data: &[u8]) {
@@ -118,6 +154,10 @@ impl Printer {
     }
 
     fn write(&self, data: &[u8], err: bool) {
+        if let Some(spool) = &self.spool {
+            spool.lock().unwrap().write(data, err);
+            return;
+        }
         let Some(prefix) = &self.prefix else {
             let _ = if err {
                 io::stderr().write_all(data)
@@ -140,6 +180,11 @@ impl Printer {
         while let Some(end) = buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = buffer.drain(..=end).collect();
             emit(prefix, &line, err);
+        }
+        // Commands without line breaks must not retain an unbounded buffer.
+        if buffer.len() >= 16384 {
+            emit(prefix, &buffer, err);
+            buffer.clear();
         }
     }
 
@@ -182,7 +227,13 @@ fn each_of(
         Ok(names) => names,
         Err(fail) => return finish(Err(fail)),
     };
-    if let [name] = names.as_slice() {
+    each_names(&names, job)
+}
+fn each_names(
+    names: &[String],
+    job: impl Fn(&str, &Printer) -> Result<i32, Fail> + Sync,
+) -> io::Result<i32> {
+    if let [name] = names {
         return finish(job(name, &Printer::new(None)));
     }
     let codes: Vec<i32> = std::thread::scope(|s| {
@@ -273,8 +324,14 @@ fn sync_one(device: &str, project: &Project, printer: &Printer) -> Result<(), Fa
 fn stream(request: Request, printer: &Printer) -> Result<i32, Fail> {
     for response in control::open(request)? {
         match response? {
-            Response::Out(data) => printer.out(&data),
-            Response::Err(data) => printer.err(&data),
+            Response::Out(data) => {
+                printer.out(&data);
+                printer.check()?;
+            }
+            Response::Err(data) => {
+                printer.err(&data);
+                printer.check()?;
+            }
             Response::Exit(code) => return Ok(code),
             Response::Error(fail) => return Err(fail),
             _ => return Err(unexpected()),
@@ -477,19 +534,29 @@ pub fn forget(device: &str) -> io::Result<i32> {
 
 /// `ferry run <цели> [--desk] [--no-sync] -- <команда>`: снимок проекта на цели, затем команда
 /// в том же подкаталоге проекта (или в доме, если мы не в репозитории).
-pub fn run(
+#[derive(Default)]
+pub struct OutputOptions<'a> {
+    pub grouped: bool,
+    pub device: Option<&'a str>,
+}
+pub fn run_with_output(
     spec: &str,
     desk: bool,
     sync: bool,
     home: bool,
     cmd: &str,
     shell: Shell,
+    options: OutputOptions<'_>,
 ) -> io::Result<i32> {
     let project = match project(sync, home) {
         Ok(project) => project,
         Err(fail) => return finish(Err(fail)),
     };
-    each(spec, |device, printer| {
+    let names = match filtered_targets(spec, options.device) {
+        Ok(names) => names,
+        Err(e) => return finish(Err(e)),
+    };
+    let job = |device: &str, printer: &Printer| {
         if let Some(project) = &project {
             sync_one(device, project, printer)?;
         }
@@ -511,7 +578,12 @@ pub fn run(
             }
         };
         stream(request, printer)
-    })
+    };
+    if options.grouped {
+        grouped::each(&names, job)
+    } else {
+        each_names(&names, job)
+    }
 }
 
 /// `ferry sync <цели>`.
