@@ -1117,7 +1117,7 @@ mod screen_stream_tests {
             "a disconnected native call must retain its slot"
         );
         release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), SLOTS.acquire())
+        let _permit = tokio::time::timeout(Duration::from_secs(1), SLOTS.acquire())
             .await
             .unwrap()
             .unwrap();
