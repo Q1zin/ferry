@@ -2,6 +2,8 @@ use std::io;
 
 mod agent_tools;
 mod checks;
+mod capture;
+mod workflows;
 mod devices;
 mod diagnostics;
 mod execution;
@@ -249,6 +251,8 @@ fn main() {
         ["jobs", spec, "--json"] => devices::jobs(spec, true),
         ["jobs", spec] => devices::jobs(spec, false),
         ["check", rest @ ..] => checks::run(rest),
+        ["capture", rest @ ..] => capture::run(rest),
+        ["workflow", rest @ ..] => workflows::run(rest),
         ["diagnose", rest @ ..] => diagnostics::run(rest),
         ["act", rest @ ..] => agent_tools::act(rest),
         ["history", rest @ ..] => agent_tools::history(rest),
