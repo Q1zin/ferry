@@ -119,6 +119,18 @@ fn cli(args: &[String]) -> io::Result<Value> {
     }
 }
 
+fn dashboard_snapshot(state: Value) -> Value {
+    // Expose only fleet fields. Activity can reveal who asked a human for help and when.
+    json!({
+        "id": state["id"],
+        "me": state["me"],
+        "peers": state["peers"],
+        "pairing": null,
+        "lan": [],
+        "activity": []
+    })
+}
+
 fn execute(request: Request, web: bool, actions: bool) -> io::Result<Value> {
     request.validate(web, actions)?;
     let id = request.id.unwrap_or_default();
@@ -135,11 +147,9 @@ fn execute(request: Request, web: bool, actions: bool) -> io::Result<Value> {
             let control::Response::State(state) = response else {
                 return Err(io::Error::other("нет состояния приложения ferry"));
             };
-            let mut value = serde_json::to_value(state).map_err(io::Error::other)?;
-            // Pairing tickets and human questions never belong in the web dashboard.
-            value["pairing"] = Value::Null;
-            value["lan"] = json!([]);
-            return Ok(value);
+            return Ok(dashboard_snapshot(
+                serde_json::to_value(state).map_err(io::Error::other)?,
+            ));
         }
         "runs" => {
             let mut args = vec!["check".into(), "list".into(), "--limit".into(), "50".into()];
@@ -269,6 +279,27 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dashboard_snapshot_excludes_activity_and_private_metadata() {
+        let state = json!({
+            "id":"hub",
+            "me":{"name":"Mac","mode":"active"},
+            "peers":[{"id":"node","name":"Windows","online":true}],
+            "pairing":{"code":"fixture-code","ticket":"fixture-ticket"},
+            "lan":[{"name":"unpaired-device"}],
+            "activity":[{"at":123,"who":"agent:fixture","what":"вопрос человеку","desk":false}],
+            "questions":[{"text":"private fixture question"}]
+        });
+        let visible = dashboard_snapshot(state.clone());
+        assert_eq!(
+            visible,
+            json!({
+                "id":state["id"],"me":state["me"],"peers":state["peers"],
+                "pairing":null,"lan":[],"activity":[]
+            })
+        );
+    }
+
     #[test]
     fn dashboard_never_accepts_shell_or_setup_from_browser() {
         for action in [
