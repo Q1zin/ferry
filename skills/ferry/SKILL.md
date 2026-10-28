@@ -239,7 +239,7 @@ Action={"click":{"name":"Save"}}|{"key":"ctrl+s"}|{"type":"Hello"}; без actio
 дерево или локатор не подтверждают результат.
 
 Запись: `capture start DEVICE --job JOB --run RUN --window EXACT --id UNIQUE --fps 10
---max-seconds 300`, затем `capture status|stop ID`. Нужен ffmpeg на пульте; автоматически не устанавливается. Связана с точным
+--max-seconds 300`, затем `capture status|stop ID`. Нужен FFmpeg 5.1+ с libx264 на пульте; автоматически не устанавливается. Связана с точным
 живым run и его окном; пределы — 128 МиБ кадров + 128 МиБ видео / 18 000 кадров. Потеря связи,
 окна и 20 секунд без кадров дают частичный failed. MP4 и manifest содержат исходные временные
 метки. Для check: record={"window":"My App {run}","fps":10,"max_seconds":300}, только
