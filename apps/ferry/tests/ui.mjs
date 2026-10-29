@@ -75,7 +75,7 @@ const runBase = { id: 'check-first', profile: 'smoke', created: 1792335600, fini
 const report = { ...runBase, results: [{device:'win-10',state:'succeeded',phases:[{name:'test',job:'test',run_id:'run-one',started:1792335600,finished_seen:1792335641,result:{exit_code:0,stdout:'<script>literal output</script>'}}],tests:runBase.summary,artifacts:[{id:'junit-1',name:'junit.xml',bytes:1024}],test_cases:{count:3,complete:true,preview:{cases:[{suite:['smoke'],class:'connection',name:'execution',state:'passed',duration_seconds:0.1}],more:2,complete:true}}}] }
 fixtures.dashboard = {
   about: {read_only:false,web:false},
-  runs: {checks:[{...runBase,id:'check-second',state:'failed',duration_seconds:58,succeeded:0},runBase],next_cursor:null,errors:[]},
+  runs: {checks:[{...runBase,id:'check-second',state:'failed',duration_seconds:58,succeeded:0},runBase],next_cursor:null,legacy_count:53,errors:Array.from({length:75},(_,index)=>`warning-${index+1}: не удалось прочитать повреждённую запись истории`)},
   run: report,
   compare: {comparable:true,regressions:[{identity:'suite:test',before:{state:'passed'},after:{state:'failed'}}],improvements:[],unchanged:2,errors:[]},
   export: {archive_file:'/Downloads/ferry-reports/report.zip',complete:true,errors:[]},
@@ -121,7 +121,14 @@ try {
             return next
           }
           window.__calls.push([cmd, args])
-          if (cmd === 'dashboard') return fx.dashboard[args.request.action]
+          if (cmd === 'dashboard') {
+            if (args.request.action === 'run') {
+              const result={...fx.dashboard.run,id:args.request.id}
+              if(window.__deferRuns) return new Promise(resolve=>(window.__pendingRuns ??= []).push(()=>resolve(result)))
+              return result
+            }
+            return fx.dashboard[args.request.action]
+          }
           if (cmd === 'start_stream') { window.__stream = args.channel; return 42 }
           return cmd in fx ? fx[cmd] : null
         },
@@ -307,10 +314,52 @@ try {
     await page.getByRole('button',{name:'Прогоны',exact:true}).click()
     await page.locator('.run-row').first().waitFor()
     assert.equal(await page.locator('.run-row').count(),2)
+    const historyWarnings=page.locator('.history-warnings')
+    assert.equal(await historyWarnings.getAttribute('open'),null)
+    assert.ok((await historyWarnings.boundingBox()).height<100,'замечания не должны занимать весь экран')
+    assert.equal(await historyWarnings.locator('li').count(),25,'детали ограничены одной страницей')
+    await page.getByText('Старые отчёты: 53.',{exact:false}).waitFor()
+    await historyWarnings.locator('summary').click()
+    const warningBounds=await historyWarnings.locator('ul').boundingBox()
+    assert.ok(warningBounds.height<=220,'подробности истории должны прокручиваться')
+    await historyWarnings.getByRole('button',{name:'Следующие замечания'}).click()
+    await historyWarnings.getByRole('button',{name:'Следующие замечания'}).click()
+    await historyWarnings.getByText('warning-75:',{exact:false}).scrollIntoViewIfNeeded()
+    assert.ok(await historyWarnings.getByRole('button',{name:'Следующие замечания'}).isDisabled())
+    assert.equal(await historyWarnings.locator('li').count(),25)
+    await fits('подробности замечаний'); await shot('history-warnings')
+    await historyWarnings.locator('summary').click()
     await page.getByLabel('Поиск прогонов').fill('check-first')
     assert.equal(await page.locator('.run-row').count(),1)
     await page.getByLabel('Поиск прогонов').fill('')
-    await page.locator('.run-row').last().click()
+    const firstRun=page.locator('.run-row').first(), secondRun=page.locator('.run-row').last()
+    // Поздний ответ закрытого accordion не должен сам открыть его снова.
+    await page.evaluate(()=>{window.__deferRuns=true})
+    await firstRun.click()
+    await page.waitForFunction(()=>window.__pendingRuns?.length===1)
+    await firstRun.click()
+    await page.evaluate(async()=>{window.__deferRuns=false;window.__pendingRuns.shift()();await new Promise(requestAnimationFrame)})
+    assert.equal(await page.locator('.run-detail').count(),0)
+    assert.equal(await firstRun.getAttribute('aria-expanded'),'false')
+    // Стандартный button поддерживает Enter и Space; panel — непосредственно под своей строкой.
+    await firstRun.focus(); await page.keyboard.press('Enter')
+    await page.locator('.run-detail .eyebrow').filter({hasText:'check-second'}).waitFor()
+    assert.equal(await firstRun.getAttribute('aria-expanded'),'true')
+    assert.equal(await firstRun.getAttribute('aria-controls'),'run-details-check-second')
+    assert.ok(await page.locator('.run-detail').evaluate(el=>el.previousElementSibling?.id==='run-trigger-check-second' && el.parentElement.nextElementSibling?.querySelector('.run-row')?.id==='run-trigger-check-first'))
+    await firstRun.focus(); await page.keyboard.press('Space')
+    assert.equal(await page.locator('.run-detail').count(),0)
+    await firstRun.click()
+    await page.locator('.run-detail .eyebrow').filter({hasText:'check-second'}).waitFor()
+    await secondRun.click()
+    await page.locator('.run-detail .eyebrow').filter({hasText:'check-first'}).waitFor()
+    assert.equal(await page.locator('.run-detail').count(),1)
+    assert.equal(await firstRun.getAttribute('aria-expanded'),'false')
+    assert.ok(await page.locator('.run-detail').evaluate(el=>el.previousElementSibling?.id==='run-trigger-check-first'))
+    await page.getByRole('button',{name:'Закрыть результаты'}).click()
+    assert.equal(await page.locator('.run-detail').count(),0)
+    assert.equal(await page.evaluate(()=>document.activeElement.id),'run-trigger-check-first')
+    await secondRun.click()
     await page.getByRole('article',{name:'Результаты прогона'}).waitFor()
     await page.getByText('junit.xml',{exact:true}).waitFor()
     await page.getByText('Тесты · 1 в предпросмотре',{exact:true}).click()
@@ -323,7 +372,8 @@ try {
     await page.getByText('Сопоставимые testcase',{exact:true}).waitFor()
     await page.getByRole('button',{name:'Скачать отчёт ZIP',exact:true}).click()
     await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='dashboard' && a.request.action==='export' && a.request.id==='check-first'))
-    await fits('центр прогонов'); await shot('runs')
+    await secondRun.scrollIntoViewIfNeeded()
+    await fits('центр прогонов'); await shot('runs-inline')
     await page.getByRole('button',{name:'Подключить агента',exact:true}).click()
     await page.getByRole('heading',{name:'Claude Code'}).waitFor()
     await page.locator('.agent-option').first().getByRole('button',{name:'Настроить',exact:true}).click()
@@ -342,7 +392,7 @@ try {
     await page.route('**/api',async route=>{
       const request=route.request();assert.equal(request.headers().authorization,'Bearer web-test')
       const body=request.postDataJSON();calls.push(body)
-      const value=body.action==='snapshot' ? snapshot : body.action==='about' ? {read_only:true,web:true} : fixtures.dashboard[body.action]
+      const value=body.action==='snapshot' ? snapshot : body.action==='about' ? {read_only:true,web:true} : body.action==='run' ? {...fixtures.dashboard.run,id:body.id} : fixtures.dashboard[body.action]
       await route.fulfill({contentType:'application/json',body:JSON.stringify(value)})
     })
     await page.goto(url+'#token=web-test')
@@ -350,9 +400,13 @@ try {
     assert.equal(new URL(page.url()).hash,'','token must leave address bar')
     assert.equal(await page.getByRole('button',{name:'Настройки'}).count(),0)
     await page.getByRole('button',{name:'Прогоны',exact:true}).click()
-    await page.locator('.run-row').last().click()
+    await page.locator('.run-row').first().click()
     await page.getByText('Панель открыта для просмотра.',{exact:false}).waitFor()
     assert.equal(await page.getByRole('button',{name:'Отменить прогон',exact:true}).count(),0)
+    assert.equal(await page.locator('.history-warnings').getAttribute('open'),null)
+    assert.ok((await page.locator('.history-warnings').boundingBox()).height<120)
+    assert.ok(await page.locator('.run-detail').evaluate(el=>el.previousElementSibling?.id==='run-trigger-check-second'))
+    await page.locator('.run-row').first().scrollIntoViewIfNeeded()
     const [scroll,client]=await page.locator('main').evaluate(m=>[m.scrollWidth,m.clientWidth]);assert.ok(scroll<=client,'narrow web overflows')
     if(SHOTS) await page.screenshot({path:join(SHOTS,'web-narrow.png')})
     await page.getByRole('button',{name:'Подключить агента',exact:true}).click()
