@@ -75,7 +75,7 @@ const runBase = { id: 'check-first', profile: 'smoke', created: 1792335600, fini
 const report = { ...runBase, results: [{device:'win-10',state:'succeeded',phases:[{name:'test',job:'test',run_id:'run-one',started:1792335600,finished_seen:1792335641,result:{exit_code:0,stdout:'<script>literal output</script>'}}],tests:runBase.summary,artifacts:[{id:'junit-1',name:'junit.xml',bytes:1024}],test_cases:{count:3,complete:true,preview:{cases:[{suite:['smoke'],class:'connection',name:'execution',state:'passed',duration_seconds:0.1}],more:2,complete:true}}}] }
 fixtures.dashboard = {
   about: {read_only:false,web:false},
-  runs: {checks:[{...runBase,id:'check-second',state:'failed',duration_seconds:58,succeeded:0},runBase],next_cursor:null,legacy_count:53,errors:Array.from({length:75},(_,index)=>`warning-${index+1}: не удалось прочитать повреждённую запись истории`)},
+  runs: {checks:[{...runBase,id:'check-second',state:'failed',duration_seconds:58,succeeded:0,devices:[{device:OLD,state:'failed'}]},runBase],next_cursor:null,legacy_count:53,errors:Array.from({length:75},(_,index)=>`warning-${index+1}: не удалось прочитать повреждённую запись истории`)},
   run: report,
   compare: {comparable:true,regressions:[{identity:'suite:test',before:{state:'passed'},after:{state:'failed'}}],improvements:[],unchanged:2,errors:[]},
   export: {archive_file:'/Downloads/ferry-reports/report.zip',complete:true,errors:[]},
@@ -406,6 +406,7 @@ try {
     assert.equal(await page.locator('.history-warnings').getAttribute('open'),null)
     assert.ok((await page.locator('.history-warnings').boundingBox()).height<120)
     assert.ok(await page.locator('.run-detail').evaluate(el=>el.previousElementSibling?.id==='run-trigger-check-second'))
+    assert.ok((await page.locator('.run-row').first().innerText()).includes(OLD),'full device ID stays visible')
     await page.locator('.run-row').first().scrollIntoViewIfNeeded()
     const [scroll,client]=await page.locator('main').evaluate(m=>[m.scrollWidth,m.clientWidth]);assert.ok(scroll<=client,'narrow web overflows')
     if(SHOTS) await page.screenshot({path:join(SHOTS,'web-narrow.png')})
