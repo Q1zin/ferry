@@ -694,6 +694,13 @@ impl Agent {
     ) -> Result<String, Fail> {
         self.inner.node.storage(request, false).await
     }
+
+    pub async fn capabilities_self(
+        &self,
+        request: ferry_core::capabilities::Request,
+    ) -> Result<ferry_core::capabilities::Capabilities, Fail> {
+        self.inner.node.capabilities(request).await
+    }
     pub async fn human_self(
         &self,
         request: ferry_core::human::Request,

@@ -240,25 +240,22 @@ fn preflight(
     let request = ferry_core::capabilities::Request {
         shell: spec.shell,
         tools: spec.tools.clone(),
-        desktop: p.window.is_some() || p.ready_window.is_some(),
+        desktop: !p.headless,
     };
-    let cap = match device {
-        Some(d) => match send(
-            Request::Capabilities {
-                device: d.clone(),
-                request,
-            },
-            session,
-        )? {
-            Response::Capabilities(c) => c,
-            _ => return Err(Fail::new("нет возможностей устройства")),
+    let cap = match send(
+        Request::Capabilities {
+            device: device.as_deref().unwrap_or("local").into(),
+            request,
         },
-        None => ferry_core::capabilities::collect(request)?,
+        session,
+    )? {
+        Response::Capabilities(c) => c,
+        _ => return Err(Fail::new("нет возможностей устройства")),
     };
     if !cap.shell_available
         || !cap.missing_tools.is_empty()
         || !cap.warnings.is_empty()
-        || (p.window.is_some() && cap.locked != Some(false))
+        || (!p.headless && cap.locked != Some(false))
     {
         return Err(Fail::new(format!(
             "устройство не готово: {}",

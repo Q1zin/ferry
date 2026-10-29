@@ -770,9 +770,11 @@ async fn answer(
             Some(who) => agent.device(&who)?.evidence(query).await?,
             None => agent.evidence_self(query).await?,
         }),
-        Request::Capabilities { device, request } => {
-            Response::Capabilities(agent.device(&device)?.capabilities(request).await?)
-        }
+        Request::Capabilities { device, request } => Response::Capabilities(if device == "local" {
+            agent.capabilities_self(request).await?
+        } else {
+            agent.device(&device)?.capabilities(request).await?
+        }),
         Request::JobResult {
             device,
             name,
@@ -1043,6 +1045,68 @@ fn save_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_capabilities_use_the_agent_and_preserve_role_mode_guards() {
+        let dir = std::env::temp_dir().join(format!(
+            "ferry-local-capabilities-{}",
+            ferry_core::jobs::unique_id()
+        ));
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        let agent = Agent::start(crate::Options {
+            internet: false,
+            lan: false,
+            home: dir.join("home"),
+            port: None,
+            ..crate::Options::new(dir.clone())
+        })
+        .await
+        .unwrap();
+        let sessions = std::sync::Arc::new(Sessions::default());
+        let request = || Request::Capabilities {
+            device: "local".into(),
+            request: ferry_core::capabilities::Request {
+                shell: if cfg!(windows) {
+                    ferry_core::desk::Shell::Cmd
+                } else {
+                    ferry_core::desk::Shell::Bash
+                },
+                tools: vec!["ferry_absent_control_fixture_7301".into()],
+                // Permission checks belong to native acceptance, never unit-test TCC prompts.
+                desktop: false,
+            },
+        };
+        for mode in [crate::Mode::Active, crate::Mode::NoDesktop] {
+            agent.set_mode(mode).unwrap();
+            let response = answer(&agent, request(), "", &sessions).await.unwrap();
+            let Answer::Once(response) = response else {
+                panic!("local capabilities must return one response");
+            };
+            let Response::Capabilities(capabilities) = *response else {
+                panic!("local capabilities must return through the control response");
+            };
+            assert!(capabilities.shell_available);
+            assert_eq!(
+                capabilities.missing_tools,
+                ["ferry_absent_control_fixture_7301"]
+            );
+            assert!(capabilities.warnings.is_empty());
+            assert_eq!(capabilities.locked, None);
+        }
+        agent.set_mode(crate::Mode::Paused).unwrap();
+        let Err(paused) = answer(&agent, request(), "", &sessions).await else {
+            panic!("paused local agent must refuse capability execution");
+        };
+        assert_eq!(paused.code, ferry_core::mode::REFUSED);
+        agent.set_mode(crate::Mode::Active).unwrap();
+        agent.set_role(None, crate::Role::Console).await.unwrap();
+        let Err(console) = answer(&agent, request(), "", &sessions).await else {
+            panic!("console-only local agent must refuse capability execution");
+        };
+        assert_eq!(console.code, ferry_core::mode::REFUSED);
+        agent.shutdown().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn log_follow_resumes_after_the_device_comes_back() {
