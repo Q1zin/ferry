@@ -17,6 +17,70 @@ fn summary(report: &Value) -> Value {
         "artifacts":rows.iter().filter_map(|r|r["artifacts"].as_array()).map(Vec::len).sum::<usize>()}})
 }
 
+fn legacy_snapshot(path: &Path) -> Result<bool, Fail> {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Ok(false);
+    };
+    let Some((pid, nanos)) = name.split_once('-') else {
+        return Ok(false);
+    };
+    if pid.parse::<u32>().is_err()
+        || nanos.parse::<u128>().is_err()
+        || !pid.bytes().chain(nanos.bytes()).all(|b| b.is_ascii_digit())
+    {
+        return Ok(false);
+    }
+    // Before durable checks, diagnostics::save wrote only report.json and an optional image.
+    let mut has_report = false;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            return Ok(false);
+        }
+        match entry.file_name().to_str() {
+            Some("report.json") => has_report = true,
+            Some("window.png") => {}
+            _ => return Ok(false),
+        }
+    }
+    if !has_report {
+        return Ok(false);
+    }
+    let report: Value = journal::read(&path.join("report.json"))?;
+    if ["id", "schema_version", "journal", "worker", "worker_active"]
+        .iter()
+        .any(|k| report.get(k).is_some())
+    {
+        return Ok(false);
+    }
+    let state = report["state"].as_str();
+    let row = report["profile"].is_string()
+        && report["device"].is_string()
+        && report["job"].is_string()
+        && report["output_directory"].is_string()
+        && report["errors"].is_array()
+        && matches!(
+            state,
+            Some("succeeded" | "failed" | "unavailable" | "incomplete")
+        );
+    let matrix = report["profile"].is_string()
+        && matches!(state, Some("succeeded" | "failed"))
+        && report["total"]
+            .as_u64()
+            .zip(report["succeeded"].as_u64())
+            .is_some_and(|(total, succeeded)| {
+                succeeded <= total
+                    && report["results"]
+                        .as_array()
+                        .is_some_and(|rows| rows.len() as u64 == total)
+            });
+    let panic_row = report.as_object().is_some_and(|r| r.len() == 3)
+        && (report["device"].is_string() || report.get("device").is_some_and(Value::is_null))
+        && state == Some("incomplete")
+        && report["errors"].is_array();
+    Ok(row || matrix || panic_row)
+}
+
 fn listing(parent: &Path, limit: usize, before: Option<&str>) -> Result<Value, Fail> {
     let before = before
         .map(|s| {
@@ -30,6 +94,7 @@ fn listing(parent: &Path, limit: usize, before: Option<&str>) -> Result<Value, F
     let mut entries = Vec::new();
     let mut errors = Vec::new();
     let mut scan_truncated = false;
+    let mut legacy_count = 0usize;
     let started = Instant::now();
     if parent.exists() {
         for (index, entry) in fs::read_dir(parent)?.enumerate() {
@@ -52,8 +117,16 @@ fn listing(parent: &Path, limit: usize, before: Option<&str>) -> Result<Value, F
                 }
                 Ok(_) => {}
                 Err(e) => {
+                    let error = match legacy_snapshot(&path) {
+                        Ok(true) => {
+                            legacy_count += 1;
+                            continue;
+                        }
+                        Ok(false) => e.to_string(),
+                        Err(legacy) => format!("legacy report: {legacy}"),
+                    };
                     if errors.len() < 50 {
-                        errors.push(format!("{}: {e}", entry.file_name().to_string_lossy()));
+                        errors.push(format!("{}: {error}", entry.file_name().to_string_lossy()));
                     }
                 }
             }
@@ -73,7 +146,7 @@ fn listing(parent: &Path, limit: usize, before: Option<&str>) -> Result<Value, F
         }
     }
     Ok(
-        json!({"schema_version":1,"checks":checks,"next_cursor":next_cursor,"scan_truncated":scan_truncated,"errors":errors}),
+        json!({"schema_version":1,"checks":checks,"next_cursor":next_cursor,"scan_truncated":scan_truncated,"legacy_count":legacy_count,"errors":errors}),
     )
 }
 
@@ -332,6 +405,60 @@ pub(super) fn compare(baseline: &str, candidate: &str) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_count_are_counted_without_hiding_durable_corruption() {
+        let root = std::env::temp_dir().join(format!(
+            "ferry-history-legacy-{}",
+            ferry_core::jobs::unique_id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let row = json!({"device":"local","profile":"smoke","job":"check-smoke","state":"succeeded","output_directory":".ferry-checks/123-456","errors":[]});
+        let matrix =
+            json!({"profile":"smoke","state":"succeeded","total":1,"succeeded":1,"results":[row]});
+        let write = |id: &str, report: &Value| {
+            let path = root.join(id);
+            fs::create_dir(&path).unwrap();
+            journal::write(&path.join("report.json"), report).unwrap();
+            path
+        };
+        write("101-123", &row);
+        write("102-124", &matrix);
+        write(
+            "103-125",
+            &json!({"device":null,"state":"incomplete","errors":["interrupted"]}),
+        );
+        let durable = write("104-126", &row);
+        fs::write(durable.join("target-0.json"), "{}").unwrap();
+        let malformed = write("105-127", &row);
+        fs::write(malformed.join("operation.json"), "invalid json").unwrap();
+        let corrupt_legacy = write("106-128", &row);
+        fs::write(corrupt_legacy.join("report.json"), "invalid json").unwrap();
+        write(
+            "107-129",
+            &json!({"schema_version":1,"id":"107-129","profile":"smoke","state":"succeeded","total":0,"succeeded":0,"results":[]}),
+        );
+        write("named-check", &row);
+        fs::create_dir(root.join("108-130")).unwrap();
+        let result = listing(&root, 50, None).unwrap();
+        assert_eq!(result["legacy_count"], 3);
+        assert!(result["checks"].as_array().unwrap().is_empty());
+        let errors = result["errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 6);
+        for id in [
+            "104-126",
+            "105-127",
+            "106-128",
+            "107-129",
+            "named-check",
+            "108-130",
+        ] {
+            assert!(
+                errors.iter().any(|e| e.as_str().unwrap().starts_with(id)),
+                "missing corruption: {id}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn comparison_does_not_turn_skips_or_removed_tests_into_success() {
         let before = BTreeMap::from([
