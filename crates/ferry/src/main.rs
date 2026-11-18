@@ -88,6 +88,7 @@ ferry — разработка и тесты на нескольких устр�
                                     проекта на устройстве; --desk — с окнами (GUI, тесты),
                                     --home — в доме устройства, как вне репозитория;
                                     --shell: default, bash, powershell, cmd
+  ferry run <цели> [флаги] --script <файл>   запуск локального UTF-8 сценария на устройстве
   ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
   ferry project                    показать выбранный профиль этого checkout
   ferry project bind <профиль>     выбрать локальный профиль
@@ -100,6 +101,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry start <устройство|local> <имя> --request <id> [--session <id>] [--keep] [--timeout <сек>]
               [--headless] [--workspace <manifest.json>] [--home] [--shell <имя>] -- <команда>
                                     точный run_id, повтор запроса без повторного запуска
+  ferry start <цели> <имя> [флаги] --script <файл>
   ferry start-status <устройство|local> <request_id>
   ferry session begin [<id>] [--pid <PID_агента>] [--ttl <сек>]
   ferry session renew|show|end <id> [--ttl <сек>]
@@ -436,7 +438,7 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
     let mut device = None;
     let mut shell = ferry_core::desk::Shell::Default;
     let (mut desk, mut sync, mut home) = (false, true, false);
-    loop {
+    let command = loop {
         match rest.first() {
             Some(&"--grouped") => grouped = true,
             Some(&"--device") => {
@@ -458,14 +460,14 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
                 rest = &rest[1..];
             }
             Some(&"--") => {
-                rest = &rest[1..];
-                break;
+                break rest[1..].join(" ");
             }
-            _ => break,
+            Some(&"--script") => break script_argument(rest)?,
+            _ => break rest.join(" "),
         }
         rest = &rest[1..];
-    }
-    if rest.is_empty() {
+    };
+    if command.is_empty() {
         return usage();
     }
     devices::run_with_output(
@@ -473,7 +475,7 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
         desk,
         sync,
         home,
-        &rest.join(" "),
+        &command,
         shell,
         devices::OutputOptions { grouped, device },
     )
@@ -483,7 +485,7 @@ fn run(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
 fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
     let mut shell = ferry_core::desk::Shell::Default;
     let (mut sync, mut home) = (true, false);
-    loop {
+    let command = loop {
         match rest.first() {
             Some(&"--no-sync") => sync = false,
             Some(&"--home") => home = true,
@@ -495,17 +497,38 @@ fn start(spec: &str, name: &str, mut rest: &[&str]) -> io::Result<i32> {
                 rest = &rest[1..];
             }
             Some(&"--") => {
-                rest = &rest[1..];
-                break;
+                break rest[1..].join(" ");
             }
-            _ => break,
+            Some(&"--script") => break script_argument(rest)?,
+            _ => break rest.join(" "),
         }
         rest = &rest[1..];
-    }
-    if rest.is_empty() {
+    };
+    if command.is_empty() {
         return usage();
     }
-    devices::start(spec, name, sync, home, &rest.join(" "), shell)
+    devices::start(spec, name, sync, home, &command, shell)
+}
+
+fn script_argument(args: &[&str]) -> io::Result<String> {
+    let ["--script", path] = args else {
+        return Err(io::Error::other(
+            "--script требует один локальный UTF-8 файл",
+        ));
+    };
+    use std::io::Read;
+    let mut script = String::new();
+    const LIMIT: u64 = 128 * 1024;
+    std::fs::File::open(path)?
+        .take(LIMIT + 1)
+        .read_to_string(&mut script)?;
+    let script = script.strip_prefix('\u{feff}').unwrap_or(&script);
+    if script.trim().is_empty() || script.len() as u64 > LIMIT || script.contains('\0') {
+        return Err(io::Error::other(
+            "сценарий должен быть непустым UTF-8 файлом до 128 КиБ",
+        ));
+    }
+    Ok(script.into())
 }
 
 /// `shot <цели> [файл.png] [--window <окно>] [--region x,y,ширина,высота]`.

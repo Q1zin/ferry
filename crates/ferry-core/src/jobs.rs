@@ -211,7 +211,7 @@ pub fn supervise(name: &str) -> io::Result<i32> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Shell::Default,
         Err(e) => return Err(e),
     };
-    let mut command = shell_with(&cmd, choice)?;
+    let (mut command, _script) = crate::desk::task_shell(&cmd, choice, &crate::ferry_home()?)?;
     crate::write_private(
         &dir.join("shell-program"),
         &command.get_program().to_string_lossy(),

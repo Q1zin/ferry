@@ -150,6 +150,10 @@ fn parse_start(mut args: &[&str]) -> io::Result<StartOptions> {
                 options.no_sync = true;
                 args = rest;
             }
+            ["--script", ..] => {
+                options.command = crate::script_argument(args)?;
+                break;
+            }
             ["--", rest @ ..] => {
                 options.command = rest.join(" ");
                 break;

@@ -3,6 +3,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Предел поля в протоколе клиента релея: мусор на порту не должен заставить выделить гигабайты.
@@ -108,6 +109,83 @@ pub fn shell_with(cmd: &str, choice: Shell) -> io::Result<Command> {
     };
     configure(&mut command);
     Ok(command)
+}
+
+pub struct CommandFile(PathBuf);
+
+impl Drop for CommandFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Keep the returned file guard for the lifetime of the child.
+pub fn task_shell(
+    cmd: &str,
+    choice: Shell,
+    state: &Path,
+) -> io::Result<(Command, Option<CommandFile>)> {
+    if !cfg!(windows) || cmd.encode_utf16().take(7000).count() < 7000 {
+        return Ok((shell_with(cmd, choice)?, None));
+    }
+    let root = state.join("scripts");
+    std::fs::create_dir_all(&root)?;
+    let folder = loop {
+        let candidate = root.join(crate::jobs::unique_id());
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break CommandFile(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
+    let (file, loader, content) = match choice {
+        Shell::Powershell => (
+            "run.ps1",
+            ". ([ScriptBlock]::Create([IO.File]::ReadAllText($env:FERRY_COMMAND_FILE)))",
+            cmd.into(),
+        ),
+        Shell::Cmd => {
+            // shortcut: cmd parses each batch line with its own 8191-character limit; use another shell for longer single lines.
+            (
+                "run.cmd",
+                "\"%FERRY_COMMAND_FILE%\"",
+                format!(
+                    "@echo off\r\n@chcp 65001 >nul\r\n{}\r\n",
+                    cmd.replace("\r\n", "\n").replace('\n', "\r\n")
+                ),
+            )
+        }
+        _ => ("run.sh", ". \"$FERRY_COMMAND_FILE\"", cmd.into()),
+    };
+    let file = folder.0.join(file);
+    crate::write_private(&file, &content)?;
+    let mut command = shell_with(loader, choice)?;
+    let path = if matches!(choice, Shell::Default | Shell::Bash) {
+        file.to_string_lossy().replace('\\', "/").into()
+    } else {
+        file.into_os_string()
+    };
+    command.env("FERRY_COMMAND_FILE", path);
+    Ok((command, Some(folder)))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn long_windows_script_keeps_output_exit_and_removes_file() {
+    let state =
+        std::env::temp_dir().join(format!("ferry-long-script-{}", crate::jobs::unique_id()));
+    let script = format!(
+        "{}Write-Output 'слово с пробелом и \"кавычками\"'\nexit 7\n",
+        "# comment\n".repeat(4000)
+    );
+    let (mut command, file) = task_shell(&script, Shell::Powershell, &state).unwrap();
+    let path = file.as_ref().unwrap().0.clone();
+    let result = command.output().unwrap();
+    assert_eq!(result.status.code(), Some(7));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("слово с пробелом и \"кавычками\""));
+    drop(file);
+    assert!(!path.exists());
+    std::fs::remove_dir_all(state).unwrap();
 }
 
 /// Шелл устройства для команды: Git Bash на Windows, login-шелл пользователя на unix.

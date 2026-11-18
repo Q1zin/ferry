@@ -637,9 +637,8 @@ impl Node {
         let spawned = (|| {
             self.check(desk)?;
             let cwd = self.resolve(&dir)?;
-            tokio::process::Command::from(
-                desk::shell_with(&cmd, shell).map_err(|e| Fail::new(e.to_string()))?,
-            )
+            let (command, script) = desk::task_shell(&cmd, shell, &self.dir)?;
+            let child = tokio::process::Command::from(command)
             .envs(
                 self.relay
                     .env(from, &trust, &self.supervisor)
@@ -650,10 +649,11 @@ impl Node {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))
+            .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))?;
+            Ok((child, script))
         })();
-        let mut child = match spawned {
-            Ok(child) => child,
+        let (mut child, _script) = match spawned {
+            Ok(value) => value,
             Err(fail) => {
                 tx.send(Output::Fail(fail)).await.ok();
                 return;
