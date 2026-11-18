@@ -485,24 +485,6 @@ pub fn role(device: Option<&str>, role: &str) -> io::Result<i32> {
     })())
 }
 
-/// `ferry desk <устройство> [take [минут] | free [--force]]`: бронь рабочего стола устройства.
-pub fn desk(device: &str, action: &str, minutes: u32) -> io::Result<i32> {
-    finish((|| {
-        let request = Request::Desk {
-            device: device.into(),
-            action: action.into(),
-            minutes,
-        };
-        match ask(request)? {
-            Response::Message(text) => {
-                println!("{device}: {text}");
-                Ok(0)
-            }
-            _ => Err(unexpected()),
-        }
-    })())
-}
-
 /// `ferry crashes <устройство> [программа] [--last]`: падения на устройстве — в stdout.
 pub fn crashes(device: &str, process: &str, last: bool) -> io::Result<i32> {
     finish((|| {
@@ -1418,35 +1400,6 @@ pub fn pull(device: &str) -> io::Result<i32> {
             project: repo.name,
         };
         said(ask(request)?, &Printer::new(None))
-    })())
-}
-
-/// `ferry tunnel [<устройство> <порт>] [--close]`: без аргументов — открытые туннели.
-pub fn tunnel(target: Option<(&str, &str)>, close: bool) -> io::Result<i32> {
-    finish((|| {
-        let Some((device, port)) = target else {
-            let Response::Tunnels(list) = ask(Request::Tunnels)? else {
-                return Err(unexpected());
-            };
-            if list.is_empty() {
-                eprintln!("ferry: туннелей нет; открыть — ferry tunnel <устройство> <порт>");
-            }
-            for (device, port) in list {
-                println!("127.0.0.1:{port} → {device}:{port}");
-            }
-            return Ok(0);
-        };
-        let port: u16 = port
-            .parse()
-            .map_err(|_| Fail::new(format!("порт — число, а не {port:?}")))?;
-        said(
-            ask(Request::Tunnel {
-                device: device.into(),
-                port,
-                close,
-            })?,
-            &Printer::new(None),
-        )
     })())
 }
 

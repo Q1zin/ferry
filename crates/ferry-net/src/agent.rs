@@ -85,8 +85,76 @@ pub struct Agent {
 }
 
 struct Tunnel {
-    task: AbortHandle,
+    task: tokio::task::JoinHandle<()>,
+    id: EndpointId,
+    name: String,
+    remote_port: u16,
     owner: Option<String>,
+    keep: bool,
+    automatic: bool,
+}
+
+impl Tunnel {
+    async fn close(self) {
+        self.task.abort();
+        let _ = self.task.await;
+    }
+
+    fn status(&self, local_port: u16, session: &str, message: String) -> serde_json::Value {
+        serde_json::json!({
+            "device": self.name,
+            "device_id": self.id.to_string(),
+            "port": self.remote_port,
+            "remote_port": self.remote_port,
+            "local_port": local_port,
+            "local_address": format!("127.0.0.1:{local_port}"),
+            "session": session,
+            "owner": self.owner,
+            "owned": self.owner.as_deref().unwrap_or_default() == session,
+            "keep": self.keep,
+            "closed": false,
+            "message": message,
+        })
+    }
+}
+
+fn remove_tunnel(
+    routes: &Mutex<BTreeMap<u16, Tunnel>>,
+    local_port: u16,
+    remote_port: Option<u16>,
+    who: &str,
+    target: Option<&str>,
+    session: &str,
+    cleanup: bool,
+) -> Result<Option<Tunnel>, Fail> {
+    let mut routes = routes.lock().unwrap();
+    let Some(route) = routes.get(&local_port) else {
+        return Ok(None);
+    };
+    let id = route.id.to_string();
+    let matches_target = target.map_or_else(|| who == route.name || who == id, |key| key == id);
+    if !matches_target || remote_port.is_some_and(|p| p != route.remote_port) {
+        if cleanup {
+            return Ok(None);
+        }
+        return Err(Fail::refused(format!(
+            "локальный порт {local_port} ведёт к {}:{}; проверь ferry tunnel --json",
+            route.name, route.remote_port
+        )));
+    }
+    let owner = route.owner.as_deref().unwrap_or_default();
+    if cleanup && (route.keep || owner != session) {
+        return Ok(None);
+    }
+    if owner != session {
+        return Err(Fail::refused(format!(
+            "туннель {}:{} через {local_port} принадлежит {}",
+            route.name,
+            route.remote_port,
+            if owner.is_empty() { "терминалу" } else { owner }
+        )));
+    }
+    Ok(routes.remove(&local_port))
 }
 
 struct Inner {
@@ -103,8 +171,8 @@ struct Inner {
     activity: Mutex<std::collections::VecDeque<Activity>>,
     /// Команды, которые это устройство выполняет для других.
     node: Arc<Node>,
-    /// Открытые туннели: (устройство, порт).
-    tunnels: Mutex<BTreeMap<(String, u16), Tunnel>>,
+    /// Открытые туннели по локальному порту.
+    tunnels: Mutex<BTreeMap<u16, Tunnel>>,
     /// Бронь рабочего стола этого устройства.
     desk: Mutex<crate::desk::Lease>,
     /// Кто сейчас действует на рабочем столе — для рамки управления.
@@ -526,97 +594,147 @@ impl Agent {
         })
     }
 
-    /// `127.0.0.1:<port>` здесь → тот же порт устройства (CDP, dev-сервер). Порт тот же с обеих
-    /// сторон: CDP отдаёт в `/json/version` ws-адрес со своим портом.
-    pub async fn open_tunnel(&self, who: &str, port: u16) -> Result<String, Fail> {
-        self.open_tunnel_owned(who, port, None).await
-    }
-    pub async fn open_tunnel_owned(
+    /// По умолчанию порты совпадают, чтобы работали адреса CDP из `/json/version`.
+    pub(crate) fn open_tunnel(
         &self,
         who: &str,
-        port: u16,
-        owner: Option<String>,
-    ) -> Result<String, Fail> {
-        let device = self.device(who)?;
-        let key = (device.name.clone(), port);
-        if let Some(existing) = self.inner.tunnels.lock().unwrap().get(&key) {
-            if owner != existing.owner {
-                return Err(Fail::refused("туннель уже принадлежит другой сессии"));
-            }
-            return Ok(format!(
-                "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{port}",
-                device.name
-            ));
+        remote_port: u16,
+        local: Option<u16>,
+        session: &str,
+        keep: bool,
+    ) -> Result<serde_json::Value, Fail> {
+        if remote_port == 0 {
+            return Err(Fail::new("порт устройства: 1..65535"));
         }
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
-            .map_err(|_| {
-                Fail::new(format!(
-                    "порт {port} здесь занят — запусти на устройстве на другом порту"
-                ))
-            })?;
+        let snapshot = self.snapshot();
+        let peer = snapshot.find(who).map_err(Fail::new)?;
+        let id: EndpointId = peer.id.parse().map_err(Fail::new)?;
+        let owner = (!session.is_empty()).then_some(session);
+        if owner.is_some() && !keep {
+            crate::ownership::validate(session)?;
+        }
+        let requested = local.unwrap_or(remote_port);
+        let mut tunnels = self.inner.tunnels.lock().unwrap();
+        let same = |t: &Tunnel| {
+            t.id == id && t.remote_port == remote_port && t.owner.as_deref() == owner && t.keep == keep
+        };
+        let found = if requested == 0 {
+            tunnels.iter().find(|(_, t)| t.automatic && same(t))
+        } else {
+            tunnels.get_key_value(&requested)
+        };
+        if let Some((&port, existing)) = found {
+            if same(existing) {
+                return Ok(existing.status(port, session, format!(
+                    "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{}", existing.name, existing.remote_port
+                )));
+            }
+            let owner = existing.owner.as_deref().unwrap_or("терминал");
+            return Err(Fail::refused(format!(
+                "локальный порт {port} уже занят туннелем {}:{} (владелец: {owner}); укажи --local-port 0 для свободного порта",
+                existing.name, existing.remote_port
+            )));
+        }
+        self.device(&peer.id)?;
+        let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, requested)).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                Fail::new(format!("порт {requested} здесь занят; укажи --local-port 0 для свободного порта"))
+            } else {
+                e.into()
+            }
+        })?;
+        socket.set_nonblocking(true)?;
+        let port = socket.local_addr()?.port();
+        let listener = tokio::net::TcpListener::from_std(socket)?;
+        if owner.is_some() && !keep {
+            crate::ownership::tunnel(peer.id.clone(), session, port)?;
+        }
         let agent = self.clone();
-        let name = device.name.clone();
+        let target = peer.id.clone();
         let task = tokio::spawn(async move {
             let mut streams = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
                     accepted=listener.accept()=>{
                         let Ok((stream,_))=accepted else{break};
-                        let Ok(device)=agent.device(&name)else{continue;};
-                        streams.spawn(async move {if let Ok((tx,rx))=device.tunnel(port).await{crate::node::pipe(stream,tx,rx).await;}});
+                        let Ok(device)=agent.device(&target)else{continue;};
+                        streams.spawn(async move {if let Ok((tx,rx))=device.tunnel(remote_port).await{crate::node::pipe(stream,tx,rx).await;}});
                     },
                     _=streams.join_next(),if !streams.is_empty()=>{}
                 }
             }
         });
-        self.inner.tunnels.lock().unwrap().insert(
-            key,
-            Tunnel {
-                task: task.abort_handle(),
-                owner,
-            },
-        );
-        Ok(format!("ferry: 127.0.0.1:{port} → {}:{port}", device.name))
+        let tunnel = Tunnel {
+            task,
+            id,
+            name: peer.name.clone(),
+            remote_port,
+            owner: owner.map(str::to_owned),
+            keep,
+            automatic: requested == 0,
+        };
+        let value = tunnel.status(port, session, format!(
+            "ferry: 127.0.0.1:{port} → {}:{remote_port}", tunnel.name
+        ));
+        tunnels.insert(port, tunnel);
+        Ok(value)
     }
 
-    pub fn close_tunnel(&self, who: &str, port: u16) -> Result<String, Fail> {
-        let mut tunnels = self.inner.tunnels.lock().unwrap();
-        let key = tunnels
-            .keys()
-            .find(|(name, p)| *p == port && (name == who || who.is_empty()))
-            .cloned();
-        match key.and_then(|key| tunnels.remove(&key).map(|task| (key, task))) {
-            Some(((name, port), tunnel)) => {
-                tunnel.task.abort();
-                Ok(format!("ferry: туннель {name}:{port} закрыт"))
-            }
-            None => Err(Fail::new(format!("туннеля {who}:{port} нет"))),
+    pub(crate) async fn close_tunnel(
+        &self,
+        who: &str,
+        local_port: u16,
+        remote_port: Option<u16>,
+        session: &str,
+        cleanup: bool,
+    ) -> Result<serde_json::Value, Fail> {
+        if local_port == 0 {
+            return Err(Fail::new("для закрытия укажи фактический --local-port из ferry tunnel --json"));
         }
-    }
-
-    /// Открытые туннели: устройство и порт.
-    pub fn close_tunnel_owned(&self, who: &str, port: u16, owner: &str) -> Result<bool, Fail> {
-        let mut tunnels = self.inner.tunnels.lock().unwrap();
-        let key = tunnels
-            .keys()
-            .find(|(name, p)| *p == port && name == who)
-            .cloned();
-        if let Some(key) = key
-            && tunnels
-                .get(&key)
-                .is_some_and(|tunnel| tunnel.owner.as_deref() == Some(owner))
-            && let Some(tunnel) = tunnels.remove(&key)
-        {
-            tunnel.task.abort();
-            return Ok(true);
+        let snapshot = self.snapshot();
+        let target = snapshot.find(who).ok().map(|p| p.id.as_str());
+        let tunnel = remove_tunnel(
+            &self.inner.tunnels,
+            local_port,
+            remote_port,
+            who,
+            target,
+            session,
+            cleanup,
+        )?;
+        if let Some(tunnel) = tunnel {
+            let mut value = tunnel.status(local_port, session, format!(
+                "ferry: туннель {}:{} через {local_port} закрыт", tunnel.name, tunnel.remote_port
+            ));
+            value["closed"] = true.into();
+            tunnel.close().await;
+            return Ok(value);
         }
-
-        Ok(false)
+        Ok(serde_json::json!({
+            "device": who,
+            "port": remote_port,
+            "remote_port": remote_port,
+            "local_port": local_port,
+            "session": session,
+            "closed": true,
+            "already_closed": true,
+            "message": format!("ferry: туннель {who} через {local_port} уже закрыт"),
+        }))
     }
 
     pub fn tunnels(&self) -> Vec<(String, u16)> {
-        self.inner.tunnels.lock().unwrap().keys().cloned().collect()
+        self.inner.tunnels.lock().unwrap().iter()
+            .filter(|(port, t)| **port == t.remote_port)
+            .map(|(&port, t)| (t.name.clone(), port)).collect()
+    }
+
+    pub(crate) fn tunnel_status(&self, session: &str) -> serde_json::Value {
+        let tunnels: Vec<_> = self.inner.tunnels.lock().unwrap().iter()
+            .map(|(&port, t)| t.status(port, session, format!(
+                "127.0.0.1:{port} → {}:{} (владелец: {})",
+                t.name, t.remote_port, t.owner.as_deref().unwrap_or("терминал")
+            ))).collect();
+        serde_json::json!({"session": session, "tunnels": tunnels})
     }
 
     /// Кто сейчас действует на рабочем столе этого устройства (и только что закончил).
@@ -1361,6 +1479,7 @@ impl fmt::Debug for PairHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn agent(name: &str) -> Agent {
         let dir = std::env::temp_dir().join(format!("ferry-agent-{}-{name}", std::process::id()));
@@ -1374,6 +1493,62 @@ mod tests {
             ..Options::new(dir)
         };
         Agent::start(options).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn alternate_tunnel_routes_are_owned_and_close_while_target_is_offline() {
+        let (a, b) = (agent("tunnel-console").await, agent("tunnel-node").await);
+        a.learn(b.addr());
+        b.learn(a.addr());
+        a.pair(&b.open_pairing().ticket).await.unwrap();
+        let target = b.id().to_string();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while a.device(&target).is_err() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let remote_port = listener.local_addr().unwrap().port();
+        let first = a.open_tunnel(&target, remote_port, Some(0), "agent:first", true).unwrap();
+        let second = a.open_tunnel(&target, remote_port, Some(0), "agent:second", true).unwrap();
+        let port = |value: &serde_json::Value| value["local_port"].as_u64().unwrap() as u16;
+        assert_ne!(port(&first), port(&second));
+        assert_eq!(
+            port(&a.open_tunnel(&target, remote_port, Some(0), "agent:first", true).unwrap()),
+            port(&first)
+        );
+        assert_eq!(a.tunnel_status("agent:second")["tunnels"].as_array().unwrap().len(), 2);
+        assert!(a.close_tunnel(&target, port(&first), Some(remote_port), "agent:second", false).await.is_err());
+
+        let receive = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0];
+            stream.read_exact(&mut input).await.unwrap();
+            stream.write_all(&input).await.unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port(&second))).await.unwrap();
+            stream.write_all(b"f").await.unwrap();
+            let mut echoed = [0];
+            stream.read_exact(&mut echoed).await.unwrap();
+            assert_eq!(&echoed, b"f");
+            receive.await.unwrap();
+        }).await.unwrap();
+
+        b.shutdown().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while a.device(&target).is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+        let first_port = port(&first);
+        let other_port = port(&second);
+        assert_eq!(a.close_tunnel(&target, first_port, None, "agent:first", true).await.unwrap()["already_closed"], true);
+        assert_eq!(a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false).await.unwrap()["owner"], "agent:first");
+        assert_eq!(a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false).await.unwrap()["already_closed"], true);
+        assert!(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, first_port)).await.is_ok());
+        assert_eq!(a.close_tunnel(&target, other_port, Some(remote_port), "agent:second", false).await.unwrap()["owner"], "agent:second");
+        a.shutdown().await;
     }
 
     #[tokio::test]

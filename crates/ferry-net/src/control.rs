@@ -295,36 +295,23 @@ async fn answer(
             port,
             close,
             keep,
-        } => {
-            if close {
-                if session.is_empty() {
-                    Response::Message(agent.close_tunnel(&device, port)?)
-                } else {
-                    let target = agent.device(&device)?;
-                    if !agent.close_tunnel_owned(&target.name, port, session)? {
-                        return Err(Fail::refused(
-                            "туннель не принадлежит этой сессии или уже закрыт",
-                        ));
-                    }
-                    Response::Message(format!("ferry: туннель {}:{port} закрыт", target.name))
-                }
-            } else {
-                let owner = if keep || session.is_empty() {
-                    None
-                } else {
-                    crate::ownership::validate(session)?;
-                    Some(session.to_string())
-                };
-                let target = agent.device(&device)?;
-                let message = agent
-                    .open_tunnel_owned(&target.name, port, owner.clone())
-                    .await?;
-                if owner.is_some() {
-                    crate::ownership::tunnel(target.name, session, port)?;
-                }
-                Response::Message(message)
-            }
-        }
+        } => Response::Message(tunnel_message(if close {
+            agent.close_tunnel(&device, port, Some(port), session, false).await?
+        } else {
+            agent.open_tunnel(&device, port, None, session, keep)?
+        })?),
+        Request::TunnelRoute {
+            device,
+            port,
+            local_port,
+            close,
+            keep,
+        } => Response::Report(if close {
+            agent.close_tunnel(&device, local_port.unwrap_or(port), Some(port), session, false).await?
+        } else {
+            agent.open_tunnel(&device, port, local_port, session, keep)?
+        }.to_string()),
+        Request::TunnelStatus => Response::Report(agent.tunnel_status(session).to_string()),
         Request::AtomicStart {
             device,
             mut request,
@@ -596,22 +583,32 @@ async fn answer(
                 "free" => DeskAction::Free,
                 "release-owned" => DeskAction::ReleaseOwned,
                 "force" => DeskAction::ForceFree,
+                "show-json" => DeskAction::ShowReport,
                 _ => DeskAction::Show,
             };
-            if device == "local" {
-                if let DeskAction::Hold(secs) = &action {
-                    sessions.track(agent.id(), session, *secs);
+            let is_report = action == DeskAction::ShowReport;
+            let message = if device == "local" {
+                let message = agent.desk_self(session, action.clone())?;
+                if let DeskAction::Hold(secs) = action {
+                    sessions.track(agent.id(), session, secs);
                 }
-                return Ok(Answer::Once(Box::new(Response::Message(
-                    agent.desk_self(session, action)?,
-                ))));
+                message
+            } else {
+                let target = agent.device(&device)?;
+                let message = target.desk(session, action.clone()).await?;
+                if let DeskAction::Hold(secs) = action {
+                    sessions.track(target.id, session, secs);
+                }
+                message
+            };
+            if is_report {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&message).map_err(Fail::new)?;
+                value["device"] = device.into();
+                Response::Report(value.to_string())
+            } else {
+                Response::Message(message)
             }
-            let device = agent.device(&device)?;
-            let message = device.desk(session, action.clone()).await?;
-            if let DeskAction::Hold(secs) = action {
-                sessions.track(device.id, session, secs);
-            }
-            Response::Message(message)
         }
         Request::Rec {
             device,
@@ -644,16 +641,13 @@ async fn answer(
             root,
             project,
         } => Response::Message(agent.device(&device)?.pull(&root, &project).await?),
-        Request::Tunnel {
-            device,
-            port,
-            close: false,
-        } => Response::Message(agent.open_tunnel(&device, port).await?),
-        Request::Tunnel {
-            device,
-            port,
-            close: true,
-        } => Response::Message(agent.close_tunnel(&device, port)?),
+        Request::Tunnel { device, port, close } => {
+            Response::Message(tunnel_message(if close {
+                agent.close_tunnel(&device, port, Some(port), session, false).await?
+            } else {
+                agent.open_tunnel(&device, port, None, session, false)?
+            })?)
+        }
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
         Request::ActV2 {
             device,
@@ -844,6 +838,11 @@ async fn answer(
         }
     };
     Ok(Answer::Once(Box::new(response)))
+}
+
+fn tunnel_message(report: serde_json::Value) -> Result<String, Fail> {
+    report["message"].as_str().map(str::to_owned)
+        .ok_or_else(|| Fail::new("нет ответа о туннеле"))
 }
 
 /// Вывод команды — строками, пока не придёт код выхода или CLI не уйдёт. Ушёл — приёмник

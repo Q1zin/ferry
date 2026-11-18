@@ -125,7 +125,8 @@ ferry — разработка и тесты на нескольких устр�
   ferry get <устройство> <путь> [куда]
                                     файл или каталог с устройства — сюда (~/… — от его дома)
   ferry pull <устройство>           правки, сделанные на устройстве, — сюда
-  ferry tunnel [<устройство> <порт>] [--close] [--session <id>] [--keep]
+  ferry tunnel [--json] [--session <id>]
+  ferry tunnel <устройство> <порт> [--local-port <порт|0>] [--close] [--session <id>] [--keep] [--json]
                                     127.0.0.1:<порт> здесь → <порт> устройства (CDP,
                                     dev-сервер); без аргументов — открытые туннели
   ferry info <цели> [--json]        свойства: система, железо, питание, экран, ferry
@@ -137,7 +138,7 @@ ferry — разработка и тесты на нескольких устр�
                                     на связь
   ferry logs [<цели>] [-n <строк>]  лог приложения ferry на устройствах или (без целей) здесь:
                                     последние строки, по умолчанию 100
-  ferry desk <устройство> [take [<минут>] [--note <намерение>] | free [--force]]
+  ferry desk <устройство> [--json | take [<минут>] [--note <намерение>] | free [--force]] [--session <id>]
                                     бронь рабочего стола: окна и ввод одной сессии (агента или
                                     терминала) — любое действие само занимает стол на 3 мин, take —
                                     надольше (по умолчанию 30 мин), free — снять, --force — чужую
@@ -253,11 +254,8 @@ fn main() {
         ["role", role] => devices::role(None, role),
         ["role", device, role] => devices::role(Some(device), role),
         ["forget", device] => devices::forget(device),
-        ["desk", device] => devices::desk(device, "show", 0),
-        ["desk", device, "take", rest @ ..] => human::desk_take(device, rest),
+        ["desk", device, rest @ ..] => human::desk(device, rest),
         ["ask", rest @ ..] => human::ask(rest),
-        ["desk", device, "free"] => devices::desk(device, "free", 0),
-        ["desk", device, "free", "--force"] => devices::desk(device, "force", 0),
         ["crashes", device] => devices::crashes(device, "", false),
         ["crashes", device, "--last"] => devices::crashes(device, "", true),
         ["crashes", device, process] => devices::crashes(device, process, false),
@@ -316,14 +314,7 @@ fn main() {
         ["log", device, name] if *name != "-f" => devices::log(device, name, false),
         ["log", device, name, "-f"] => devices::log(device, name, true),
         ["kill", spec, name] => devices::kill(spec, name),
-        ["tunnel"] => devices::tunnel(None, false),
-        ["tunnel", _, _, rest @ ..]
-            if managed_flags(rest) || !ferry_core::control::session().is_empty() =>
-        {
-            execution::tunnel(&args[1..])
-        }
-        ["tunnel", device, port] => devices::tunnel(Some((device, port)), false),
-        ["tunnel", device, port, "--close"] => devices::tunnel(Some((device, port)), true),
+        ["tunnel", rest @ ..] => execution::tunnel(rest),
         ["windows", device] => devices::input(device, owned(&["windows"])),
         ["focus", device, window @ ..] if !window.is_empty() => {
             devices::input(device, owned(&[&["focus"][..], window].concat()))

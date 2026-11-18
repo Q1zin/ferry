@@ -126,6 +126,12 @@ ferry tunnel                       # открытые туннели
 ferry tunnel win-10 9322 --close
 ```
 
+`ferry tunnel --json` показывает, кто открыл туннель, адрес на пульте и порт на устройстве.
+Если локальный порт занят, `ferry tunnel win-10 9322 --local-port 0` выдаст свободный порт в
+`local_port`. Для закрытия укажи этот порт и ту же сессию. Для CDP проверь
+`http://127.0.0.1:<local_port>/json/version`. Если `webSocketDebuggerUrl` содержит порт узла,
+используй его путь с локальным адресом пульта.
+
 Так Playwright (`chromium.connectOverCDP('http://127.0.0.1:9322')`) и MCP `cef` работают с приложением на устройстве как с локальным:
 
 ```sh
@@ -378,6 +384,7 @@ ferry session begin review --pid <PID_агента> --ttl 3600
 ferry start WIN-11-2 app --session review --request review-app --timeout 600 --headless --home -- 'node server.js'
 ferry start-status WIN-11-2 review-app
 ferry tunnel WIN-11-2 9322 --session review
+ferry desk WIN-11-2 --json --session review
 ferry session renew review --ttl 3600
 ferry session end review
 ```

@@ -1,5 +1,9 @@
 use crate::{agent_tools::report, devices};
-use ferry_core::{control::Request, human::Request as Human};
+use ferry_core::{
+    control::{self, Request, Response},
+    device::Fail,
+    human::Request as Human,
+};
 use std::{
     io,
     time::{Duration, Instant},
@@ -78,31 +82,54 @@ pub fn ask(args: &[&str]) -> io::Result<i32> {
     })())
 }
 
-pub fn desk_take(device: &str, args: &[&str]) -> io::Result<i32> {
-    let (mut minutes, mut note, mut rest) = (30u32, None, args);
-    if let [value, tail @ ..] = rest
-        && !value.starts_with('-')
-    {
-        minutes = value.parse().map_err(io::Error::other)?;
-        rest = tail;
-    }
-    if let ["--note", text] = rest {
-        note = Some((*text).to_string());
-    } else if !rest.is_empty() {
-        return crate::usage();
-    }
-    match note {
-        None => devices::desk(device, "take", minutes),
-        Some(note) => devices::finish((|| match devices::ask(Request::DeskNote {
-            device: device.into(),
-            minutes,
-            note,
-        })? {
-            ferry_core::control::Response::Message(s) => {
-                println!("{s}");
-                Ok(0)
+pub fn desk(device: &str, args: &[&str]) -> io::Result<i32> {
+    let (action, minutes, mut rest) = match args {
+        ["take", minutes, tail @ ..] if !minutes.starts_with('-') => {
+            ("take", minutes.parse().map_err(io::Error::other)?, tail)
+        }
+        ["take", tail @ ..] => ("take", 30, tail),
+        ["free", tail @ ..] => ("free", 0, tail),
+        _ => ("show", 0, args),
+    };
+    let (mut session, mut note, mut json, mut force) = (control::session(), None, false, false);
+    while !rest.is_empty() {
+        match rest {
+            ["--session", id, tail @ ..] => {
+                session = crate::execution::session_name(id);
+                rest = tail;
             }
-            _ => Err(ferry_core::device::Fail::new("нет ответа о брони")),
-        })()),
+            ["--note", text, tail @ ..] if action == "take" => {
+                note = Some((*text).to_string());
+                rest = tail;
+            }
+            ["--json", tail @ ..] if action == "show" => {
+                json = true;
+                rest = tail;
+            }
+            ["--force", tail @ ..] if action == "free" => {
+                force = true;
+                rest = tail;
+            }
+            _ => return crate::usage(),
+        }
     }
+    let request = if let Some(note) = note {
+        Request::DeskNote { device: device.into(), minutes, note }
+    } else {
+        let action = if json { "show-json" } else if force { "force" } else { action };
+        Request::Desk { device: device.into(), minutes, action: action.into() }
+    };
+    devices::finish(match control::call_session(request, &session) {
+        Ok(Response::Message(text)) => {
+            println!("{device}: {text}");
+            Ok(0)
+        }
+        Ok(Response::Report(text)) => {
+            println!("{text}");
+            Ok(0)
+        }
+        Ok(Response::Error(e)) => Err(e),
+        Ok(_) => Err(Fail::new("нет ответа о брони")),
+        Err(e) => Err(e.into()),
+    })
 }

@@ -69,6 +69,18 @@ impl Lease {
         let left = |h: &Holder| h.until.saturating_duration_since(now).as_secs();
         match (action, &self.0) {
             (DeskAction::HoldNote { .. }, _) => unreachable!(),
+            (DeskAction::ShowReport, holder) => Ok(serde_json::json!({
+                "state": if holder.is_some() { "busy" } else { "free" },
+                "session": session,
+                "owner": holder.as_ref().map(|h| serde_json::json!({
+                    "device": name(h.from),
+                    "device_id": h.from.to_string(),
+                    "session": h.session,
+                })),
+                "owned": holder.as_ref().is_some_and(mine),
+                "remaining_seconds": holder.as_ref().map(left),
+                "note": holder.as_ref().and_then(|h| h.note.as_ref())
+            }).to_string()),
             (DeskAction::Show, None) => Ok("свободен".into()),
             (DeskAction::Show, Some(h)) => Ok(format!("занят: {} — ещё {} с", who(h), left(h))),
             (DeskAction::ForceFree, None) => Ok("свободен".into()),
@@ -79,7 +91,7 @@ impl Lease {
             }
             (DeskAction::ReleaseOwned, Some(h)) if !mine(h) => Ok("своей брони нет".into()),
             (DeskAction::Free | DeskAction::Hold(_), Some(h)) if !mine(h) => Err(format!(
-                "занят: {} — ещё {} с; подожди или сними чужую бронь: ferry desk <устройство> free --force",
+                "занят: {} — ещё {} с; подожди или выбери другое устройство: ferry select --desktop",
                 who(h),
                 left(h)
             )),
@@ -144,6 +156,21 @@ impl Acting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_distinguishes_current_session_from_lease_owner() {
+        let from = iroh::SecretKey::generate().public();
+        let now = Instant::now();
+        let mut desk = Lease::default();
+        let name = |_| "console".to_string();
+        desk.apply(from, "agent:first", DeskAction::Hold(60), now, name).unwrap();
+        let report = desk.apply(from, "agent:second", DeskAction::ShowReport, now, name).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(report["session"], "agent:second");
+        assert_eq!(report["owner"]["session"], "agent:first");
+        assert_eq!(report["owned"], false);
+        assert_eq!(report["remaining_seconds"], 60);
+    }
 
     #[test]
     fn note_survives_renewal_without_shortening_explicit_lease() {

@@ -36,7 +36,7 @@ fn device(name: &str) -> Result<Option<String>, Fail> {
     }
     Ok(Some(name.into()))
 }
-fn session_name(name: &str) -> String {
+pub(crate) fn session_name(name: &str) -> String {
     if name.contains(':') {
         name.into()
     } else {
@@ -374,52 +374,76 @@ pub fn start_status(args: &[&str]) -> io::Result<i32> {
     })())
 }
 pub fn tunnel(args: &[&str]) -> io::Result<i32> {
-    let [who, port, rest @ ..] = args else {
-        return crate::usage();
+    let (target, mut rest) = match args {
+        [who, port, rest @ ..] if !who.starts_with('-') => {
+            let port = port.parse::<u16>().map_err(io::Error::other)?;
+            if port == 0 {
+                return Err(io::Error::other("нужен порт 1..65535"));
+            }
+            (Some((*who, port)), rest)
+        }
+        [] | ["--json" | "--session", ..] => (None, args),
+        _ => return crate::usage(),
     };
-    let mut rest = rest;
-    let port = port.parse::<u16>().map_err(io::Error::other)?;
-    if port == 0 {
-        return Err(io::Error::other("нужен порт 1..65535"));
-    }
-    let (mut session, mut keep, mut close) = (control::session(), false, false);
+    let (mut session, mut keep, mut close, mut json, mut local_port) =
+        (control::session(), false, false, false, None);
     while !rest.is_empty() {
         match rest {
             ["--session", id, tail @ ..] => {
                 session = session_name(id);
                 rest = tail;
             }
-            ["--keep", tail @ ..] => {
+            ["--keep", tail @ ..] if target.is_some() => {
                 keep = true;
                 rest = tail;
             }
-            ["--close", tail @ ..] => {
+            ["--close", tail @ ..] if target.is_some() => {
                 close = true;
+                rest = tail;
+            }
+            ["--local-port", port, tail @ ..] if target.is_some() => {
+                local_port = Some(port.parse::<u16>().map_err(io::Error::other)?);
+                rest = tail;
+            }
+            ["--json", tail @ ..] => {
+                json = true;
                 rest = tail;
             }
             _ => return crate::usage(),
         }
     }
     finish((|| {
-        let Some(device) = device(who)? else {
-            return Err(Fail::new("туннелю нужно удалённое устройство"));
-        };
-        let Response::Message(message) = response(
-            Request::OwnedTunnel {
-                device: device.clone(),
+        if let Some((who, port)) = target {
+            let Some(device) = device(who)? else {
+                return Err(Fail::new("туннелю нужно удалённое устройство"));
+            };
+            let result = report(Request::TunnelRoute {
+                device,
                 port,
+                local_port,
                 close,
                 keep,
-            },
-            &session,
-        )?
-        else {
-            return Err(Fail::new("не получен результат туннеля"));
-        };
-        println!(
-            "{}",
-            json!({"device":device,"port":port,"session":session,"keep":keep,"closed":close,"message":message})
-        );
+            }, &session)?;
+            if json || !session.is_empty() || keep || local_port.is_some() {
+                println!("{result}");
+            } else if let Some(message) = result["message"].as_str() {
+                println!("{message}");
+            }
+        } else {
+            let result = report(Request::TunnelStatus, &session)?;
+            if json {
+                println!("{result}");
+            } else if let Some(rows) = result["tunnels"].as_array() {
+                if rows.is_empty() {
+                    eprintln!("ferry: туннелей нет; открыть — ferry tunnel <устройство> <порт>");
+                }
+                for row in rows {
+                    if let Some(message) = row["message"].as_str() {
+                        println!("{message}");
+                    }
+                }
+            }
+        }
         Ok(0)
     })())
 }

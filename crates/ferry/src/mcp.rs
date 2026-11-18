@@ -426,6 +426,7 @@ fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -
                 | "storage"
                 | "start-status"
                 | "start"
+                | "desk"
                 | "tunnel"
                 | "queue"
                 | "workflow"

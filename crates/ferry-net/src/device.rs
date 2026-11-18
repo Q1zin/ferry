@@ -353,6 +353,14 @@ impl Device {
 
     /// Бронь рабочего стола устройства для сессии `session`.
     pub async fn desk(&self, session: &str, action: DeskAction) -> Reply<String> {
+        if matches!(action, DeskAction::ShowReport) {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.26",
+                "структурированный статус брони",
+            )?;
+        }
         if matches!(
             action,
             DeskAction::HoldNote { .. } | DeskAction::ReleaseOwned

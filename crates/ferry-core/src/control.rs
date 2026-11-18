@@ -264,6 +264,14 @@ pub enum Request {
         device: String,
         port: u16,
     },
+    TunnelRoute {
+        device: String,
+        port: u16,
+        local_port: Option<u16>,
+        close: bool,
+        keep: bool,
+    },
+    TunnelStatus,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
