@@ -56,6 +56,23 @@ impl Spool {
     }
 }
 
+fn write_device_output(
+    output: &mut impl Write,
+    name: &str,
+    path: &Path,
+    code: i32,
+    error: Option<&str>,
+) -> io::Result<()> {
+    for stream in ["stdout", "stderr"] {
+        writeln!(output, "\n--- {name} · {stream} ---")?;
+        io::copy(&mut File::open(path.join(stream))?, output)?;
+    }
+    if let Some(message) = error {
+        writeln!(output, "\nferry: {name}: {message}")?;
+    }
+    writeln!(output, "\n--- {name} · exit {code} ---")
+}
+
 pub(super) fn each(
     names: &[String],
     job: impl Fn(&str, &Printer) -> Result<i32, Fail> + Sync,
@@ -106,31 +123,24 @@ pub(super) fn each(
             &root.join("report.json"),
             &serde_json::json!({"complete":rows.len()==names.len(),"results":rows}).to_string(),
         )?;
+        // Capture clients can merge stdout and stderr out of order.
+        let mut output = io::stdout().lock();
         for (name, path, code, error) in completed {
-            eprintln!("\n--- {name} · stdout ---");
-            io::copy(
-                &mut File::open(path.join("stdout"))?,
-                &mut io::stdout().lock(),
-            )?;
-            eprintln!("\n--- {name} · stderr ---");
-            io::copy(
-                &mut File::open(path.join("stderr"))?,
-                &mut io::stderr().lock(),
-            )?;
-            if let Some(message) = &error {
-                eprintln!("ferry: {name}: {message}");
-            }
-            eprintln!("\n--- {name} · exit {code} ---");
+            write_device_output(&mut output, &name, &path, code, error.as_deref())?;
         }
+        output.flush()?;
     }
     ferry_core::write_private(
         &root.join("report.json"),
         &serde_json::json!({"complete":true,"results":rows}).to_string(),
     )?;
-    eprintln!(
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "ferry: сохранён вывод устройств: {}",
         root.join("report.json").display()
-    );
+    )?;
+    output.flush()?;
     Ok(rows
         .iter()
         .filter_map(|r| r["exit_code"].as_i64())
@@ -157,5 +167,42 @@ mod tests {
         drop(spool);
         assert_eq!(fs::read(path.join("stderr")).unwrap(), b"stderr\n");
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn grouped_transcript_keeps_each_device_header_with_its_output() {
+        let root =
+            std::env::temp_dir().join(format!("ferry-grouped-{}", ferry_core::jobs::unique_id()));
+        fs::create_dir(&root).unwrap();
+        let mut output = Vec::new();
+        for (name, stdout, stderr, code, error) in [
+            (
+                "WIN-10",
+                b"MINGW64".as_slice(),
+                b"warn\0".as_slice(),
+                1,
+                Some("failed"),
+            ),
+            ("mac", b"Darwin\n".as_slice(), b"".as_slice(), 0, None),
+        ] {
+            let path = root.join(name);
+            let mut spool = Spool::new(&path).unwrap();
+            spool.write(stdout, false);
+            spool.write(stderr, true);
+            drop(spool);
+            write_device_output(&mut output, name, &path, code, error).unwrap();
+        }
+        assert_eq!(
+            output,
+            concat!(
+                "\n--- WIN-10 · stdout ---\nMINGW64",
+                "\n--- WIN-10 · stderr ---\nwarn\0",
+                "\nferry: WIN-10: failed\n\n--- WIN-10 · exit 1 ---\n",
+                "\n--- mac · stdout ---\nDarwin\n",
+                "\n--- mac · stderr ---\n\n--- mac · exit 0 ---\n",
+            )
+            .as_bytes()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }
