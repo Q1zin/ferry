@@ -390,6 +390,21 @@ async fn power(agent: State<'_, Agent>, id: String, action: String) -> Reply<Str
 const DESKTOP_SESSION: &str = "console:ui";
 
 #[tauri::command]
+async fn admin_windows(
+    agent: State<'_, Agent>,
+    action: String,
+    window: Option<i64>,
+) -> Reply<serde_json::Value> {
+    #[cfg(windows)]
+    return agent.admin_windows(&action, window).await.map_err(err);
+    #[cfg(not(windows))]
+    {
+        let _ = (agent, action, window);
+        Err("окна администратора доступны только на Windows".into())
+    }
+}
+
+#[tauri::command]
 async fn desk_reservation(
     agent: State<'_, Agent>,
     id: Option<String>,
@@ -1032,6 +1047,7 @@ pub fn run() {
             kill_job,
             power,
             desk_reservation,
+            admin_windows,
             version,
             human::questions,
             human::answer,

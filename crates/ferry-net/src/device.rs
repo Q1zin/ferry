@@ -414,6 +414,28 @@ impl Device {
         self.desk(session, action).await
     }
 
+    pub async fn admin_input(
+        &self,
+        session: &str,
+        action: ferry_core::screen::admin::Action,
+    ) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            ferry_core::device::version::ADMIN_WINDOW,
+            "управление окном администратора",
+        )?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.client.ask(AdminInput {
+                session: session.into(),
+                action,
+            }),
+        )
+        .await
+        .map_err(|_| Fail::new("ответ окна администратора потерян; проверь окно перед повтором"))?
+    }
+
     /// Перед действием с окнами — занять стол за `session` (или продлить). Устройство старее
     /// брони не знает — пускаем как раньше.
     pub async fn hold(&self, session: &str) -> Reply<()> {

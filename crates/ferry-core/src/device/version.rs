@@ -5,14 +5,16 @@ pub const DESK_NOTE: &str = "0.1.23";
 pub const DURABLE_START: &str = "0.1.23";
 pub const CHECK: &str = "0.1.23";
 pub const DESK_AWAKE: &str = "0.1.27";
+pub const ADMIN_WINDOW: &str = "0.1.28";
 
-pub const FEATURES: [(&str, &str); 6] = [
+pub const FEATURES: [(&str, &str); 7] = [
     ("shell", SHELL),
     ("result", RESULT),
     ("desk-note", DESK_NOTE),
     ("durable-start", DURABLE_START),
     ("check", CHECK),
     ("desk-awake", DESK_AWAKE),
+    ("admin-window", ADMIN_WINDOW),
 ];
 
 pub fn parse(value: &str) -> Option<[u32; 3]> {

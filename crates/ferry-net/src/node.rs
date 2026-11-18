@@ -561,7 +561,8 @@ impl Node {
             DeviceMessage::Watch(_)
             | DeviceMessage::SetRole(_)
             | DeviceMessage::Rename(_)
-            | DeviceMessage::Desk(_) => {}
+            | DeviceMessage::Desk(_)
+            | DeviceMessage::AdminInput(_) => {}
             DeviceMessage::Peers(WithChannels { tx, .. }) => {
                 tx.send(()).await.ok();
             }

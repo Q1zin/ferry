@@ -282,6 +282,10 @@ pub enum Request {
         minutes: u32,
         note: Option<String>,
     },
+    AdminInput {
+        device: String,
+        action: crate::screen::admin::Action,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

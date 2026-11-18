@@ -33,6 +33,12 @@ export type DeskReservation = {
   keep_awake: boolean
   awake_remaining_seconds: number | null
 }
+export type AdminWindow = { id: number; title: string; process: string; pid: number }
+export type AdminWindowsState = {
+  owner: DeskReservation['owner']
+  window: AdminWindow | null
+  candidates?: AdminWindow[]
+}
 
 /// Устройство на странице: это (`id` пуст) или связанное.
 export type DeviceRef = { id: string | null; name: string; online: boolean; status: Status | null; locked?: boolean | null }
@@ -120,6 +126,8 @@ export const api = {
   power: (id: string, action: string) => invoke<string>('power', { id, action }),
   deskReservation: (id: string | null, action: 'show' | 'take' | 'free', minutes?: number) =>
     invoke<DeskReservation>('desk_reservation', { id, action, minutes }),
+  adminWindows: (action: 'show' | 'choose' | 'grant' | 'revoke', window?: number) =>
+    invoke<AdminWindowsState>('admin_windows', { action, window }),
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),
   /// Версия новее этой, если есть в релизах.

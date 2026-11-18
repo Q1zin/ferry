@@ -32,6 +32,9 @@ use crate::proto::{
 };
 use crate::store::{self, Peer, Store};
 
+#[cfg(windows)]
+mod admin;
+
 pub struct Options {
     /// Где ключ, `device.json` и файл режима: `~/.ferry`.
     pub dir: PathBuf,
@@ -179,6 +182,8 @@ struct Inner {
     tunnels: Mutex<BTreeMap<u16, Tunnel>>,
     /// Бронь рабочего стола этого устройства.
     desk: Mutex<crate::desk::Lease>,
+    #[cfg(windows)]
+    admin: Mutex<admin::State>,
     /// Кто сейчас действует на рабочем столе — для рамки управления.
     acting: Mutex<crate::desk::Acting>,
 }
@@ -398,6 +403,8 @@ impl Agent {
             node,
             tunnels: Mutex::default(),
             desk: Mutex::default(),
+            #[cfg(windows)]
+            admin: Mutex::default(),
             acting: Mutex::default(),
             peers: Mutex::default(),
             lan,
@@ -1275,6 +1282,8 @@ impl Inner {
             {
                 self.notify();
             }
+            #[cfg(windows)]
+            self.expire_admin();
             if n.is_multiple_of(15)
                 && let Some(lan) = &self.lan
             {
@@ -1357,6 +1366,18 @@ impl Inner {
                             format!("рабочий стол {me} {why}").replace("<устройство>", &me),
                         )
                     });
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::AdminInput(WithChannels { tx, inner, .. }) => {
+                #[cfg(windows)]
+                let result = self.clone().execute_admin(from, inner).await;
+                #[cfg(not(windows))]
+                let result = {
+                    let _ = inner;
+                    Err(Fail::refused(
+                        "окна администратора доступны только на Windows",
+                    ))
+                };
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,

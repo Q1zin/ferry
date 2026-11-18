@@ -611,6 +611,9 @@ async fn answer(
             }
             Response::Message(device.input(args).await?)
         }
+        Request::AdminInput { device, action } => {
+            Response::Message(agent.device(&device)?.admin_input(session, action).await?)
+        }
         Request::Desk {
             device,
             action,

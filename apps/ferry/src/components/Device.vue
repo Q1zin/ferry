@@ -17,6 +17,7 @@ import {
 import Jobs from './Jobs.vue'
 import Screen from './Screen.vue'
 import Reservation from './Reservation.vue'
+import AdminWindows from './AdminWindows.vue'
 
 const props = defineProps<{
   device: { id: string | null; name: string; online: boolean; status: Status | null; path: string }
@@ -265,6 +266,7 @@ async function forget() {
     </div>
 
     <Reservation v-if="supportsReservation" :key="device.id ?? 'local'" :id="device.id" :can-reserve="s?.mode === 'active'" />
+    <AdminWindows v-if="me && s?.os === 'windows'" />
 
     <div v-if="!me && s?.os === 'windows' && !blocked(device)" class="card">
       <h3>Питание</h3>

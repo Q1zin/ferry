@@ -115,6 +115,12 @@ try {
       const listeners = {}
       const free = { state: 'free', owner: null, owned: false, keep_awake: false, awake_remaining_seconds: null }
       let reservation = free
+      const adminOwner = { device: 'win-10', session: 'codex:fixture' }
+      const adminCandidates = [
+        { id: 84, title: 'Тестовое окно', process: 'first.exe', pid: 505 },
+        { id: 101, title: 'Тестовое окно', process: 'second.exe', pid: 506 },
+      ]
+      let adminWindow = null
       let next = 0
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
       window.__TAURI_INTERNALS__ = {
@@ -129,6 +135,12 @@ try {
             if (args.action === 'take') reservation = { state:'busy', owner:{device:'macbook',session:'console:ui'}, owned:true, keep_awake:true, awake_remaining_seconds:args.minutes*60 }
             if (args.action === 'free') reservation = free
             return reservation
+          }
+          if (cmd === 'admin_windows') {
+            if (args.action === 'choose') return { owner: adminOwner, window: adminWindow, candidates: adminCandidates }
+            if (args.action === 'grant') adminWindow = adminCandidates.find((w) => w.id === args.window) ?? null
+            if (args.action === 'revoke') adminWindow = null
+            return { owner: adminOwner, window: adminWindow }
           }
           if (cmd === 'dashboard') {
             if (args.request.action === 'run') {
@@ -317,6 +329,27 @@ try {
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'set_mode'))
     assert.deepEqual((await calls()).find(([c]) => c === 'set_mode'), ['set_mode', { mode: 'no-desktop' }])
     await shot('me')
+
+    // Согласие на повышенное окно выдаётся только с этого Windows-устройства, по конкретному @ID.
+    const adminHeading = page.getByRole('heading', { name: 'Окно администратора', exact: true })
+    assert.equal(await adminHeading.count(), 0)
+    await emit('state', { ...snapshot, me: { ...snapshot.me, os: 'windows' } })
+    await adminHeading.waitFor()
+    await page.getByText('codex:fixture', { exact: true }).waitFor()
+    await page.getByRole('button', { name: 'Выбрать окно администратора' }).click()
+    const confirmAdmin = page.getByRole('button', { name: 'Разрешить управление окном администратора' })
+    await confirmAdmin.waitFor()
+    assert.ok(await confirmAdmin.isDisabled(), 'нельзя разрешить первое окно без выбора человека')
+    await page.getByRole('combobox', { name: 'Окно', exact: true }).selectOption({ label: 'Тестовое окно · second.exe · PID 506 · @101' })
+    await confirmAdmin.click()
+    await page.getByRole('status').filter({ hasText: 'Разрешено: Тестовое окно · second.exe · PID 506 · @101' }).waitFor()
+    assert.equal((await calls()).find(([c, a]) => c === 'admin_windows' && a.action === 'grant')[1].window, 101)
+    await fits('окно администратора')
+    await page.getByRole('button', { name: 'Отозвать доступ', exact: true }).click()
+    await page.getByRole('button', { name: 'Выбрать окно администратора' }).waitFor()
+    assert.ok((await calls()).some(([c, a]) => c === 'admin_windows' && a.action === 'revoke'))
+    await emit('state', snapshot)
+    await adminHeading.waitFor({ state: 'hidden' })
 
     // Трей «Связать устройство…» открывает связывание; рядом видно, кто ждёт.
     await emit('open-pairing', null)

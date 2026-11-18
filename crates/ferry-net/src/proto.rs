@@ -397,6 +397,14 @@ pub enum DeviceProtocol {
     /// С 0.1.26: первый кусок содержит метаданные выбранного окна, дальше PNG.
     #[rpc(tx = mpsc::Sender<Chunk>)]
     ShotWindowInfo(ShotWindowInfo),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    AdminInput(AdminInput),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminInput {
+    pub session: String,
+    pub action: ferry_core::screen::admin::Action,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -1,5 +1,6 @@
 use std::io;
 
+mod admin;
 mod agent_tools;
 mod capture;
 mod checks;
@@ -29,7 +30,7 @@ ferry — разработка и тесты на нескольких устр�
 
 Устройства:
   ferry select [--os windows|macos] [--shell <имя>] [--tool <команда>]... [--desktop]
-               [--min-version X.Y.Z] [--feature shell|result|desk-note|desk-awake|durable-start|check]...
+               [--min-version X.Y.Z] [--feature shell|result|desk-note|desk-awake|admin-window|durable-start|check]...
                                     JSON: подходящие связанные устройства и причины отказа; без брони
   ferry devices [--json]            это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят
@@ -149,6 +150,8 @@ ferry — разработка и тесты на нескольких устр�
                                     терминала) — любое действие само занимает стол на 3 мин, take —
                                     надольше (по умолчанию 30 мин), free — снять, --force — чужую
                                     --keep-awake удерживает систему и экран от сна до конца срока
+  ferry admin <устройство> [--session <id>] status|focus|move X Y|click X Y [right]|scroll N|key КЛАВИША|type ТЕКСТ
+                                    управление одним окном администратора после подтверждения на Windows
   ferry ask <устройство|local> <вопрос> [--id <id>] [--timeout 600] [--wait 0]
   ferry ask <устройство|local> --poll <id> [--wait 30] | --cancel <id>
                                     вопрос человеку; ответ done требует проверки результата
@@ -262,6 +265,7 @@ fn main() {
         ["role", device, role] => devices::role(Some(device), role),
         ["forget", device] => devices::forget(device),
         ["desk", device, rest @ ..] => human::desk(device, rest),
+        ["admin", device, rest @ ..] => admin::run(device, rest),
         ["ask", rest @ ..] => human::ask(rest),
         ["crashes", device] => devices::crashes(device, "", false),
         ["crashes", device, "--last"] => devices::crashes(device, "", true),

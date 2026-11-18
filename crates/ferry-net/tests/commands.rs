@@ -598,6 +598,14 @@ async fn durable_admission_respects_headless_modes_and_keeps_request_identity() 
         note: None,
     };
     assert_eq!(node.desk("integration", awake).await.unwrap_err().code, 75);
+    let admin = ferry_core::screen::admin::Action::Probe;
+    assert_eq!(
+        node.admin_input("integration", admin)
+            .await
+            .unwrap_err()
+            .code,
+        75
+    );
     let request = StartRequest {
         request_id: "request-one".into(),
         name: "durable-job".into(),

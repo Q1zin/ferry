@@ -21,6 +21,16 @@ struct Holder {
     session: String,
     until: Instant,
     note: Option<String>,
+    #[cfg(windows)]
+    since: Instant,
+}
+
+#[cfg(windows)]
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Owner {
+    pub from: EndpointId,
+    pub session: String,
+    since: Instant,
 }
 
 impl Holder {
@@ -39,6 +49,19 @@ pub struct Lease {
 }
 
 impl Lease {
+    #[cfg(windows)]
+    pub(crate) fn owner(&self, now: Instant) -> Option<(Owner, Instant)> {
+        let holder = self.holder.as_ref().filter(|holder| holder.until > now)?;
+        Some((
+            Owner {
+                from: holder.from,
+                session: holder.session.clone(),
+                since: holder.since,
+            },
+            holder.until,
+        ))
+    }
+
     pub fn note(&self, now: Instant) -> Option<String> {
         self.holder
             .as_ref()
@@ -154,6 +177,8 @@ impl Lease {
                 let holder = Holder {
                     from,
                     session: session.into(),
+                    #[cfg(windows)]
+                    since: self.holder.as_ref().filter(|h| mine(h)).map_or(now, |h| h.since),
                     until: self
                         .holder
                         .as_ref()
