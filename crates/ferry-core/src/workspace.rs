@@ -247,10 +247,17 @@ pub fn prepare_local(
     git(&dest, &["config", "core.autocrlf", "false"])?;
     git(&dest, &["config", "core.longpaths", "true"])?;
     let root = fs::canonicalize(root)?;
-    git(
-        &dest,
-        &["fetch", "-q", "--", &root.to_string_lossy(), &source.commit],
-    )?;
+    let git_path = root.to_string_lossy();
+    #[cfg(windows)]
+    let git_path = if let Some(unc) = git_path.strip_prefix(r"\\?\UNC\") {
+        format!("//{}", unc.replace('\\', "/"))
+    } else {
+        git_path
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&git_path)
+            .replace('\\', "/")
+    };
+    git(&dest, &["fetch", "-q", "--", &git_path, &source.commit])?;
     git(&dest, &["checkout", "-q", "--detach", &source.commit])?;
     for relative in extra {
         if relative.as_os_str().is_empty()
