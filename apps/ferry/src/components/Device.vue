@@ -27,6 +27,7 @@ const emit = defineEmits<{ say: [text: string, error?: boolean]; gone: [] }>()
 
 const busy = ref('')
 const newName = ref('')
+const forgetDialog = ref<HTMLDialogElement | null>(null)
 const me = computed(() => props.device.id === null)
 const s = computed(() => props.device.status)
 // Чужое устройство слушается, пока на связи и человек за ним его не отключил.
@@ -100,13 +101,17 @@ function rename() {
 }
 
 async function forget() {
-  if (!props.device.id) return
+  if (!props.device.id || busy.value) return
+  busy.value = 'forget'
   try {
     await api.forget(props.device.id)
+    forgetDialog.value?.close()
     emit('say', `${props.device.name} забыто`)
     emit('gone')
   } catch (e) {
     emit('say', String(e), true)
+  } finally {
+    busy.value = ''
   }
 }
 </script>
@@ -277,13 +282,32 @@ async function forget() {
     </div>
 
     <div v-if="!me" class="row">
-      <button class="danger" @click="forget">Забыть устройство</button>
+      <button class="danger" :disabled="!!busy" @click="forgetDialog?.showModal()">Забыть устройство</button>
+      <dialog ref="forgetDialog" class="forget-dialog" aria-labelledby="forget-title" @cancel="busy && $event.preventDefault()">
+        <h2 id="forget-title">Забыть {{ device.name }}?</h2>
+        <p>Чтобы снова подключиться, свяжи эти устройства заново.</p>
+        <div class="row wrap">
+          <button autofocus :disabled="!!busy" @click="forgetDialog?.close()">Отмена</button>
+          <button class="danger" :disabled="!!busy" @click="forget">Забыть</button>
+        </div>
+      </dialog>
     </div>
     </template>
   </section>
 </template>
 
 <style scoped>
+.forget-dialog {
+  color: inherit;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  max-width: min(420px, calc(100% - 48px));
+}
+.forget-dialog::backdrop { background: #0007; }
+.forget-dialog h2 { margin-top: 0; }
+
 /* Во всю высоту main: «Экран» тянет снимок под окно. */
 .device {
   flex: 1 0 auto;
