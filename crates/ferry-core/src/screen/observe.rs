@@ -2,6 +2,9 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path, time::Instant};
 
+pub(super) const UI_LIMIT_MARKER: &str = "… дальше не показано: элементов больше 1500";
+const UI_TEXT_LIMIT: usize = 24 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub window: String,
@@ -92,6 +95,9 @@ pub fn capture_v2(request: RequestV2, root: &Path) -> io::Result<ObservationV2> 
         Ok(tree) => {
             result.elements = tree.elements;
             result.complete = tree.complete;
+            if result.query.is_none() && result.elements.len() == 1 {
+                result.warnings.push("дерево доступности содержит один элемент; если интерфейс ещё загружается, повтори observe".into());
+            }
         }
         Err(e) => result.warnings.push(format!("элементы: {e}")),
     }
@@ -197,8 +203,7 @@ fn capture_base(
     } else if legacy_ui {
         match os::ui(&format!("@{}", window.id)) {
             Ok(ui) => {
-                result.ui_truncated = ui.len() > 24576 || ui.contains("1500");
-                result.ui = crate::junit::clip(&ui, 24576);
+                (result.ui, result.ui_truncated) = legacy_ui_preview(&ui);
             }
             Err(e) => result.warnings.push(format!("элементы: {e}")),
         }
@@ -237,6 +242,10 @@ fn capture_base(
     result.elapsed_ms = begin.elapsed().as_millis() as u64;
     Ok(result)
 }
+fn legacy_ui_preview(ui: &str) -> (String, bool) {
+    let truncated = ui.len() > UI_TEXT_LIMIT || ui.lines().last() == Some(UI_LIMIT_MARKER);
+    (crate::junit::clip(ui, UI_TEXT_LIMIT), truncated)
+}
 fn changed(before: &[Window], after: &[Window], selected: &Window) -> bool {
     after.iter().find(|w| w.id == selected.id) != Some(selected)
         || before.iter().find(|w| w.focused).map(|w| w.id)
@@ -256,6 +265,17 @@ fn permissions() -> (Option<bool>, Option<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_ui_reports_only_real_tree_or_output_limits() {
+        let short = "  Edit \"1500\" 10,12 30×36\n";
+        assert_eq!(legacy_ui_preview(short), (short.into(), false));
+        let limited = format!("{short}{UI_LIMIT_MARKER}\n");
+        assert_eq!(legacy_ui_preview(&limited), (limited.clone(), true));
+        let long = "я".repeat(UI_TEXT_LIMIT / 2 + 1);
+        let (preview, truncated) = legacy_ui_preview(&long);
+        assert!(truncated);
+        assert!(preview.len() <= UI_TEXT_LIMIT);
+    }
     #[test]
     fn detects_focus_motion_and_disappearance_without_real_input() {
         let w = Window {

@@ -1739,10 +1739,11 @@ mod mac {
     pub fn ui(filter: &str) -> io::Result<String> {
         let (window, _) = window(filter)?;
         let k = scale();
-        let all = elements(&window);
-        let mut text: String = all.iter().map(|e| e.line(k) + "\n").collect();
-        if all.len() >= 1500 {
-            text += "… дальше не показано: элементов больше 1500\n";
+        let (all, _) = elements_limited(&window, 1501, false);
+        let mut text: String = all.iter().take(1500).map(|e| e.line(k) + "\n").collect();
+        if all.len() > 1500 {
+            text += super::observe::UI_LIMIT_MARKER;
+            text.push('\n');
         }
         Ok(text)
     }
@@ -2512,15 +2513,24 @@ function Line($e, $depth) {
 
 $script:count = 0
 function Walk($e, $depth) {
-    if ($script:count -ge 1500 -or $depth -gt 40) { return }
+    if ($depth -gt 40) { return }
     $c = $e.Current
     if ($depth -gt 0 -and $c.IsOffscreen) { return }
     $noise = -not $c.Name -and -not $c.AutomationId -and
         $c.ControlType.ProgrammaticName -in 'ControlType.Pane', 'ControlType.Group', 'ControlType.Custom'
     $next = $depth
-    if ($depth -eq 0 -or -not $noise) { Line $e $depth; $script:count++; $next = $depth + 1 }
+    if ($depth -eq 0 -or -not $noise) {
+        $script:count++
+        if ($script:count -gt 1500) { return }
+        Line $e $depth
+        $next = $depth + 1
+    }
     $child = $walker.GetFirstChild($e)
-    while ($child) { Walk $child $next; $child = $walker.GetNextSibling($child) }
+    while ($child) {
+        Walk $child $next
+        if ($script:count -gt 1500) { break }
+        $child = $walker.GetNextSibling($child)
+    }
 }
 
 if ($mode -eq 'structured') {
@@ -2581,7 +2591,7 @@ if ($mode -eq 'structured') {
 
 if ($mode -eq 'tree') {
     Walk (Window $arg) 0
-    if ($script:count -ge 1500) { '… дальше не показано: элементов больше 1500' }
+    if ($script:count -gt 1500) { '… дальше не показано: элементов больше 1500' }
     exit 0
 }
 

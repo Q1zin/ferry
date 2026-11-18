@@ -30,8 +30,28 @@ impl Text {
 /// Строки текста на картинке, сверху вниз; с `want` — места этой подстроки (без учёта регистра).
 pub fn read(image: &Path, want: &str) -> io::Result<Vec<Text>> {
     let mut found = parse(&os::run(image, &want.to_lowercase())?);
+    #[cfg(windows)]
+    if want.is_empty() {
+        found = unique_lines(found);
+    }
     found.sort_by_key(|t| (t.rect.1, t.rect.0));
     Ok(found)
+}
+
+#[cfg(any(windows, test))]
+fn unique_lines(found: Vec<Text>) -> Vec<Text> {
+    let mut kept = Vec::<Text>::new();
+    for line in found {
+        // Windows emits user-language lines first. An alternate recognition of the same area
+        // should not replace it or collapse a separate row with the same text.
+        if !kept
+            .iter()
+            .any(|old| old.contains(line.center()) && line.contains(old.center()))
+        {
+            kept.push(line);
+        }
+    }
+    kept
 }
 
 /// Сколько ждать распознавателя: обычно — секунда-две, а сломанный Vision (видели на бете
@@ -348,6 +368,23 @@ mod tests {
                 text(true, (10, 20, 30, 12), "Готово"),
                 text(false, (5, 6, 7, 8), "Файл\tс табом"),
             ]
+        );
+    }
+
+    #[test]
+    fn windows_line_dedup_keeps_profile_language_and_separate_positions() {
+        let local = text(false, (10, 20, 70, 14), "Готово");
+        let alternate = text(false, (12, 21, 67, 12), "Гotobo");
+        let other_row = text(false, (13, 33, 70, 14), "Готово");
+        let same_row_elsewhere = text(false, (120, 20, 70, 14), "Готово");
+        assert_eq!(
+            unique_lines(vec![
+                local.clone(),
+                alternate,
+                other_row.clone(),
+                same_row_elsewhere.clone()
+            ]),
+            [local, other_row, same_row_elsewhere]
         );
     }
 
