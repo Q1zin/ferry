@@ -64,6 +64,19 @@ impl Inner {
             .map_or_else(|| owner.from.fmt_short().to_string(), |p| p.name.clone())
     }
 
+    pub(super) fn forget_admin(&self, id: EndpointId) {
+        let mut state = self.admin.lock().unwrap();
+        if state
+            .grant
+            .as_ref()
+            .is_some_and(|grant| grant.owner.from == id)
+        {
+            let grant = state.grant.take();
+            drop(state);
+            drop(grant);
+        }
+    }
+
     pub(super) fn expire_admin(&self) {
         let has_grant = self.admin.lock().unwrap().grant.is_some();
         if !has_grant {

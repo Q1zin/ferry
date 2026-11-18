@@ -591,6 +591,8 @@ impl Agent {
             task.abort();
         }
         inner.desk.lock().unwrap().forget(id);
+        #[cfg(windows)]
+        inner.forget_admin(id);
         inner.notify();
         Ok(())
     }
