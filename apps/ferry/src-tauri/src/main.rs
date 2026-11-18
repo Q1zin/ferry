@@ -7,6 +7,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let code = match args.as_slice() {
+        #[cfg(windows)]
+        [_, "admin-desktop-worker", rest @ ..] => Some(ferry_core::admin_desktop::worker(rest)),
         [_, "job-supervise", name] => Some(ferry_core::jobs::supervise(name)),
         // git на этом устройстве ходит в приватные репозитории ключами устройства, которое
         // запустило команду: GIT_SSH_COMMAND='<этот exe> ssh' (релей git).

@@ -14,6 +14,7 @@ use crate::exit_code;
 
 pub mod act;
 mod act_v2;
+pub mod admin;
 pub mod elements;
 pub mod live;
 pub mod observe;
@@ -258,6 +259,10 @@ pub struct Window {
 impl Window {
     pub fn id(&self) -> i64 {
         self.id
+    }
+
+    pub fn pid(&self) -> i64 {
+        self.pid
     }
 
     pub fn rect(&self) -> Option<(i64, i64, i64, i64)> {
@@ -2245,6 +2250,10 @@ mod win {
         inputs.extend(buttons.iter().map(|&button| mouse(0, 0, 0, button)));
         inputs.extend(up);
         send(&inputs)
+    }
+
+    pub(super) fn buttons_at_cursor(buttons: [u32; 2]) -> io::Result<String> {
+        send(&buttons.map(|button| mouse(0, 0, 0, button)))
     }
 
     /// Нажать левую кнопку в `from`, провести шагами до `to`, отпустить. Кнопку и клавиши

@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "ferry"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "base64 0.22.1",
  "ferry-core",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-app"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "base64 0.22.1",
  "ferry-core",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-core"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -1627,12 +1627,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "windows-sys 0.61.2",
  "xcap",
 ]
 
 [[package]]
 name = "ferry-net"
-version = "0.1.27"
+version = "0.1.28"
 dependencies = [
  "anyhow",
  "ferry-core",

@@ -2,6 +2,8 @@
 //! релей git; общие типы устройств и локальное управление приложением. CLI и приложение —
 //! тонкие оболочки над ней, связь устройств — в `ferry-net`.
 
+#[cfg(windows)]
+pub mod admin_desktop;
 pub mod awake;
 pub mod capabilities;
 pub mod control;
