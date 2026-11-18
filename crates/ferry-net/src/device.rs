@@ -292,8 +292,18 @@ impl Device {
             },
             "артефакты и история запусков",
         )?;
-        tokio::time::timeout(std::time::Duration::from_secs(60), self.client.ask(Evidence(query))).await
-            .map_err(|_| Fail::new("артефакты: устройство не ответило за 60 с; проверь список перед повторным добавлением"))?
+        let prefix = ferry_core::jobs::evidence::TRANSPORT_ERROR;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.client.0.rpc(Evidence(query)),
+        )
+        .await
+        .map_err(|_| {
+            Fail::new(format!(
+                "{prefix}устройство не ответило за 60 с; проверь список перед повторным добавлением"
+            ))
+        })?
+        .map_err(|e| Fail::new(format!("{prefix}{e}")))?
     }
     pub async fn capabilities(
         &self,

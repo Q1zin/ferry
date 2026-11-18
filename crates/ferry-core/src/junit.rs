@@ -119,12 +119,15 @@ fn read_xml(path: &Path) -> io::Result<String> {
         .take((MAX_XML + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_XML {
-        return Err(io::Error::other("JUnit больше 16 МиБ"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "JUnit больше 16 МиБ",
+        ));
     }
-    String::from_utf8(bytes).map_err(io::Error::other)
+    String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 pub fn read(path: &Path) -> io::Result<Report> {
-    parse(&read_xml(path)?)
+    parse(&read_xml(path)?).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 /// A bounded index of every testcase; retain the XML artifact for unabridged details.
 pub fn read_cases(path: &Path) -> io::Result<Cases> {

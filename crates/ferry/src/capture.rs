@@ -394,7 +394,7 @@ fn work(id: &str) -> Result<Value, Fail> {
         );
         reason = "interrupted";
     }
-    if error.is_none() && rows.is_empty() && !dir.join("stop").exists() {
+    if error.is_none() && encoder.is_ok() && rows.is_empty() && !dir.join("stop").exists() {
         let capture = (|| -> Result<(), Fail> {
             let encoder = encoder.as_ref().map_err(|e| Fail::new(e.to_string()))?;
             write(
@@ -510,6 +510,8 @@ fn work(id: &str) -> Result<Value, Fail> {
         &dir.join("report.json"),
         &json!({"state":"finalizing","complete":false,"frames":rows.len(),"bytes":bytes,"error":error,"created":prior["created"]}),
     )?;
+    let capture_error = error.clone();
+    let mut encoding_error = None;
     let video = match encoder
         .as_ref()
         .map_err(|e| Fail::new(e.to_string()))
@@ -517,6 +519,9 @@ fn work(id: &str) -> Result<Value, Fail> {
     {
         Ok(p) => Some(p),
         Err(e) => {
+            if encoder.is_err() || !rows.is_empty() {
+                encoding_error = Some(e.to_string());
+            }
             error = Some(match error {
                 Some(old) => format!("{old}; {e}"),
                 None => e.to_string(),
@@ -524,7 +529,7 @@ fn work(id: &str) -> Result<Value, Fail> {
             None
         }
     };
-    let value = json!({"schema_version":1,"id":id,"state":if error.is_none(){"completed"}else{"failed"},"complete":error.is_none(),"error":error,"reason":reason,"frames":rows.len(),"bytes":bytes,"created":prior["created"],"finished_at":ferry_core::now(),"video_file":video,"manifest_file":dir.join("manifest.json"),"frame_spool":dir.join("frames"),"encoder":encoder.ok(),"options":options});
+    let value = json!({"schema_version":1,"id":id,"state":if error.is_none(){"completed"}else{"failed"},"complete":error.is_none(),"error":error,"capture_error":capture_error,"encoding_error":encoding_error,"reason":reason,"frames":rows.len(),"bytes":bytes,"created":prior["created"],"finished_at":ferry_core::now(),"video_file":video,"manifest_file":dir.join("manifest.json"),"frame_spool":dir.join("frames"),"encoder":encoder.ok(),"options":options});
     write(
         &dir.join("manifest.json"),
         &json!({"schema_version":1,"recording":value,"frames":rows}),

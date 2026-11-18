@@ -1,12 +1,12 @@
 //! Доказательства одного запуска; недоступные источники остаются явными ошибками.
 use crate::{
-    agent_tools::{report, shot_path},
+    agent_tools::shot_path,
     devices::{ask, finish},
 };
 use ferry_core::{
-    control::{Request, Response},
+    control::{self, Request, Response},
     device::Fail,
-    jobs::evidence::{Action, Query},
+    jobs::evidence::{Action, Query, TRANSPORT_ERROR},
 };
 use serde_json::{Value, json};
 use std::{io, path::PathBuf};
@@ -19,7 +19,7 @@ pub(crate) fn evidence(
     run: &str,
     action: Action,
 ) -> Result<Value, Fail> {
-    report(Request::Evidence {
+    let response = control::call(Request::Evidence {
         device: device.clone(),
         query: Query {
             name: name.into(),
@@ -27,6 +27,12 @@ pub(crate) fn evidence(
             action,
         },
     })
+    .map_err(|e| Fail::new(format!("{TRANSPORT_ERROR}{e}")))?;
+    match response {
+        Response::Report(text) => serde_json::from_str(&text).map_err(Fail::new),
+        Response::Error(error) => Err(error),
+        _ => Err(Fail::new("нет ответа со сведениями о запуске")),
+    }
 }
 fn partial(result: Result<Value, Fail>) -> Value {
     result.unwrap_or_else(|e| json!({"error":e.to_string()}))

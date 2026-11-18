@@ -776,7 +776,11 @@ async fn answer(
             Response::Report(observation_value(observation, &file, lease)?.to_string())
         }
         Request::Evidence { device, query } => Response::Report(match device {
-            Some(who) => agent.device(&who)?.evidence(query).await?,
+            Some(who) => agent
+                .device(&who)
+                .map_err(|e| Fail::new(format!("{}{e}", ferry_core::jobs::evidence::TRANSPORT_ERROR)))?
+                .evidence(query)
+                .await?,
             None => agent.evidence_self(query).await?,
         }),
         Request::Capabilities { device, request } => Response::Capabilities(if device == "local" {

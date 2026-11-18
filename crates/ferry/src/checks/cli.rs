@@ -249,6 +249,7 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
     match args {
         ["list", tail @ ..] => return history::list(tail),
         ["compare", baseline, candidate] => return history::compare(baseline, candidate),
+        ["explain", id] => return explain::run(id),
         ["export", id, tail @ ..] => return export::run(id, tail),
         _ => {}
     }

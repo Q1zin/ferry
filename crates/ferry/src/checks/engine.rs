@@ -481,14 +481,29 @@ impl Run<'_> {
         };
         self.target.row["job"] = phase.job.clone().into();
         self.target.row["run_id"] = json!(phase.run_id);
-        self.target.row["result"] = evidence(
+        let result = evidence(
             &self.device,
             &phase,
             Action::Result {
                 cursor: None,
                 max_bytes: 8192,
             },
-        )?;
+        );
+        self.target.row["collection_error"] = Value::Null;
+        match result {
+            Ok(value) => self.target.row["result"] = value,
+            Err(e) => {
+                let state = if e.message.starts_with(jobs::evidence::TRANSPORT_ERROR) {
+                    "transport_error"
+                } else {
+                    "collection_error"
+                };
+                self.target.row["collection_error"] = json!({
+                    "phase":phase.name,"state":state,"error":e.message
+                });
+                return Err(e);
+            }
+        }
         if phase.name == "test" {
             for path in self
                 .op
@@ -517,11 +532,22 @@ impl Run<'_> {
                             a["artifact"].clone()
                         }
                         Err(e) => {
+                            let state = if e.message.starts_with(jobs::evidence::MISSING_OUTPUT) {
+                                "missing_on_device"
+                            } else if e.message.starts_with(jobs::evidence::TRANSPORT_ERROR) {
+                                "transport_error"
+                            } else {
+                                "collection_error"
+                            };
+                            self.target.row["artifact_collection"][path] =
+                                json!({"state":state,"error":e.message});
                             error(&mut self.target, format!("артефакт {path}: {e}"));
                             continue;
                         }
                     }
                 };
+                self.target.row["artifact_collection"][path] =
+                    json!({"state":"collected","artifact_id":artifact["id"]});
                 if self.op.profile.junit.as_ref() == Some(path) {
                     let id = artifact["id"]
                         .as_str()
@@ -534,12 +560,25 @@ impl Run<'_> {
                         },
                     ) {
                         Ok(t) => {
+                            let state = if tests_pass(&t) {
+                                "passed"
+                            } else if t["failed"].as_u64().unwrap_or_default() > 0
+                                || t["errors"].as_u64().unwrap_or_default() > 0
+                            {
+                                "test_failures"
+                            } else if t["tests"] == 0 {
+                                "empty"
+                            } else {
+                                "incomplete"
+                            };
                             if !tests_pass(&t) {
                                 error(
                                     &mut self.target,
                                     "JUnit: падения, пустой или неполный отчёт",
                                 );
                             }
+                            self.target.row["junit_analysis"] =
+                                json!({"state":state,"path":path,"artifact_id":id});
                             self.target.row["tests"] = t;
                             if self.target.row["test_cases"]["file"].is_null() {
                                 self.target.row["test_cases"] = history::capture_cases(
@@ -554,7 +593,18 @@ impl Run<'_> {
                                 );
                             }
                         }
-                        Err(e) => error(&mut self.target, format!("JUnit: {e}")),
+                        Err(e) => {
+                            let state = if e.message.starts_with(jobs::evidence::INVALID_JUNIT) {
+                                "invalid"
+                            } else if e.message.starts_with(jobs::evidence::TRANSPORT_ERROR) {
+                                "transport_error"
+                            } else {
+                                "analysis_error"
+                            };
+                            self.target.row["junit_analysis"] =
+                                json!({"state":state,"path":path,"artifact_id":id,"error":e.message});
+                            error(&mut self.target, format!("JUnit: {e}"));
+                        }
                     }
                 }
             }

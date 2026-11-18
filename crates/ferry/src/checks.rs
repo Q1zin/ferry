@@ -265,6 +265,7 @@ fn preflight(
 }
 mod cli;
 mod engine;
+mod explain;
 mod export;
 mod history;
 mod journal;

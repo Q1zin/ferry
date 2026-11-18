@@ -17,7 +17,7 @@ fn summary(report: &Value) -> Value {
         "artifacts":rows.iter().filter_map(|r|r["artifacts"].as_array()).map(Vec::len).sum::<usize>()}})
 }
 
-fn legacy_snapshot(path: &Path) -> Result<bool, Fail> {
+pub(super) fn legacy_snapshot(path: &Path) -> Result<bool, Fail> {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return Ok(false);
     };

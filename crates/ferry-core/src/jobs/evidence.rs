@@ -6,6 +6,9 @@ use std::io::Read;
 
 const FILE_LIMIT: u64 = 64 * 1024 * 1024;
 const RUN_LIMIT: u64 = 512 * 1024 * 1024;
+pub const MISSING_OUTPUT: &str = "файл отсутствует на узле: ";
+pub const INVALID_JUNIT: &str = "не удалось разобрать JUnit: ";
+pub const TRANSPORT_ERROR: &str = "канал сбора доказательств: ";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Query {
@@ -243,7 +246,13 @@ pub fn execute(root: &Path, query: Query) -> io::Result<Value> {
                 )
                 .join(path)
             };
-            let metadata = fs::symlink_metadata(&source)?;
+            let metadata = fs::symlink_metadata(&source).map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    io::Error::new(e.kind(), format!("{MISSING_OUTPUT}{}", source.display()))
+                } else {
+                    e
+                }
+            })?;
             if !metadata.is_file() {
                 return Err(io::Error::other(
                     "прикрепить можно обычный файл, не каталог и не ссылку",
@@ -312,7 +321,14 @@ pub fn execute(root: &Path, query: Query) -> io::Result<Value> {
                 .ok_or_else(|| {
                     io::Error::other("нет артефакта: сначала artifacts --add <junit.xml>")
                 })?;
-            let mut report = serde_json::to_value(crate::junit::read(&file.path)?)?;
+            let tests = crate::junit::read(&file.path).map_err(|e| {
+                if e.kind() == io::ErrorKind::InvalidData {
+                    io::Error::new(e.kind(), format!("{INVALID_JUNIT}{e}"))
+                } else {
+                    e
+                }
+            })?;
+            let mut report = serde_json::to_value(tests)?;
             report["artifact"] = serde_json::to_value(file)?;
             report
         }
@@ -390,6 +406,31 @@ mod tests {
             run_id: Some("old".into()),
             action,
         };
+        let missing = execute(
+            &root,
+            query(Action::Add {
+                path: "missing.xml".into(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        assert!(missing.to_string().starts_with(MISSING_OUTPUT));
+        fs::write(root.join("broken.xml"), "<testsuite><testcase").unwrap();
+        let broken = execute(
+            &root,
+            query(Action::Add {
+                path: "broken.xml".into(),
+            }),
+        )
+        .unwrap();
+        let invalid = execute(
+            &root,
+            query(Action::Tests {
+                artifact: broken["artifact"]["id"].as_str().unwrap().into(),
+            }),
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().starts_with(INVALID_JUNIT));
         let added = execute(
             &root,
             query(Action::Add {

@@ -50,6 +50,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry init --template smoke|tauri|electron|web [--root PATH]
   ferry check list [--limit 50] [--before CREATED:ID]
   ferry check compare BASE_ID CANDIDATE_ID
+  ferry check explain ID            краткий JSON: этапы, тесты, логи и проблемы со сбором
   ferry check export ID [--dest DIR]  общий отчёт, все тесты, логи и ZIP доказательств
   ferry queue add PROFILE --file PATH --devices SELECTOR [--os windows|macos] [--wait SEC]
   ferry queue status|cancel|resume|restart ID
