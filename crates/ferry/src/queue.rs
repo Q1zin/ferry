@@ -27,6 +27,10 @@ fn response(root: &std::path::Path, id: &str) -> Result<i32, Fail> {
         Some("failed" | "expired" | "interrupted")
     )))
 }
+pub(crate) fn last_saved_state(id: &str) -> Option<String> {
+    let root = ferry_core::ferry_home().ok()?.join("queue");
+    store::read(&root, id).ok().map(|item| item.state)
+}
 fn equivalent(a: &Item, b: &Item) -> bool {
     fn plan(mut value: Value) -> Value {
         value["created"] = Value::Null;

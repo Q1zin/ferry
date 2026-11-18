@@ -1,3 +1,4 @@
+mod recovery;
 mod typed;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Write};
@@ -230,11 +231,20 @@ fn run(args: &[String], cancelled: &AtomicBool) -> Value {
     let code = captured.code;
     let (out_truncated, err_truncated) = (captured.out_truncated, captured.err_truncated);
     if let Some(reason) = captured.interrupted {
-        let mut value = failure(
-            reason,
-            "Local command stopped. A durable operation may still be running: query its id before retrying.",
-            false,
-        );
+        let recovery = recovery::hint(&words, &stdout);
+        let message = if let Some(hint) = &recovery {
+            format!(
+                "Local wait stopped. The last confirmed operation state is {}. Query the same identifier with ferry args {} before retrying.",
+                hint["last_confirmed_state"].as_str().unwrap_or("unknown"),
+                hint["next_args"]
+            )
+        } else {
+            "Local command stopped. The outcome is unknown. Verify it before retrying.".into()
+        };
+        let mut value = failure(reason, &message, false);
+        if let Some(hint) = recovery {
+            value["structuredContent"]["recovery"] = hint;
+        }
         value["structuredContent"]["stdout"] = json!(stdout);
         value["structuredContent"]["stderr"] = json!(stderr);
         value["structuredContent"]["truncated"] = json!(out_truncated || err_truncated);
@@ -492,6 +502,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.interrupted, Some("cancelled"));
+    }
+    #[test]
+    fn interrupted_tool_returns_the_exact_operation_to_query() {
+        let args = [
+            "start",
+            "win",
+            "build",
+            "--request",
+            "same",
+            "--",
+            "echo hi",
+        ]
+        .map(String::from);
+        let result = run(&args, &AtomicBool::new(true));
+        let data = &result["structuredContent"];
+        assert_eq!(data["error"]["code"], "cancelled");
+        assert_eq!(data["recovery"]["id"], "same");
+        assert_eq!(data["recovery"]["last_confirmed_state"], "unknown");
+        assert_eq!(
+            data["recovery"]["next_args"],
+            json!(["start-status", "win", "same"])
+        );
     }
     #[cfg(unix)]
     #[test]
