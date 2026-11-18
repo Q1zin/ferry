@@ -738,6 +738,7 @@ impl Run<'_> {
                 junit,
                 Some(&self.session),
             );
+            diagnosis["device"] = self.op.target_label(self.index).into();
             if !self.target.row["final_observation"].is_null() {
                 diagnosis["observation"] = self.target.row["final_observation"].clone();
             }
@@ -831,10 +832,10 @@ fn completed_before_deadline(
 }
 
 fn one(root: &Path, op: &Operation, index: usize, collect_only: bool) -> Result<(), Fail> {
-    let (device, _) = &op.targets[index];
+    let device = op.target_device(index);
     let target = journal::target(root, op, index)?;
     let current = state()?;
-    let status = match device {
+    let status = match &device {
         None => Some(current.me),
         Some(d) => current
             .find(d)
@@ -864,7 +865,7 @@ fn one(root: &Path, op: &Operation, index: usize, collect_only: bool) -> Result<
         root,
         op,
         index,
-        device: device.clone(),
+        device,
         session: format!("check:{}:{index}", op.id),
         spec,
         target,
@@ -880,7 +881,7 @@ fn one(root: &Path, op: &Operation, index: usize, collect_only: bool) -> Result<
     }
     eprintln!(
         "ferry check [{}]: {}",
-        device.as_deref().unwrap_or("local"),
+        op.target_label(index),
         run.target.state
     );
     Ok(())
@@ -940,7 +941,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let op=Operation{id:"stable".into(),profile_name:"smoke".into(),profile:serde_json::from_value(json!({"platforms":{"all":{"command":"must-not-run","build":"must-not-build","launch":"must-not-launch"}},"ready_log":"ready"})).unwrap(),cwd:root.clone(),project:None,isolated:false,targets:vec![(None,None)],parallel:1,created:0,output_base:None};
+        let op=Operation{id:"stable".into(),profile_name:"smoke".into(),profile:serde_json::from_value(json!({"platforms":{"all":{"command":"must-not-run","build":"must-not-build","launch":"must-not-launch"}},"ready_log":"ready"})).unwrap(),cwd:root.clone(),project:None,isolated:false,targets:vec![(None,None)],target_ids:BTreeMap::new(),parallel:1,created:0,output_base:None};
         (op, root)
     }
     fn run<'a>(op: &'a Operation, root: &'a Path) -> Run<'a> {

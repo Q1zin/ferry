@@ -23,6 +23,8 @@ pub(super) struct Operation {
     pub project: Option<Project>,
     pub isolated: bool,
     pub targets: Vec<(Option<String>, Option<Status>)>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub target_ids: BTreeMap<usize, String>,
     pub parallel: usize,
     pub created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -30,6 +32,24 @@ pub(super) struct Operation {
 }
 
 impl Operation {
+    pub fn target_device(&self, index: usize) -> Option<String> {
+        self.target_ids
+            .get(&index)
+            .or(self.targets[index].0.as_ref())
+            .cloned()
+    }
+
+    pub fn target_label(&self, index: usize) -> &str {
+        self.targets[index].0.as_deref().unwrap_or("local")
+    }
+
+    pub fn same_target(&self, other: &Self, index: usize) -> bool {
+        match (self.target_ids.get(&index), other.target_ids.get(&index)) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.targets[index].0 == other.targets[index].0,
+        }
+    }
+
     pub fn output_dir(&self, index: usize) -> String {
         let base = self.output_base.as_deref().unwrap_or(".ferry-checks");
         format!("{base}/{}-{index}", self.id)
@@ -127,7 +147,7 @@ pub(super) fn target(root: &Path, op: &Operation, index: usize) -> Result<Target
     if path.exists() {
         return read(&path);
     }
-    let device = op.targets[index].0.as_deref().unwrap_or("local");
+    let device = op.target_label(index);
     Ok(Target {
         state: "pending".into(),
         row: json!({"device":device,"profile":op.profile_name,"state":"pending","errors":[],"output_directory":op.output_dir(index)}),
@@ -149,6 +169,9 @@ pub(super) fn report(root: &Path) -> Result<Value, Fail> {
         let target = target(root, &op, index)?;
         pending |= !terminal(&target.state) || target.cleanup_pending;
         let mut row = target.row;
+        if let Some(id) = op.target_ids.get(&index) {
+            row["device_id"] = id.clone().into();
+        }
         row["state"] = target.state.into();
         row["phases"] = json!(target.phases);
         row["finished_at"] = json!(target.finished_at);
@@ -202,6 +225,7 @@ mod tests {
             project: None,
             isolated: false,
             targets: vec![(None, None)],
+            target_ids: BTreeMap::new(),
             parallel: 1,
             created: 0,
             output_base: None,

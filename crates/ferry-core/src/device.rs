@@ -174,8 +174,20 @@ impl Snapshot {
             .filter(|a| now.saturating_sub(a.at) < CONTROL_SECS)
     }
 
-    /// Связанное устройство по имени или началу ключа (от 4 знаков).
+    /// Связанное устройство по полному ключу, имени или началу ключа (от 4 знаков).
     pub fn find(&self, who: &str) -> Result<&PeerView, String> {
+        // A saved full endpoint key must never fall back to another peer's display name.
+        if who.len() == 64
+            && who
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        {
+            return self
+                .peers
+                .iter()
+                .find(|p| p.id == who)
+                .ok_or_else(|| format!("нет устройства с ключом {who:?}"));
+        }
         if let Some(peer) = self.peers.iter().find(|p| p.name == who) {
             return Ok(peer);
         }
@@ -243,11 +255,20 @@ mod tests {
         assert!(snap.find("c6a0c6").is_err());
         let err = Snapshot {
             peers: vec![peer("c6a0aaaa", "a"), peer("c6a0bbbb", "b")],
-            ..snap
+            ..snap.clone()
         }
         .find("c6a0")
         .unwrap_err();
         assert!(err.contains("нескольким"), "{err}");
+
+        let key = "a".repeat(64);
+        let mut snap = Snapshot {
+            peers: vec![peer("different", &key), peer(&key, "renamed")],
+            ..snap
+        };
+        assert_eq!(snap.find(&key).unwrap().name, "renamed");
+        snap.peers.pop();
+        assert!(snap.find(&key).is_err());
     }
 
     #[test]

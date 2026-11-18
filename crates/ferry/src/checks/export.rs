@@ -99,7 +99,9 @@ fn build(root: &Path, op: &Operation, directory: &Path) -> Result<Value, Fail> {
             .push("проверка прервана: сначала resume/collect либо сохрани частичный пакет".into());
     }
     journal::write(&directory.join("operation.json"), op)?;
-    for (index, (device, _)) in op.targets.iter().enumerate() {
+    for index in 0..op.targets.len() {
+        let device = op.target_device(index);
+        let label = op.target_label(index);
         let target = journal::target(root, op, index)?;
         let dir = directory.join(format!("target-{index}"));
         private_dir(&dir)?;
@@ -126,7 +128,8 @@ fn build(root: &Path, op: &Operation, directory: &Path) -> Result<Value, Fail> {
             } else {
                 None
             };
-            let mut value = diagnostics::collect(device, &phase.job, run, None, junit, None);
+            let mut value = diagnostics::collect(&device, &phase.job, run, None, junit, None);
+            value["device"] = label.into();
             for key in [
                 "result",
                 "evidence",
@@ -139,7 +142,7 @@ fn build(root: &Path, op: &Operation, directory: &Path) -> Result<Value, Fail> {
                 }
             }
             diagnostics::bundle::collect_budget(
-                device,
+                &device,
                 &mut value,
                 &file,
                 &[],
@@ -171,7 +174,7 @@ fn build(root: &Path, op: &Operation, directory: &Path) -> Result<Value, Fail> {
                 }
             }
             journal::write(&file, &value)?;
-            phases.push(json!({"target":index,"device":device.as_deref().unwrap_or("local"),"phase":phase.name,"job":phase.job,"run_id":run,"report":format!("target-{index}/phase-{n}/report.json"),"complete":value["bundle"]["complete"]}));
+            phases.push(json!({"target":index,"device":label,"phase":phase.name,"job":phase.job,"run_id":run,"report":format!("target-{index}/phase-{n}/report.json"),"complete":value["bundle"]["complete"]}));
         }
         for (key, field, filename) in [
             ("final_observation", "screenshot", "window.png"),

@@ -57,10 +57,13 @@ fn output(root: &Path, wait: bool) -> Result<i32, Fail> {
     }
 }
 
-type Selected = Vec<(Option<String>, Option<Status>)>;
-fn targets(selector: &str) -> Result<Selected, Fail> {
-    let snapshot = state()?;
+type Selected = (
+    Vec<(Option<String>, Option<Status>)>,
+    BTreeMap<usize, String>,
+);
+fn targets(snapshot: &ferry_core::device::Snapshot, selector: &str) -> Result<Selected, Fail> {
     let mut selected: Vec<(Option<String>, Option<Status>)> = Vec::new();
+    let mut ids = BTreeMap::new();
     for target in selector.split(',') {
         if target == "local" {
             if !selected.iter().any(|(d, _)| d.is_none()) {
@@ -84,10 +87,8 @@ fn targets(selector: &str) -> Result<Selected, Fail> {
             },
         };
         for peer in peers {
-            if !selected
-                .iter()
-                .any(|(d, _)| d.as_deref() == Some(peer.name.as_str()))
-            {
+            if !ids.values().any(|id| id == &peer.id) {
+                ids.insert(selected.len(), peer.id.clone());
                 selected.push((
                     Some(peer.name.clone()),
                     peer.online.then(|| peer.status.clone()).flatten(),
@@ -98,7 +99,7 @@ fn targets(selector: &str) -> Result<Selected, Fail> {
     if selected.is_empty() || selected.len() > 64 {
         return Err(Fail::new("check: нужны 1..64 устройства"));
     }
-    Ok(selected)
+    Ok((selected, ids))
 }
 
 fn same_request(a: &Operation, b: &Operation) -> bool {
@@ -107,10 +108,8 @@ fn same_request(a: &Operation, b: &Operation) -> bool {
         && a.cwd == b.cwd
         && a.isolated == b.isolated
         && a.output_base == b.output_base
-        && a.targets
-            .iter()
-            .map(|(d, _)| d)
-            .eq(b.targets.iter().map(|(d, _)| d))
+        && a.targets.len() == b.targets.len()
+        && (0..a.targets.len()).all(|index| a.same_target(b, index))
         && a.project.as_ref().map(|p| {
             (
                 &p.root,
@@ -190,6 +189,7 @@ pub(crate) fn queue_prepare(
         project,
         isolated,
         targets: Vec::new(),
+        target_ids: BTreeMap::new(),
         parallel: 1,
         created: ferry_core::now(),
         output_base: None,
@@ -203,7 +203,7 @@ pub(crate) fn queue_admit(
     status: Status,
 ) -> Result<(), Fail> {
     let mut op: Operation = serde_json::from_value(plan.clone()).map_err(Fail::new)?;
-    if !op.targets.is_empty() || op.parallel != 1 {
+    if !op.targets.is_empty() || !op.target_ids.is_empty() || op.parallel != 1 {
         return Err(Fail::new(
             "queue plan должен быть без назначенного устройства",
         ));
@@ -218,6 +218,9 @@ pub(crate) fn queue_admit(
         .truncate(false)
         .open(root.join("init.lock"))?;
     init.lock()?;
+    if let Some(id) = &device {
+        op.target_ids.insert(0, id.clone());
+    }
     op.targets = vec![(device, Some(status))];
     let path = root.join("operation.json");
     if path.exists() {
@@ -373,7 +376,7 @@ fn run_with_output(args: &[&str], output_base: Option<&str>) -> io::Result<i32> 
             .ok_or_else(|| Fail::new("нет такого профиля"))?
             .clone();
         validate(name, &profile)?;
-        let selected = targets(selector)?;
+        let (selected, target_ids) = targets(&state()?, selector)?;
         let project = planned_project(!no_sync, home, &mut profile)?;
         // Изоляция обязательна для новых lifecycle-профилей внутри git-проекта.
         let isolated = isolated
@@ -413,6 +416,7 @@ fn run_with_output(args: &[&str], output_base: Option<&str>) -> io::Result<i32> 
             project,
             isolated,
             targets: selected,
+            target_ids,
             parallel,
             created: ferry_core::now(),
             output_base: output_base.map(str::to_owned),
@@ -443,9 +447,10 @@ fn run_with_output(args: &[&str], output_base: Option<&str>) -> io::Result<i32> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn duplicate_id_cannot_change_effects() {
-        let mut a = Operation {
+    use ferry_core::device::{PeerView, Role, Snapshot};
+
+    fn operation() -> Operation {
+        Operation {
             id: "x".into(),
             profile_name: "smoke".into(),
             profile: serde_json::from_value(json!({"platforms":{"all":{"command":"true"}}}))
@@ -454,14 +459,76 @@ mod tests {
             project: None,
             isolated: false,
             targets: vec![(None, None)],
+            target_ids: BTreeMap::new(),
             parallel: 1,
             created: 1,
             output_base: None,
-        };
+        }
+    }
+
+    #[test]
+    fn duplicate_id_cannot_change_effects() {
+        let mut a = operation();
         let b = a.clone();
         a.created = 2;
         assert!(same_request(&a, &b));
         a.profile.platforms.get_mut("all").unwrap().command = "false".into();
         assert!(!same_request(&a, &b));
+    }
+
+    #[test]
+    fn check_keeps_the_original_peer_after_rename_and_name_reuse() {
+        let original = "a".repeat(64);
+        let replacement = "b".repeat(64);
+        let status = Status {
+            name: "hub".into(),
+            role: Role::Both,
+            mode: Mode::Active,
+            os: "macos".into(),
+            version: "0.1.26".into(),
+        };
+        let peer = |id: &str, name: &str, online| PeerView {
+            id: id.into(),
+            name: name.into(),
+            online,
+            status: online.then(|| status.clone()),
+            direct: None,
+            rtt_ms: None,
+        };
+        let mut snapshot = Snapshot {
+            id: String::new(),
+            me: status.clone(),
+            peers: vec![peer(&original, "win", false)],
+            lan: Vec::new(),
+            pairing: None,
+            activity: Vec::new(),
+        };
+        let mut saved = operation();
+        (saved.targets, saved.target_ids) = targets(&snapshot, "win,aaaa").unwrap();
+        assert_eq!(saved.targets.len(), 1);
+        assert!(saved.targets[0].1.is_none());
+        snapshot.peers = vec![
+            peer(&original, "new-name", true),
+            peer(&replacement, "win", true),
+        ];
+        let json = serde_json::to_value(&saved).unwrap();
+        let mut saved: Operation = serde_json::from_value(json.clone()).unwrap();
+        let device = saved.target_device(0).unwrap();
+        assert_eq!(saved.target_label(0), "win");
+        let resumed = snapshot.find(&device).unwrap();
+        assert_eq!(resumed.id, original);
+        assert!(resumed.online);
+        let mut retried = operation();
+        (retried.targets, retried.target_ids) = targets(&snapshot, "new-name").unwrap();
+        assert!(same_request(&saved, &retried));
+        (retried.targets, retried.target_ids) = targets(&snapshot, "win").unwrap();
+        assert!(!same_request(&saved, &retried));
+        snapshot.peers.remove(0);
+        assert!(snapshot.find(&device).is_err());
+
+        let mut legacy = json;
+        legacy.as_object_mut().unwrap().remove("target_ids");
+        saved = serde_json::from_value(legacy).unwrap();
+        assert_eq!(saved.target_device(0).as_deref(), Some("win"));
     }
 }

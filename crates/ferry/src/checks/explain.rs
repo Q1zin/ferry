@@ -63,7 +63,10 @@ fn summarize(report: &Value) -> Value {
 }
 
 fn target(row: &Value) -> Value {
-    let device = row["device"].as_str().unwrap_or("local");
+    let device = row["device_id"]
+        .as_str()
+        .or_else(|| row["device"].as_str())
+        .unwrap_or("local");
     let phases: Vec<_> = row["phases"]
         .as_array()
         .into_iter()

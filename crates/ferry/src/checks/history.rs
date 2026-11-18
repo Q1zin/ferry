@@ -216,7 +216,7 @@ fn hydrate(root: &Path, op: &Operation) -> Result<(), Fail> {
     guard
         .try_lock()
         .map_err(|_| Fail::new("проверка ещё выполняется"))?;
-    for (index, (device, _)) in op.targets.iter().enumerate() {
+    for index in 0..op.targets.len() {
         let mut target = journal::target(root, op, index)?;
         if !journal::terminal(&target.state) || target.cleanup_pending {
             return Err(Fail::new("проверка ещё не завершена"));
@@ -234,8 +234,9 @@ fn hydrate(root: &Path, op: &Operation) -> Result<(), Fail> {
             .get(junit)
             .cloned()
             .unwrap_or(Value::Null);
-        target.row["test_cases"] = capture_cases(root, index, device, &phase, &artifact)
-            .unwrap_or_else(|e| json!({"complete":false,"error":e.to_string()}));
+        target.row["test_cases"] =
+            capture_cases(root, index, &op.target_device(index), &phase, &artifact)
+                .unwrap_or_else(|e| json!({"complete":false,"error":e.to_string()}));
         journal::write(&journal::target_path(root, index), &target)?;
     }
     Ok(())
@@ -369,7 +370,9 @@ pub(super) fn compare(baseline: &str, candidate: &str) -> io::Result<i32> {
                     .map(|(d, s)| (d.clone(), s.as_ref().map(|s| s.os.clone())))
                     .collect::<Vec<_>>()
             };
-            if devices(&oa) != devices(&ob) {
+            if devices(&oa) != devices(&ob)
+                || !(0..oa.targets.len()).all(|index| oa.same_target(&ob, index))
+            {
                 return Err(Fail::new("разные устройства/ОС/порядок матрицы"));
             }
             Ok(diff(cases(&a, &ra)?, cases(&b, &rb)?))
@@ -498,6 +501,7 @@ mod tests {
                 project: None,
                 isolated: false,
                 targets: vec![(None, None)],
+                target_ids: BTreeMap::new(),
                 parallel: 1,
                 created,
                 output_base: None,
