@@ -733,11 +733,11 @@ impl Tray {
             for (m, item) in &self.modes {
                 let _ = item.set_checked(*m == mode);
             }
-            let image = if control.is_some() {
-                tray_controlled()
-            } else if questions > 0 {
+            let image = if questions > 0 {
                 tauri::image::Image::from_bytes(include_bytes!("../icons/tray/question-32.png"))
                     .expect("иконка трея — PNG из репозитория")
+            } else if control.is_some() {
+                tray_controlled()
             } else {
                 tray_icon(mode)
             };
