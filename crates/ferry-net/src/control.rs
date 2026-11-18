@@ -267,22 +267,34 @@ async fn answer(
             Some(who) => agent.device(&who)?.human(request, session).await?,
             None => agent.human_self(request, session).await?,
         }),
-        Request::DeskNote {
-            device,
-            minutes,
-            note,
-        } => {
-            let action = DeskAction::HoldNote {
-                seconds: minutes.saturating_mul(60),
-                note,
+        request @ (Request::DeskNote { .. } | Request::DeskAwake { .. }) => {
+            let (device, seconds, action) = match request {
+                Request::DeskNote {
+                    device,
+                    minutes,
+                    note,
+                } => {
+                    let seconds = minutes.saturating_mul(60);
+                    (device, seconds, DeskAction::HoldNote { seconds, note })
+                }
+                Request::DeskAwake {
+                    device,
+                    minutes,
+                    note,
+                } => {
+                    let seconds = minutes.saturating_mul(60);
+                    (device, seconds, DeskAction::HoldAwake { seconds, note })
+                }
+                _ => unreachable!(),
             };
             let message = if device == "local" {
-                sessions.track(agent.id(), session, minutes.saturating_mul(60));
-                agent.desk_self(session, action)?
+                let said = agent.desk_self(session, action)?;
+                sessions.track(agent.id(), session, seconds);
+                said
             } else {
                 let target = agent.device(&device)?;
                 let said = target.desk(session, action).await?;
-                sessions.track(target.id, session, minutes.saturating_mul(60));
+                sessions.track(target.id, session, seconds);
                 said
             };
             Response::Message(message)

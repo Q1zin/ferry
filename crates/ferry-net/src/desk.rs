@@ -5,12 +5,14 @@
 
 use std::time::{Duration, Instant};
 
+use ferry_core::awake::Inhibitor;
 use iroh::EndpointId;
 
 use crate::proto::DeskAction;
 
 /// Сколько держится бронь после последнего действия: между шагами агент думает.
 pub const HOLD: Duration = Duration::from_secs(180);
+pub const MAX_AWAKE_SECONDS: u32 = 12 * 60 * 60;
 
 /// Кто держит стол.
 #[derive(Debug, Clone, PartialEq)]
@@ -30,15 +32,46 @@ impl Holder {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Lease(Option<Holder>);
+#[derive(Default)]
+pub struct Lease {
+    holder: Option<Holder>,
+    awake: Option<(Inhibitor, Instant)>,
+}
 
 impl Lease {
     pub fn note(&self, now: Instant) -> Option<String> {
-        self.0
+        self.holder
             .as_ref()
             .filter(|h| h.until > now)
             .and_then(|h| h.note.clone())
+            .or_else(|| {
+                self.awake
+                    .as_ref()
+                    .filter(|(_, until)| *until > now)
+                    .map(|_| "Бронь без сна".into())
+            })
+    }
+
+    fn clear(&mut self) {
+        self.holder = None;
+        self.awake = None;
+    }
+
+    pub fn maintain(&mut self, now: Instant, desktop_allowed: bool) -> bool {
+        if self.holder.as_ref().is_some_and(|h| h.until <= now) {
+            self.clear();
+            return true;
+        }
+        if !desktop_allowed || self.awake.as_ref().is_some_and(|(_, until)| *until <= now) {
+            return self.awake.take().is_some();
+        }
+        false
+    }
+
+    pub fn forget(&mut self, peer: EndpointId) {
+        if self.holder.as_ref().is_some_and(|h| h.from == peer) {
+            self.clear();
+        }
     }
 
     /// Применить действие `session` с устройства `from`. Ответ — для человека; отказ — если стол
@@ -51,24 +84,30 @@ impl Lease {
         now: Instant,
         name: impl Fn(EndpointId) -> String,
     ) -> Result<String, String> {
-        if let DeskAction::HoldNote { seconds, note } = action {
-            if note.chars().count() > 160 || note.chars().any(char::is_control) {
-                return Err("заметка: до 160 символов, без управляющих символов".into());
+        let (action, note, stay_awake) = match action {
+            DeskAction::HoldNote { seconds, note } => {
+                (DeskAction::Hold(seconds), Some(note), false)
             }
-            let said = self.apply(from, session, DeskAction::Hold(seconds), now, name)?;
-            if let Some(holder) = &mut self.0 {
-                holder.note = (!note.is_empty()).then_some(note);
+            DeskAction::HoldAwake { seconds, note } => {
+                if !(1..=MAX_AWAKE_SECONDS).contains(&seconds) {
+                    return Err("бронь без сна: срок от 1 секунды до 12 часов".into());
+                }
+                (DeskAction::Hold(seconds), note, true)
             }
-            return Ok(said);
+            action => (action, None, false),
+        };
+        if note
+            .as_ref()
+            .is_some_and(|n| n.chars().count() > 160 || n.chars().any(char::is_control))
+        {
+            return Err("заметка: до 160 символов, без управляющих символов".into());
         }
-        if self.0.as_ref().is_some_and(|h| h.until <= now) {
-            self.0 = None;
-        }
+        self.maintain(now, true);
         let mine = |h: &Holder| h.from == from && h.session == session;
         let who = |h: &Holder| h.who(&name);
         let left = |h: &Holder| h.until.saturating_duration_since(now).as_secs();
-        match (action, &self.0) {
-            (DeskAction::HoldNote { .. }, _) => unreachable!(),
+        match (action, &self.holder) {
+            (DeskAction::HoldNote { .. } | DeskAction::HoldAwake { .. }, _) => unreachable!(),
             (DeskAction::ShowReport, holder) => Ok(serde_json::json!({
                 "state": if holder.is_some() { "busy" } else { "free" },
                 "session": session,
@@ -79,7 +118,9 @@ impl Lease {
                 })),
                 "owned": holder.as_ref().is_some_and(mine),
                 "remaining_seconds": holder.as_ref().map(left),
-                "note": holder.as_ref().and_then(|h| h.note.as_ref())
+                "note": holder.as_ref().and_then(|h| h.note.as_ref()),
+                "keep_awake": self.awake.is_some(),
+                "awake_remaining_seconds": self.awake.as_ref().map(|(_, until)| until.saturating_duration_since(now).as_secs())
             })
             .to_string()),
             (DeskAction::Show, None) => Ok("свободен".into()),
@@ -87,38 +128,49 @@ impl Lease {
             (DeskAction::ForceFree, None) => Ok("свободен".into()),
             (DeskAction::ForceFree, Some(h)) => {
                 let was = who(h);
-                self.0 = None;
+                self.clear();
                 Ok(format!("свободен — бронь {was} снята"))
             }
-            (DeskAction::ReleaseOwned, Some(h)) if !mine(h) => Ok("своей брони нет".into()),
+            (DeskAction::ReleaseControl | DeskAction::ReleaseOwned, Some(h)) if !mine(h) => Ok("своей брони нет".into()),
+            (DeskAction::ReleaseControl, _) if self.awake.is_some() => Ok("бронь без сна сохранена".into()),
             (DeskAction::Free | DeskAction::Hold(_), Some(h)) if !mine(h) => Err(format!(
                 "занят: {} — ещё {} с; подожди или выбери другое устройство: ferry select --desktop",
                 who(h),
                 left(h)
             )),
-            (DeskAction::Free | DeskAction::ReleaseOwned, _) => {
-                self.0 = None;
+            (DeskAction::Free | DeskAction::ReleaseOwned | DeskAction::ReleaseControl, _) => {
+                self.clear();
                 Ok("свободен".into())
             }
             (DeskAction::Hold(secs), _) => {
+                if stay_awake {
+                    let until = now + Duration::from_secs(secs.into());
+                    if let Some((_, current)) = &mut self.awake {
+                        *current = (*current).max(until);
+                    } else {
+                        self.awake = Some((Inhibitor::acquire().map_err(|e| format!("удержание питания: {e}"))?, until));
+                    }
+                }
                 let holder = Holder {
                     from,
                     session: session.into(),
                     until: self
-                        .0
+                        .holder
                         .as_ref()
                         .filter(|h| mine(h))
                         .map_or(now + Duration::from_secs(secs.into()), |h| {
                             h.until.max(now + Duration::from_secs(secs.into()))
                         }),
-                    note: self
-                        .0
-                        .as_ref()
-                        .filter(|h| mine(h))
-                        .and_then(|h| h.note.clone()),
+                    note: match note {
+                        Some(note) => (!note.is_empty()).then_some(note),
+                        None => self.holder.as_ref().filter(|h| mine(h)).and_then(|h| h.note.clone()),
+                    },
                 };
-                let said = format!("занят тобой — ещё {} с", left(&holder));
-                self.0 = Some(holder);
+                let mut said = format!("занят тобой — ещё {} с", left(&holder));
+                if stay_awake {
+                    said.push_str(", удержание питания включено");
+                }
+                self.holder = Some(holder);
                 Ok(said)
             }
         }

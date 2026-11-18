@@ -91,7 +91,8 @@ pub fn desk(device: &str, args: &[&str]) -> io::Result<i32> {
         ["free", tail @ ..] => ("free", 0, tail),
         _ => ("show", 0, args),
     };
-    let (mut session, mut note, mut json, mut force) = (control::session(), None, false, false);
+    let (mut session, mut note, mut json, mut force, mut keep_awake) =
+        (control::session(), None, false, false, false);
     while !rest.is_empty() {
         match rest {
             ["--session", id, tail @ ..] => {
@@ -100,6 +101,10 @@ pub fn desk(device: &str, args: &[&str]) -> io::Result<i32> {
             }
             ["--note", text, tail @ ..] if action == "take" => {
                 note = Some((*text).to_string());
+                rest = tail;
+            }
+            ["--keep-awake", tail @ ..] if action == "take" => {
+                keep_awake = true;
                 rest = tail;
             }
             ["--json", tail @ ..] if action == "show" => {
@@ -113,7 +118,26 @@ pub fn desk(device: &str, args: &[&str]) -> io::Result<i32> {
             _ => return crate::usage(),
         }
     }
-    let request = if let Some(note) = note {
+    let request = if keep_awake {
+        if !(1..=720).contains(&minutes) {
+            return devices::finish(Err(Fail::new("--keep-awake: срок от 1 до 720 минут")));
+        }
+        let state = match devices::state() {
+            Ok(state) => state,
+            Err(error) => return devices::finish(Err(error)),
+        };
+        use ferry_core::device::version::{DESK_AWAKE, at_least};
+        if !at_least(&state.me.version, DESK_AWAKE) {
+            return devices::finish(Err(Fail::new(format!(
+                "для брони без сна обнови приложение на пульте до ferry {DESK_AWAKE}"
+            ))));
+        }
+        Request::DeskAwake {
+            device: device.into(),
+            minutes,
+            note,
+        }
+    } else if let Some(note) = note {
         Request::DeskNote {
             device: device.into(),
             minutes,

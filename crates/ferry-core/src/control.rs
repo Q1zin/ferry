@@ -277,6 +277,11 @@ pub enum Request {
         keep: bool,
     },
     TunnelStatus,
+    DeskAwake {
+        device: String,
+        minutes: u32,
+        note: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

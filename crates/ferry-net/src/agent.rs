@@ -583,6 +583,7 @@ impl Agent {
         if let Some(task) = inner.peers.lock().unwrap().remove(&id).and_then(|l| l.task) {
             task.abort();
         }
+        inner.desk.lock().unwrap().forget(id);
         inner.notify();
         Ok(())
     }
@@ -809,33 +810,21 @@ impl Agent {
         session: &str,
         action: crate::proto::DeskAction,
     ) -> Result<String, Fail> {
-        let result = self
-            .inner
-            .desk
-            .lock()
-            .unwrap()
-            .apply(
-                self.id(),
-                session,
-                action,
-                std::time::Instant::now(),
-                |id| {
-                    if id == self.id() {
-                        self.snapshot().me.name
-                    } else {
-                        self.inner
-                            .store
-                            .lock()
-                            .unwrap()
-                            .peer(id)
-                            .map(|p| p.name.clone())
-                            .unwrap_or_else(|| id.fmt_short().to_string())
-                    }
-                },
-            )
-            .map_err(Fail::refused);
-        self.inner.notify();
-        result
+        self.inner
+            .apply_desk(self.id(), session, action, |id| {
+                if id == self.id() {
+                    self.snapshot().me.name
+                } else {
+                    self.inner
+                        .store
+                        .lock()
+                        .unwrap()
+                        .peer(id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| id.fmt_short().to_string())
+                }
+            })
+            .map_err(Fail::refused)
     }
 
     pub fn desk_note(&self) -> Option<String> {
@@ -963,11 +952,38 @@ impl Agent {
     }
 
     pub async fn shutdown(&self) {
+        self.inner
+            .desk
+            .lock()
+            .unwrap()
+            .maintain(std::time::Instant::now(), false);
         self.inner.endpoint.close().await;
     }
 }
 
 impl Inner {
+    fn apply_desk(
+        &self,
+        from: EndpointId,
+        session: &str,
+        action: crate::proto::DeskAction,
+        name: impl Fn(EndpointId) -> String,
+    ) -> Result<String, String> {
+        let now = std::time::Instant::now();
+        let mut desk = self.desk.lock().unwrap();
+        let allowed = self.me.borrow().role.accepts_commands()
+            && mode::current_in(&self.dir).allows_desktop();
+        desk.maintain(now, allowed);
+        let result = if matches!(action, crate::proto::DeskAction::HoldAwake { .. }) && !allowed {
+            Err("режим или роль устройства запрещают бронь без сна".into())
+        } else {
+            desk.apply(from, session, action, now, name)
+        };
+        drop(desk);
+        self.notify();
+        result
+    }
+
     fn notify(&self) {
         self.changed.send_modify(|n| *n += 1);
     }
@@ -1250,6 +1266,15 @@ impl Inner {
             n += 1;
             let mode = mode::current_in(&self.dir);
             self.update_me(|s| s.mode = mode);
+            let allowed = mode.allows_desktop() && self.me.borrow().role.accepts_commands();
+            if self
+                .desk
+                .lock()
+                .unwrap()
+                .maintain(std::time::Instant::now(), allowed)
+            {
+                self.notify();
+            }
             if n.is_multiple_of(15)
                 && let Some(lan) = &self.lan
             {
@@ -1325,23 +1350,13 @@ impl Inner {
                         .map_or_else(|| id.fmt_short().to_string(), |p| p.name.clone())
                 };
                 let result = self
-                    .desk
-                    .lock()
-                    .unwrap()
-                    .apply(
-                        from,
-                        &inner.session,
-                        inner.action,
-                        std::time::Instant::now(),
-                        name,
-                    )
+                    .apply_desk(from, &inner.session, inner.action, name)
                     .map_err(|why| {
                         let me = self.me.borrow().name.clone();
                         Fail::refused(
                             format!("рабочий стол {me} {why}").replace("<устройство>", &me),
                         )
                     });
-                self.notify();
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,

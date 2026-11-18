@@ -255,6 +255,11 @@ pub enum DeskAction {
     /// Release only this owner; a different owner is already clean.
     ReleaseOwned,
     ShowReport,
+    HoldAwake {
+        seconds: u32,
+        note: Option<String>,
+    },
+    ReleaseControl,
 }
 
 /// git на устройстве просит ssh того, кто запустил команду: `ferry ssh <target> <command>`.

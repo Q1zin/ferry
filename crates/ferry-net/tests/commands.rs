@@ -593,6 +593,11 @@ async fn durable_admission_respects_headless_modes_and_keeps_request_identity() 
     pair(&a, &b).await;
     let node = a.device("durable-node").unwrap();
     b.set_mode(Mode::NoDesktop).unwrap();
+    let awake = ferry_net::proto::DeskAction::HoldAwake {
+        seconds: 60,
+        note: None,
+    };
+    assert_eq!(node.desk("integration", awake).await.unwrap_err().code, 75);
     let request = StartRequest {
         request_id: "request-one".into(),
         name: "durable-job".into(),

@@ -29,7 +29,7 @@ ferry — разработка и тесты на нескольких устр�
 
 Устройства:
   ferry select [--os windows|macos] [--shell <имя>] [--tool <команда>]... [--desktop]
-               [--min-version X.Y.Z] [--feature shell|result|desk-note|durable-start|check]...
+               [--min-version X.Y.Z] [--feature shell|result|desk-note|desk-awake|durable-start|check]...
                                     JSON: подходящие связанные устройства и причины отказа; без брони
   ferry devices [--json]            это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят
@@ -144,10 +144,11 @@ ferry — разработка и тесты на нескольких устр�
                                     на связь
   ferry logs [<цели>] [-n <строк>]  лог приложения ferry на устройствах или (без целей) здесь:
                                     последние строки, по умолчанию 100
-  ferry desk <устройство> [--json | take [<минут>] [--note <намерение>] | free [--force]] [--session <id>]
+  ferry desk <устройство> [--json | take [<минут>] [--note <намерение>] [--keep-awake] | free [--force]] [--session <id>]
                                     бронь рабочего стола: окна и ввод одной сессии (агента или
                                     терминала) — любое действие само занимает стол на 3 мин, take —
                                     надольше (по умолчанию 30 мин), free — снять, --force — чужую
+                                    --keep-awake удерживает систему и экран от сна до конца срока
   ferry ask <устройство|local> <вопрос> [--id <id>] [--timeout 600] [--wait 0]
   ferry ask <устройство|local> --poll <id> [--wait 30] | --cancel <id>
                                     вопрос человеку; ответ done требует проверки результата

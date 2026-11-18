@@ -363,6 +363,17 @@ impl Device {
 
     /// Бронь рабочего стола устройства для сессии `session`.
     pub async fn desk(&self, session: &str, action: DeskAction) -> Reply<String> {
+        if matches!(
+            action,
+            DeskAction::HoldAwake { .. } | DeskAction::ReleaseControl
+        ) {
+            need(
+                &self.name,
+                self.version.as_deref(),
+                ferry_core::device::version::DESK_AWAKE,
+                "бронь без сна",
+            )?;
+        }
         if matches!(action, DeskAction::ShowReport) {
             need(
                 &self.name,
@@ -390,6 +401,17 @@ impl Device {
         )?;
         let session = session.into();
         self.client.ask(Desk { session, action }).await
+    }
+
+    pub async fn release_control(&self, session: &str) -> Reply<String> {
+        let action = if self.version.as_deref().is_some_and(|v| {
+            ferry_core::device::version::at_least(v, ferry_core::device::version::DESK_AWAKE)
+        }) {
+            DeskAction::ReleaseControl
+        } else {
+            DeskAction::ReleaseOwned
+        };
+        self.desk(session, action).await
     }
 
     /// Перед действием с окнами — занять стол за `session` (или продлить). Устройство старее
