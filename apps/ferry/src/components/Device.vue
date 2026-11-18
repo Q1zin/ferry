@@ -16,6 +16,7 @@ import {
 } from '../api'
 import Jobs from './Jobs.vue'
 import Screen from './Screen.vue'
+import Reservation from './Reservation.vue'
 
 const props = defineProps<{
   device: { id: string | null; name: string; online: boolean; status: Status | null; path: string }
@@ -30,6 +31,12 @@ const newName = ref('')
 const forgetDialog = ref<HTMLDialogElement | null>(null)
 const me = computed(() => props.device.id === null)
 const s = computed(() => props.device.status)
+const supportsReservation = computed(() => {
+  const status = s.value
+  if (!status || !['macos', 'windows'].includes(status.os) || blocked(props.device)) return false
+  const [major, minor, patch] = status.version.split('.').map(Number)
+  return major > 0 || minor > 1 || (minor === 1 && patch >= 27)
+})
 // Чужое устройство слушается, пока на связи и человек за ним его не отключил.
 const reachable = computed(() => me.value || (props.device.online && s.value?.mode !== 'paused'))
 
@@ -47,11 +54,13 @@ const clock = (at: number) => new Date(at * 1000).toLocaleTimeString('ru-RU')
 // Свойства чужого устройства — как только оно на связи и принимает команды.
 const detail = ref<Detail | null>(null)
 const detailLoading = ref(false)
+const commandDevice = computed(() => ({ ...props.device, locked: detail.value?.locked }))
 async function loadDetail() {
   if (me.value || detailLoading.value || blocked(props.device)) return
   detailLoading.value = true
   try {
-    detail.value = await api.detail(props.device.id!)
+    const result = await api.detail(props.device.id!)
+    if (!blocked(props.device)) detail.value = result
   } catch (e) {
     emit('say', String(e), true)
   } finally {
@@ -61,10 +70,17 @@ async function loadDetail() {
 watch(
   () => !blocked(props.device),
   (ok) => {
-    if (ok && !detail.value) loadDetail()
+    if (ok) loadDetail()
+    else detail.value = null
   },
   { immediate: true },
 )
+watch(tab, loadDetail)
+
+function commandNotice(text: string, error?: boolean) {
+  emit('say', text, error)
+  if (error && tab.value === 'screen') loadDetail()
+}
 
 function power(action: string) {
   act(`power:${action}`, () => api.power(props.device.id!, action), 'Готово')
@@ -139,8 +155,8 @@ async function forget() {
       </button>
     </div>
 
-    <Screen v-if="!me && tab === 'screen'" :device="device" @say="(t, e) => emit('say', t, e)" />
-    <Jobs v-else-if="!me && tab === 'jobs'" :device="device" @say="(t, e) => emit('say', t, e)" />
+    <Screen v-if="!me && tab === 'screen'" :device="commandDevice" :checking="detailLoading" @refresh="loadDetail" @say="commandNotice" />
+    <Jobs v-else-if="!me && tab === 'jobs'" :device="commandDevice" :checking="detailLoading" @refresh="loadDetail" @say="commandNotice" />
     <template v-else>
     <div class="card">
       <h3>Роль</h3>
@@ -247,6 +263,8 @@ async function forget() {
         <li v-for="w in detail.warnings" :key="w" class="warning">⚠ {{ w }}</li>
       </ul>
     </div>
+
+    <Reservation v-if="supportsReservation" :key="device.id ?? 'local'" :id="device.id" :can-reserve="s?.mode === 'active'" />
 
     <div v-if="!me && s?.os === 'windows' && !blocked(device)" class="card">
       <h3>Питание</h3>

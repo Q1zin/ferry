@@ -2,8 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api, blocked, type DeviceRef, type JobRow } from '../api'
 
-const props = defineProps<{ device: DeviceRef }>()
-const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
+const props = defineProps<{ device: DeviceRef; checking: boolean }>()
+const emit = defineEmits<{ say: [text: string, error?: boolean]; refresh: [] }>()
 
 const jobs = ref<JobRow[]>([])
 const loaded = ref(false)
@@ -13,10 +13,13 @@ const shown = ref('')
 const log = ref<string | null>(null)
 const name = ref('')
 const cmd = ref('')
+const headless = ref(false)
 const starting = ref(false)
 
 // Не на связи, отключено или пульт — показываем почему.
 const off = computed(() => !!blocked(props.device))
+const desktopBlocked = computed(() => blocked(props.device, true))
+const launchBlocked = computed(() => !headless.value && (!!desktopBlocked.value || props.checking))
 
 async function load() {
   if (loading.value || off.value) return
@@ -61,11 +64,11 @@ async function kill(job: string) {
 }
 
 async function start() {
-  if (!name.value.trim() || !cmd.value.trim()) return
+  if (off.value || launchBlocked.value || starting.value || !name.value.trim() || !cmd.value.trim()) return
+  const started = name.value.trim()
   starting.value = true
   try {
-    emit('say', await api.startJob(props.device.id!, name.value.trim(), cmd.value.trim()))
-    const started = name.value.trim()
+    emit('say', await api.startJob(props.device.id!, started, cmd.value.trim(), headless.value))
     name.value = ''
     cmd.value = ''
     await load()
@@ -105,15 +108,20 @@ onUnmounted(() => clearInterval(timer))
       <div class="card">
         <h3>Новая задача</h3>
         <p class="muted small">
-          Команда на рабочем столе устройства, в его домашнем каталоге; живёт после вызова: приложение, dev-сервер, сборка. То
-          же имя ещё раз — перезапуск.
+          Команда запускается в домашнем каталоге устройства и работает после закрытия пульта.
+          Для команд, которым не нужны окна, выбери «Без рабочего стола».
         </p>
+        <p v-if="desktopBlocked" class="muted small">{{ desktopBlocked }}</p>
+        <div class="row wrap">
+          <label class="row"><input v-model="headless" type="checkbox" /> Без рабочего стола</label>
+          <button v-if="device.locked" :disabled="checking" @click="emit('refresh')">Проверить блокировку</button>
+        </div>
         <div class="row">
           <input v-model="name" class="name" placeholder="имя: app" />
           <input v-model="cmd" class="grow" placeholder="команда" @keydown.enter="start" />
           <button
             class="primary"
-            :disabled="starting || off || !name.trim() || !cmd.trim()"
+            :disabled="starting || launchBlocked || !name.trim() || !cmd.trim()"
             :aria-busy="starting"
             @click="start"
           >

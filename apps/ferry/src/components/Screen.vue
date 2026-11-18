@@ -3,8 +3,8 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { api, blocked as why, type DeviceRef } from '../api'
 
-const props = defineProps<{ device: DeviceRef }>()
-const emit = defineEmits<{ say: [text: string, error?: boolean] }>()
+const props = defineProps<{ device: DeviceRef; checking: boolean }>()
+const emit = defineEmits<{ say: [text: string, error?: boolean]; refresh: [] }>()
 
 const image = ref('')
 const loading = ref(false)
@@ -36,7 +36,7 @@ const pointer = ref<{ x: number; y: number } | null>(null)
 const img = ref<HTMLImageElement | null>(null)
 
 // Рабочий стол трогать можно, только если устройство на связи и в режиме «работает».
-const blocked = computed(() => why(props.device, true))
+const blocked = computed(() => why(props.device, true) || (props.checking ? 'Проверяю состояние рабочего стола…' : ''))
 
 const keys = [
   ['Enter', 'enter'],
@@ -53,9 +53,13 @@ const keys = [
 async function shoot() {
   if (loading.value || blocked.value) return
   loading.value = true
+  const current = generation
   try {
-    image.value = await api.screenshot(props.device.id!)
-    frame.value=null
+    const shot = await api.screenshot(props.device.id!)
+    if (current === generation && !blocked.value) {
+      image.value = shot
+      frame.value = null
+    }
   } catch (e) {
     emit('say', String(e), true)
     live.value = false
@@ -192,7 +196,7 @@ function pressCombo() {
 watch(
   blocked,
   (b) => {
-    if (b) { stopLive(); stopControl() }
+    if (b) { stopLive(); stopControl(); image.value = ''; frame.value = null }
     else if (!image.value) shoot()
   },
   { immediate: true },
@@ -206,7 +210,11 @@ onUnmounted(() => {
 
 <template>
   <div class="screen">
-    <p v-if="blocked" class="card muted">{{ blocked }}</p>
+    <div v-if="blocked" class="card muted">
+      <p>{{ blocked }}</p>
+      <p v-if="device.locked && device.online">В разделе «Задачи» можно запускать команды без рабочего стола и читать логи.</p>
+      <button v-if="device.locked && device.online" :disabled="checking" @click="emit('refresh')">Проверить блокировку</button>
+    </div>
     <template v-else>
       <div class="row toolbar">
         <button :disabled="loading || live" :aria-busy="loading && !live" @click="shoot">Обновить</button>

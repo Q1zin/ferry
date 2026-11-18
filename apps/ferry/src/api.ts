@@ -26,11 +26,18 @@ export type PeerView = {
 export type LanDevice = { id: string; name: string; pairing: boolean }
 
 export type PairingInfo = { code: string; ticket: string; seconds_left: number }
+export type DeskReservation = {
+  state: 'free' | 'busy'
+  owner: { device: string; session: string } | null
+  owned: boolean
+  keep_awake: boolean
+  awake_remaining_seconds: number | null
+}
 
 /// Устройство на странице: это (`id` пуст) или связанное.
-export type DeviceRef = { id: string | null; name: string; online: boolean; status: Status | null }
+export type DeviceRef = { id: string | null; name: string; online: boolean; status: Status | null; locked?: boolean | null }
 
-export type Detail = { properties: [string, string][]; warnings: string[] }
+export type Detail = { properties: [string, string][]; warnings: string[]; locked: boolean | null }
 
 export type JobRow = { name: string; label: string; ago: string; running: boolean; cmd: string }
 
@@ -107,9 +114,12 @@ export const api = {
   input: (id: string, args: string[]) => invoke<string>('input', { id, args }),
   jobs: (id: string) => invoke<JobRow[]>('jobs', { id }),
   jobLog: (id: string, name: string) => invoke<string>('job_log', { id, name }),
-  startJob: (id: string, name: string, cmd: string) => invoke<string>('start_job', { id, name, cmd }),
+  startJob: (id: string, name: string, cmd: string, headless: boolean) =>
+    invoke<string>('start_job', { id, name, cmd, headless }),
   killJob: (id: string, name: string) => invoke<string>('kill_job', { id, name }),
   power: (id: string, action: string) => invoke<string>('power', { id, action }),
+  deskReservation: (id: string | null, action: 'show' | 'take' | 'free', minutes?: number) =>
+    invoke<DeskReservation>('desk_reservation', { id, action, minutes }),
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),
   /// Версия новее этой, если есть в релизах.
@@ -133,6 +143,7 @@ export function blocked(d: DeviceRef, desk = false): string {
   if (desk && s.mode === 'no-desktop') {
     return 'На устройстве режим «не трогать рабочий стол»: экран и ввод недоступны.'
   }
+  if (desk && d.locked) return 'Экран устройства заблокирован. Просмотр и ввод доступны после разблокировки.'
   return ''
 }
 

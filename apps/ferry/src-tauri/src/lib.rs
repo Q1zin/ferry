@@ -260,14 +260,24 @@ fn on_line(agent: &Agent, id: &str) -> Reply<ferry_net::Device> {
 struct Detail {
     properties: Vec<(String, String)>,
     warnings: Vec<String>,
+    locked: Option<bool>,
 }
 
 #[tauri::command]
 async fn detail(agent: State<'_, Agent>, id: String) -> Reply<Detail> {
     let pairs = on_line(&agent, &id)?.info().await.map_err(err)?;
+    let locked = pairs
+        .iter()
+        .find(|(key, _)| key == "locked")
+        .and_then(|(_, value)| match value.to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        });
     Ok(Detail {
         properties: ferry_core::info::describe(&pairs),
         warnings: ferry_core::info::warnings(&pairs),
+        locked,
     })
 }
 
@@ -339,11 +349,32 @@ async fn start_job(
     id: String,
     name: String,
     cmd: String,
+    headless: bool,
 ) -> Reply<String> {
-    on_line(&agent, &id)?
-        .start(&name, &cmd, ferry_net::Dir::Home)
+    let device = on_line(&agent, &id)?;
+    if !headless {
+        return device
+            .start(&name, &cmd, ferry_net::Dir::Home)
+            .await
+            .map_err(err);
+    }
+    use ferry_core::jobs::execution::{Resource, StartRequest};
+    let started = device
+        .atomic_start(StartRequest {
+            request_id: format!("ui-{}", ferry_core::jobs::unique_id()),
+            name,
+            command: cmd,
+            dir: ferry_net::Dir::Home,
+            shell: ferry_core::desk::Shell::Default,
+            resource: Resource::Headless,
+            source: None,
+            session: "ui".into(),
+            keep: true,
+            timeout_sec: None,
+        })
         .await
-        .map_err(err)
+        .map_err(err)?;
+    Ok(format!("Фоновая задача {} запущена", started.name))
 }
 
 #[tauri::command]
@@ -354,6 +385,45 @@ async fn kill_job(agent: State<'_, Agent>, id: String, name: String) -> Reply<St
 #[tauri::command]
 async fn power(agent: State<'_, Agent>, id: String, action: String) -> Reply<String> {
     on_line(&agent, &id)?.power(&action).await.map_err(err)
+}
+
+const DESKTOP_SESSION: &str = "console:ui";
+
+#[tauri::command]
+async fn desk_reservation(
+    agent: State<'_, Agent>,
+    id: Option<String>,
+    action: String,
+    minutes: Option<u32>,
+) -> Reply<serde_json::Value> {
+    use ferry_net::proto::DeskAction;
+    let action = match action.as_str() {
+        "show" => DeskAction::ShowReport,
+        "take" => DeskAction::HoldAwake {
+            seconds: minutes.unwrap_or(30).saturating_mul(60),
+            note: None,
+        },
+        "free" => DeskAction::Free,
+        _ => return Err("нет такого действия с бронью".into()),
+    };
+    let report = if let Some(id) = id {
+        let device = on_line(&agent, &id)?;
+        if action != DeskAction::ShowReport {
+            device.desk(DESKTOP_SESSION, action).await.map_err(err)?;
+        }
+        device
+            .desk(DESKTOP_SESSION, DeskAction::ShowReport)
+            .await
+            .map_err(err)?
+    } else {
+        if action != DeskAction::ShowReport {
+            agent.desk_self(DESKTOP_SESSION, action).map_err(err)?;
+        }
+        agent
+            .desk_self(DESKTOP_SESSION, DeskAction::ShowReport)
+            .map_err(err)?
+    };
+    serde_json::from_str(&report).map_err(err)
 }
 
 #[tauri::command]
@@ -961,6 +1031,7 @@ pub fn run() {
             start_job,
             kill_job,
             power,
+            desk_reservation,
             version,
             human::questions,
             human::answer,

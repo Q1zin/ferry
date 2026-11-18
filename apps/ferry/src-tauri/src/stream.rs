@@ -105,11 +105,11 @@ pub async fn control_screen(
     args: Option<Vec<String>>,
 ) -> Reply<()> {
     let device = on_line(&agent, &id)?;
-    let session = format!("console:{}", std::process::id());
+    let session = crate::DESKTOP_SESSION;
     if let Some(args) = args {
         device
             .desk(
-                &session,
+                session,
                 ferry_net::proto::DeskAction::HoldNote {
                     seconds: 30,
                     note: "Ручное управление из пульта ferry".into(),
@@ -121,10 +121,7 @@ pub async fn control_screen(
             device.input(args).await.map_err(err)?;
         }
     } else {
-        device
-            .desk(&session, ferry_net::proto::DeskAction::ReleaseOwned)
-            .await
-            .map_err(err)?;
+        device.release_control(session).await.map_err(err)?;
     }
     Ok(())
 }

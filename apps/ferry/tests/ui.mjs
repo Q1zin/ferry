@@ -20,7 +20,7 @@ const OLD = '5f2a0a1b9e392bd186e03913f4ebd20b4281efb7259bb2b864fb45af9d96aaaa'
 const NEW = '0d9c2e7a1b392bd186e03913f4ebd20b4281efb7259bb2b864fb45af9d96bbbb'
 
 const me = { name: 'macbook', role: 'both', mode: 'active', os: 'macos', version: '0.1.0' }
-const win = { name: 'win-10', role: 'node', mode: 'active', os: 'windows', version: '0.1.0' }
+const win = { name: 'win-10', role: 'node', mode: 'active', os: 'windows', version: '0.1.27' }
 const snapshot = {
   id: 'a7f3e6d1c2b392bd186e03913f4ebd20b4281efb7259bb2b864fb45af9d96cccc',
   me,
@@ -45,6 +45,7 @@ const fixtures = {
   questions: [],
   state: snapshot,
   detail: {
+    locked: false,
     properties: [
       ['система', 'Майкрософт Windows 10 Корпоративная LTSC (17763)'],
       ['процессор', 'Intel(R) Pentium(R) CPU B960 @ 2.20GHz, потоков: 2'],
@@ -109,8 +110,11 @@ try {
     page.on('pageerror', (e) => failures.push(`${run}: ${e.message}`))
     await page.addInitScript((fx) => {
       window.__calls = []
+      window.__setDetail = (detail) => { fx.detail = detail }
       const callbacks = {}
       const listeners = {}
+      const free = { state: 'free', owner: null, owned: false, keep_awake: false, awake_remaining_seconds: null }
+      let reservation = free
       let next = 0
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
       window.__TAURI_INTERNALS__ = {
@@ -121,6 +125,11 @@ try {
             return next
           }
           window.__calls.push([cmd, args])
+          if (cmd === 'desk_reservation') {
+            if (args.action === 'take') reservation = { state:'busy', owner:{device:'macbook',session:'console:ui'}, owned:true, keep_awake:true, awake_remaining_seconds:args.minutes*60 }
+            if (args.action === 'free') reservation = free
+            return reservation
+          }
           if (cmd === 'dashboard') {
             if (args.request.action === 'run') {
               const result={...fx.dashboard.run,id:args.request.id}
@@ -194,6 +203,13 @@ try {
     // Свойства — сами, как только устройство на связи.
     await page.getByText('Pentium').waitFor()
     await page.getByText('на диске 6 ГБ — для сборки с CEF мало').waitFor()
+    const reservation = page.locator('section', { has: page.getByRole('heading', { name: 'Бронь без сна' }) })
+    await reservation.getByRole('spinbutton', { name: 'Минуты' }).fill('25')
+    await reservation.getByRole('button', { name: 'Зарезервировать без сна' }).click()
+    await reservation.getByText('удержание питания ещё 25 мин', { exact: false }).waitFor()
+    assert.ok((await calls()).some(([c,a]) => c === 'desk_reservation' && a.id === WIN && a.action === 'take' && a.minutes === 25))
+    await reservation.getByRole('button', { name: 'Снять бронь' }).click()
+    await reservation.getByRole('button', { name: 'Зарезервировать без сна' }).waitFor()
     await fits('чужое устройство')
     await shot('peer')
 
@@ -242,9 +258,33 @@ try {
     await calls()
     await page.getByRole('button', { name: 'Запустить' }).click()
     await page.waitForFunction(() => window.__calls.some(([c]) => c === 'start_job'))
-    assert.deepEqual((await calls()).find(([c]) => c === 'start_job'), ['start_job', { id: WIN, name: 'tests', cmd: 'bun test' }])
+    assert.deepEqual((await calls()).find(([c]) => c === 'start_job'), ['start_job', { id: WIN, name: 'tests', cmd: 'bun test', headless: false }])
     await fits('задачи')
     await shot('jobs')
+
+    // Системная блокировка не скрывает задачи, но не открывает защищённый рабочий стол.
+    await page.evaluate((detail) => window.__setDetail(detail), { ...fixtures.detail, locked: true })
+    await calls()
+    await page.getByRole('button', { name: 'Экран', exact: true }).click()
+    await page.getByText('Экран устройства заблокирован.', { exact: false }).waitFor()
+    assert.ok(!(await calls()).some(([c, a]) => c === 'screenshot' || c === 'start_stream' || (c === 'control_screen' && a.args?.length)))
+    assert.equal(await page.getByRole('button', { name: 'Управлять', exact: true }).count(), 0)
+    await page.getByRole('button', { name: 'Задачи', exact: true }).click()
+    await page.getByRole('listitem').filter({ hasText: 'cargo build' }).getByRole('button', { name: 'Лог' }).click()
+    await page.getByText('Finished in 41s').waitFor()
+    await page.getByPlaceholder('имя: app').fill('locked-tests')
+    await page.getByPlaceholder('команда').fill('bun test')
+    assert.ok(await page.getByRole('button', { name: 'Запустить', exact: true }).isDisabled())
+    await page.getByRole('checkbox', { name: 'Без рабочего стола' }).check()
+    await calls()
+    await page.getByRole('button', { name: 'Запустить', exact: true }).click()
+    await page.waitForFunction(() => window.__calls.some(([c]) => c === 'start_job'))
+    assert.deepEqual((await calls()).find(([c]) => c === 'start_job'), ['start_job', { id: WIN, name: 'locked-tests', cmd: 'bun test', headless: true }])
+    await page.getByRole('button', { name: 'Экран', exact: true }).click()
+    await page.getByText('Экран устройства заблокирован.', { exact: false }).waitFor()
+    await page.evaluate((detail) => window.__setDetail(detail), fixtures.detail)
+    await page.getByRole('button', { name: 'Проверить блокировку' }).click()
+    await img.waitFor()
     await page.getByRole('button', { name: 'Обзор', exact: true }).click()
 
     // Устройство не на связи: управлять нечем, но видно почему — и на вкладках тоже.
