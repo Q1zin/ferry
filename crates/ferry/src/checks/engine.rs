@@ -1,10 +1,27 @@
 use super::*;
 use ferry_core::{
     device::Dir,
-    jobs::execution::{Resource, Source, StartRequest, Started},
+    jobs::{
+        evidence::Query,
+        execution::{Resource, Source, StartRequest, Started},
+    },
 };
 use journal::{Operation, Phase, Target};
-use std::path::Path;
+use std::{path::Path, time::Instant};
+
+const POLL_TIMEOUT: Duration = Duration::from_secs(15);
+const RECONNECT_TIMEOUT: Duration = Duration::from_secs(75);
+
+fn retryable_result(error: &Fail) -> bool {
+    error.code == 1
+        && match error.message.strip_prefix(jobs::evidence::TRANSPORT_ERROR) {
+            Some(cause) => !["ответ приложения: ", "испорчен ", "нет устройства"]
+                .iter()
+                .any(|prefix| cause.starts_with(prefix)),
+            // Older controllers return the peer lookup error without the transport prefix.
+            None => error.message.ends_with(" не на связи"),
+        }
+}
 
 fn report_response(response: Response) -> Result<Value, Fail> {
     match response {
@@ -260,17 +277,91 @@ impl Run<'_> {
         }
         Ok(index)
     }
-    fn poll(&mut self, index: usize, readiness: bool) -> Result<Value, Fail> {
-        let token = self.token();
-        let p = &self.target.phases[index];
-        let value = evidence(
-            &self.device,
-            p,
-            Action::Result {
-                cursor: p.cursor.clone(),
+    fn read_result(
+        &mut self,
+        index: usize,
+        mut read: impl FnMut(Query, Duration) -> Result<Value, Fail>,
+    ) -> Result<Option<Value>, Fail> {
+        let phase = &self.target.phases[index];
+        let run_id = phase
+            .run_id
+            .clone()
+            .ok_or_else(|| Fail::new("нет run_id"))?;
+        let phase_name = phase.name.clone();
+        let query = Query {
+            name: phase.job.clone(),
+            run_id: Some(run_id.clone()),
+            action: Action::Result {
+                cursor: phase.cursor.clone(),
                 max_bytes: 16384,
             },
-        )?;
+        };
+        let remaining = |deadline: Option<u64>| {
+            deadline.map_or(Duration::MAX, |at| {
+                Duration::from_secs(at.saturating_sub(ferry_core::now()))
+            })
+        };
+        let mut retry = None::<(Instant, Fail)>;
+        let result = loop {
+            let mut timeout = POLL_TIMEOUT.min(remaining(self.target.deadline));
+            if timeout.is_zero() || cancelled(self.root) {
+                break Ok(None);
+            }
+            if let Some((until, last_error)) = &retry {
+                timeout = timeout.min(until.saturating_duration_since(Instant::now()));
+                if timeout.is_zero() {
+                    break Err(last_error.clone());
+                }
+            }
+            match read(query.clone(), timeout) {
+                Ok(value) => break Ok(Some(value)),
+                Err(_) if self.stopped() => break Ok(None),
+                Err(error) if retryable_result(&error) => {
+                    let until = if let Some((until, _)) = retry {
+                        until
+                    } else {
+                        let until = Instant::now() + RECONNECT_TIMEOUT;
+                        let count = self.target.row["reconnect"]["count"].as_u64().unwrap_or(0);
+                        self.target.row["reconnect"] = json!({
+                            "count":count.saturating_add(1),"state":"waiting","phase":phase_name,
+                            "run_id":run_id,"started_at":ferry_core::now(),"first_error":error.message
+                        });
+                        self.save()?;
+                        until
+                    };
+                    retry = Some((until, error));
+                    std::thread::sleep(
+                        Duration::from_secs(1)
+                            .min(remaining(self.target.deadline))
+                            .min(until.saturating_duration_since(Instant::now())),
+                    );
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        if retry.is_some() {
+            let reconnect = &mut self.target.row["reconnect"];
+            reconnect["state"] = match &result {
+                Ok(Some(_)) => "recovered",
+                Ok(None) => "stopped",
+                Err(_) => "failed",
+            }
+            .into();
+            reconnect["finished_at"] = ferry_core::now().into();
+            self.save()?;
+        }
+        result
+    }
+    fn poll(&mut self, index: usize, readiness: bool) -> Result<Option<Value>, Fail> {
+        let device = self.device.clone();
+        let session = self.session.clone();
+        let Some(value) = self.read_result(index, |query, timeout| {
+            diagnostics::evidence_timeout(&device, query, &session, timeout)
+        })?
+        else {
+            return Ok(None);
+        };
+        let token = self.token();
         let phase = &mut self.target.phases[index];
         phase.cursor = value["cursor"].as_str().map(str::to_owned);
         phase
@@ -296,7 +387,7 @@ impl Run<'_> {
             phase.finished_seen.get_or_insert_with(ferry_core::now);
         }
         self.save()?;
-        Ok(value)
+        Ok(Some(value))
     }
     fn ready(&mut self, index: usize) -> Result<bool, Fail> {
         let p = &self.op.profile;
@@ -370,7 +461,12 @@ impl Run<'_> {
                 self.save()?;
                 return Ok(false);
             }
-            let value = self.poll(index, readiness)?;
+            let Some(value) = self.poll(index, readiness)? else {
+                continue;
+            };
+            if self.stopped() {
+                continue;
+            }
             let ready = !readiness || self.ready(index)?;
             if !launch && let Some(p) = self.target.phases.iter().find(|p| p.name == "launch") {
                 let live = evidence(
@@ -1028,6 +1124,91 @@ mod tests {
         assert!(run.phase("build", "must-not-run").is_err());
         assert!(run.target.phases.is_empty());
         assert!(!journal::target_path(&root, 0).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retries_only_transport_result_errors() {
+        let transport = jobs::evidence::TRANSPORT_ERROR;
+        for message in ["WIN-10 не на связи", &format!("{transport}connection lost")] {
+            assert!(retryable_result(&Fail::new(message)));
+        }
+        for message in [
+            "курсор относится к другому запуску",
+            "нет запуска",
+            &format!("{transport}ответ приложения: invalid JSON"),
+            &format!("{transport}нет устройства с ключом"),
+        ] {
+            assert!(!retryable_result(&Fail::new(message)));
+        }
+        assert!(!retryable_result(&Fail::refused("WIN-10 не на связи")));
+    }
+
+    #[test]
+    fn result_poll_resumes_the_exact_run_and_cursor() {
+        let (op, root) = operation("poll-reconnect");
+        let mut run = run(&op, &root);
+        run.target.phases.push(Phase {
+            name: "build".into(),
+            job: "check-build".into(),
+            run_id: Some("saved-run".into()),
+            cursor: Some("saved-cursor".into()),
+            ..Phase::default()
+        });
+        let mut queries = Vec::new();
+        let result = run
+            .read_result(0, |query, timeout| {
+                assert!(!timeout.is_zero() && timeout <= POLL_TIMEOUT);
+                queries.push(query);
+                if queries.len() == 1 {
+                    Err(Fail::new("WIN-10 не на связи"))
+                } else {
+                    Ok(json!({"state":"succeeded"}))
+                }
+            })
+            .unwrap();
+        assert_eq!(result.unwrap()["state"], "succeeded");
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0], queries[1]);
+        assert_eq!(queries[0].run_id.as_deref(), Some("saved-run"));
+        assert_eq!(
+            queries[0].action,
+            Action::Result {
+                cursor: Some("saved-cursor".into()),
+                max_bytes: 16384,
+            },
+        );
+        let target: Target = journal::read(&journal::target_path(&root, 0)).unwrap();
+        assert_eq!(target.phases.len(), 1);
+        assert_eq!(target.row["reconnect"]["state"], "recovered");
+        assert_eq!(target.row["reconnect"]["run_id"], "saved-run");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn result_poll_stops_on_cancel_or_deadline() {
+        let (op, root) = operation("poll-stop");
+        let mut run = run(&op, &root);
+        run.target.phases.push(Phase {
+            run_id: Some("saved-run".into()),
+            ..Phase::default()
+        });
+        run.target.deadline = Some(0);
+        assert!(
+            run.read_result(0, |_, _| panic!("expired poll sent a request"))
+                .unwrap()
+                .is_none()
+        );
+        run.target.deadline = Some(ferry_core::now() + 5);
+        assert!(
+            run.read_result(0, |_, timeout| {
+                assert!(timeout <= Duration::from_secs(5));
+                std::fs::write(root.join("cancel"), "cancel").unwrap();
+                Err(Fail::new("WIN-10 не на связи"))
+            })
+            .unwrap()
+            .is_none()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

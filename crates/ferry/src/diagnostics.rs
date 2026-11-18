@@ -9,7 +9,7 @@ use ferry_core::{
     jobs::evidence::{Action, Query, TRANSPORT_ERROR},
 };
 use serde_json::{Value, json};
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, time::Duration};
 
 pub(crate) mod bundle;
 
@@ -19,15 +19,34 @@ pub(crate) fn evidence(
     run: &str,
     action: Action,
 ) -> Result<Value, Fail> {
-    let response = control::call(Request::Evidence {
+    evidence_response(control::call(Request::Evidence {
         device: device.clone(),
         query: Query {
             name: name.into(),
             run_id: Some(run.into()),
             action,
         },
-    })
-    .map_err(|e| Fail::new(format!("{TRANSPORT_ERROR}{e}")))?;
+    }))
+}
+
+pub(crate) fn evidence_timeout(
+    device: &Option<String>,
+    query: Query,
+    session: &str,
+    timeout: Duration,
+) -> Result<Value, Fail> {
+    evidence_response(control::call_session_timeout(
+        Request::Evidence {
+            device: device.clone(),
+            query,
+        },
+        session,
+        timeout,
+    ))
+}
+
+fn evidence_response(response: io::Result<Response>) -> Result<Value, Fail> {
+    let response = response.map_err(|e| Fail::new(format!("{TRANSPORT_ERROR}{e}")))?;
     match response {
         Response::Report(text) => serde_json::from_str(&text).map_err(Fail::new),
         Response::Error(error) => Err(error),
