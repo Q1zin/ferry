@@ -235,7 +235,8 @@ function run(argv) {
     var request = $.VNRecognizeTextRequest.alloc.init;
     request.recognitionLevel = 0;
     request.recognitionLanguages = $(['ru-RU', 'en-US']);
-    request.usesLanguageCorrection = true;
+    // shortcut: Vision stalls in language correction on macOS 27. Recheck after the next major update.
+    request.usesLanguageCorrection = $.NSProcessInfo.processInfo.operatingSystemVersion.majorVersion !== 27;
     if (argv[2] === 'cpu') {
         if (request.respondsToSelector($.NSSelectorFromString('supportedComputeStageDevicesAndReturnError:'))) {
             var devices = request.supportedComputeStageDevicesAndReturnError(null);
