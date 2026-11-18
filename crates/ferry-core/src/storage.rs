@@ -690,6 +690,58 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn runner_cleanup_preserves_active_and_recent_copies() {
+        let (root, state, home) = fixture();
+        let stale = state.join("runners/previous");
+        let fresh = state.join("runners/current");
+        for runner in [&stale, &fresh] {
+            fs::create_dir_all(runner).unwrap();
+            fs::write(runner.join("ferry-job.exe"), b"runner").unwrap();
+            fs::write(runner.join("WebView2Loader.dll"), b"dll").unwrap();
+        }
+        old(&stale);
+        let mut q = request(Kind::Runners);
+        q.older_than_days = Some(7);
+        let preview = execute(&state, &home, q.clone()).unwrap();
+        assert_eq!(preview["categories"]["runners"], 18);
+        assert_eq!(preview["entry_count"], 2);
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["candidates"][0]["path"], json!(stale));
+
+        let job = state.join("jobs/live");
+        let guard = lock(&job.join("lock")).unwrap();
+        guard.lock().unwrap();
+        fs::write(job.join("run-id"), "live-id").unwrap();
+        fs::write(job.join("log"), "running").unwrap();
+        assert_eq!(
+            crate::jobs::result_in(&state, "live", None, 4)
+                .unwrap()
+                .state,
+            "running"
+        );
+        q.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        assert!(
+            execute(&state, &home, q.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("preview устарел")
+        );
+        assert!(stale.join("ferry-job.exe").is_file());
+        q.apply = None;
+        let protected = execute(&state, &home, q.clone()).unwrap();
+        assert!(protected["candidates"].as_array().unwrap().is_empty());
+
+        drop(guard);
+        fs::write(job.join("exit"), "0").unwrap();
+        let preview = execute(&state, &home, q.clone()).unwrap();
+        q.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        let applied = execute(&state, &home, q).unwrap();
+        assert_eq!(applied["freed_bytes"], 9);
+        assert!(!stale.exists());
+        assert!(fresh.join("ferry-job.exe").is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn tracked_files_and_unfinished_checks_protect_caches() {
         let (root, state, home) = fixture();
         let project = home.join("ferry/app");
