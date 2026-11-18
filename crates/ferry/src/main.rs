@@ -107,6 +107,7 @@ ferry — разработка и тесты на нескольких устр�
   ferry session renew|show|end <id> [--ttl <сек>]
                                     срок работы агента; задачи и туннели убираются по концу сессии
   ferry workspace create [<устройство|local>] [--id <id>] [--root <проект>]
+  ferry workspace put <manifest.json> <файл>   передать входной файл в готовую копию
   ferry workspace diff <manifest.json> [--root <проект>]
   ferry workspace apply <manifest.json> --token <preview_token> [--root <проект>]
                                     изолированная копия, проверка и применение patch

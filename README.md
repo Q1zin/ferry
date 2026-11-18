@@ -411,7 +411,11 @@ ferry workspace diff workspace.json
 ferry workspace apply workspace.json --token '<preview_token>'
 ```
 
-Workspace — отдельный каталог `~/ferry/<проект>--<id>` с базовым git tree и commit.
+Workspace — отдельный каталог под `~/ferry` с базовым git tree и commit.
+На Windows длинные имена новых копий сокращаются. Фактический путь указан в поле `cwd`
+манифеста. `ferry workspace put workspace.json fixture.csv` кладёт входной файл в
+отдельную область этой копии и возвращает путь и SHA-256. Файл не входит в `workspace diff`.
+Область доступна в `storage --kind outputs` после завершения работы.
 `start` с новыми опциями из git автоматически создаёт такую копию; `--workspace` позволяет
 продолжить подготовленную. Метаданные запуска различают исходный снимок и фактическое рабочее
 дерево на момент старта. Это отпечаток git-содержимого, не архив секретов или зависимостей.

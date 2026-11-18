@@ -385,7 +385,11 @@ fn project_walk(
             units.push(unit(scan, path, Kind::Caches, active)?);
             return Ok(());
         }
-        if name == ".ferry-checks" {
+        if name == ".ferry-checks"
+            || (name == "ferry-inputs"
+                && parent.file_name().is_some_and(|p| p == ".git")
+                && parent.join("ferry-workspace.json").is_file())
+        {
             for child in children(path)? {
                 units.push(unit(scan, &child, Kind::Outputs, active)?);
             }

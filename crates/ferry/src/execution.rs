@@ -456,6 +456,10 @@ pub fn workspace(args: &[&str]) -> io::Result<i32> {
         return crate::usage();
     };
     match *action {
+        "put" => match rest {
+            [manifest, file] => finish(workspace_put(Path::new(manifest), Path::new(file))),
+            _ => crate::usage(),
+        },
         "create" => {
             let mut who = "local";
             if let [value, tail @ ..] = rest
@@ -537,6 +541,82 @@ pub fn workspace(args: &[&str]) -> io::Result<i32> {
         }
         _ => crate::usage(),
     }
+}
+
+fn workspace_put(path: &Path, file: &Path) -> Result<i32, Fail> {
+    use sha2::{Digest, Sha256};
+    use std::{fs, io::Read};
+    let value = manifest(path)?;
+    let source: Source = serde_json::from_value(value["source"].clone()).map_err(Fail::new)?;
+    let who = value["device"]
+        .as_str()
+        .ok_or_else(|| Fail::new("manifest без устройства"))?;
+    let cwd = value["cwd"]
+        .as_str()
+        .ok_or_else(|| Fail::new("manifest без cwd"))?;
+    let name = file
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| {
+            !s.contains(['\\', ':', '*', '?', '"', '<', '>', '|'])
+                && !s.chars().any(char::is_control)
+        })
+        .ok_or_else(|| Fail::new("нужно переносимое имя входного файла"))?;
+    let input = fs::File::open(file)?;
+    if !input.metadata()?.is_file() {
+        return Err(Fail::new("workspace put принимает обычный файл"));
+    }
+    let mut bytes = Vec::new();
+    const LIMIT: u64 = 64 * 1024 * 1024;
+    input.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT {
+        return Err(Fail::new("входной файл больше 64 МиБ"));
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let id = ferry_core::jobs::unique_id();
+    let prefix = format!(".git/ferry-inputs/{id}");
+    if let Some(device) = device(who)? {
+        let base = std::env::temp_dir().join(format!("ferry-input-{id}"));
+        let mut directory = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut directory, 0o700);
+        directory.create(&base)?;
+        let sent = (|| {
+            fs::write(base.join(name), &bytes)?;
+            match response(
+                Request::Put {
+                    device,
+                    base: base.clone(),
+                    rels: vec![name.into()],
+                    dir: Dir::Project {
+                        name: source.workspace,
+                        prefix: prefix.clone(),
+                    },
+                },
+                &control::session(),
+            )? {
+                Response::Done => Ok(()),
+                _ => Err(Fail::new("узел не подтвердил доставку входного файла")),
+            }
+        })();
+        let _ = fs::remove_dir_all(&base);
+        sent?;
+    } else {
+        let home = ferry_core::home()?;
+        let root = home
+            .join("ferry")
+            .join(ferry_core::workspace::project_name(&home, &source.workspace)?.as_ref());
+        ferry_core::workspace::verify(&root, &source)?;
+        let dest = root.join(&prefix);
+        fs::create_dir_all(&dest)?;
+        fs::write(dest.join(name), &bytes)?;
+    }
+    let workspace_relative_path = format!("{prefix}/{name}");
+    println!(
+        "{}",
+        json!({"device":who,"path":format!("{}/{workspace_relative_path}",cwd.replace('\\', "/")),"workspace_relative_path":workspace_relative_path,"sha256":sha256,"bytes":bytes.len()})
+    );
+    Ok(0)
 }
 #[cfg(test)]
 mod tests {
