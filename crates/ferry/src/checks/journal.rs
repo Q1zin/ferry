@@ -10,6 +10,8 @@ pub(super) struct Project {
     pub name: String,
     pub prefix: String,
     pub snapshot: Option<(String, String)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]

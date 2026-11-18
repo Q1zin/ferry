@@ -114,6 +114,16 @@ impl Run<'_> {
         }
         if !self.target.synchronized {
             if let Some(project) = &self.op.project {
+                if let Some(path) = &project.profile_path
+                    && ferry_core::project::for_repo(&project.root, &project.name)?
+                        .0
+                        .as_ref()
+                        != Some(path)
+                {
+                    return Err(Fail::new(
+                        "локальный профиль сменился после постановки проверки",
+                    ));
+                }
                 if self.op.isolated {
                     let (commit, tree) = project
                         .snapshot

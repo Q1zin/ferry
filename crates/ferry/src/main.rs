@@ -89,6 +89,9 @@ ferry — разработка и тесты на нескольких устр�
                                     --home — в доме устройства, как вне репозитория;
                                     --shell: default, bash, powershell, cmd
   ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
+  ferry project                    показать выбранный профиль этого checkout
+  ferry project bind <профиль>     выбрать локальный профиль
+  ferry project unbind              вернуться к выбору по имени каталога
   ferry doctor <цели> [--shell <оболочка>]
                                     доступ к git-зависимостям, файлы проекта
   ferry start <цели> <имя> [--no-sync] [--home] [--shell <имя>] [--] <команда>
@@ -262,6 +265,7 @@ fn main() {
         ["info", spec] => devices::info(spec, false),
         ["info", spec, "--json"] => devices::info(spec, true),
         ["sync", spec] => devices::sync(spec),
+        ["project", rest @ ..] => execution::project_profile(rest),
         ["doctor", spec] => devices::doctor(spec, Shell::Default),
         ["doctor", spec, "--shell", shell] => {
             shell.parse().and_then(|shell| devices::doctor(spec, shell))

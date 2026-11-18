@@ -114,15 +114,42 @@ fn same_request(a: &Operation, b: &Operation) -> bool {
             (
                 &p.root,
                 &p.prefix,
+                &p.profile_path,
                 p.snapshot.as_ref().map(|(_, tree)| tree),
             )
         }) == b.project.as_ref().map(|p| {
             (
                 &p.root,
                 &p.prefix,
+                &p.profile_path,
                 p.snapshot.as_ref().map(|(_, tree)| tree),
             )
         })
+}
+
+fn planned_project(
+    snapshot: bool,
+    home: bool,
+    profile: &mut Profile,
+) -> Result<Option<Project>, Fail> {
+    let Some(p) = devices::project(snapshot, home)? else {
+        return Ok(None);
+    };
+    let (profile_path, settings) = ferry_core::project::for_checkout(&p.repo)?;
+    for spec in profile.platforms.values_mut() {
+        for tool in &settings.tools {
+            if !spec.tools.contains(tool) {
+                spec.tools.push(tool.clone());
+            }
+        }
+    }
+    Ok(Some(Project {
+        root: p.repo.root,
+        name: p.repo.name,
+        prefix: p.repo.prefix,
+        snapshot: p.snapshot,
+        profile_path,
+    }))
 }
 
 /// Queue plans pin code and the profile before choosing an available device.
@@ -139,18 +166,13 @@ pub(crate) fn queue_prepare(
         return Err(Fail::new("профили больше 128 КиБ"));
     }
     let config: Config = serde_json::from_slice(&fs::read(file)?).map_err(Fail::new)?;
-    let profile = config
+    let mut profile = config
         .profiles
         .get(name)
         .ok_or_else(|| Fail::new("нет такого профиля"))?
         .clone();
     validate(name, &profile)?;
-    let project = devices::project(!no_sync, home)?.map(|p| Project {
-        root: p.repo.root,
-        name: p.repo.name,
-        prefix: p.repo.prefix,
-        snapshot: p.snapshot,
-    });
+    let project = planned_project(!no_sync, home, &mut profile)?;
     let isolated = isolated || project.as_ref().is_some_and(|p| p.snapshot.is_some());
     if isolated && project.as_ref().is_none_or(|p| p.snapshot.is_none()) {
         return Err(Fail::new("изоляция требует git-проект и синхронизацию"));
@@ -334,19 +356,14 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
             return Err(Fail::new("профили больше 128 КиБ"));
         }
         let config: Config = serde_json::from_slice(&fs::read(file)?).map_err(Fail::new)?;
-        let profile = config
+        let mut profile = config
             .profiles
             .get(*name)
             .ok_or_else(|| Fail::new("нет такого профиля"))?
             .clone();
         validate(name, &profile)?;
         let selected = targets(selector)?;
-        let project = devices::project(!no_sync, home)?.map(|p| Project {
-            root: p.repo.root,
-            name: p.repo.name,
-            prefix: p.repo.prefix,
-            snapshot: p.snapshot,
-        });
+        let project = planned_project(!no_sync, home, &mut profile)?;
         // Изоляция обязательна для новых lifecycle-профилей внутри git-проекта.
         let isolated = isolated
             || (project.is_some()

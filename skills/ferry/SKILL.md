@@ -36,7 +36,7 @@ ferry run win-10 --home --shell cmd -- 'ver & echo %USERPROFILE%'
 ferry sync win-10                                   # только снимок — перед start --no-sync
 ```
 
-Настройки проекта — на этой машине в `~/.ferry/projects/<имя репозитория>.toml`: `files = [".env"]` — что возить мимо git, `tools` — что проверяет `ferry doctor`. Свежий клон получает их сам.
+Настройки проекта — на этой машине в `~/.ferry/projects/<имя репозитория>.toml`: `files = [".env"]` — что возить мимо git, `tools` — что проверяет `ferry doctor`. Для клона или worktree с другим именем выполни `ferry project bind ИМЯ`; `ferry project` показывает выбранный файл, `ferry project unbind` возвращает поиск по имени каталога.
 
 Долгое или то, что должно жить дальше (приложение, dev-сервер, сборка) — фоновой задачей:
 

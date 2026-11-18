@@ -62,10 +62,6 @@ fn resolve(
     }
 }
 
-pub fn load(name: &str) -> io::Result<Project> {
-    resolve(&crate::ferry_home()?.join("projects"), None, name).map(|(_, project)| project)
-}
-
 pub fn for_checkout(repo: &crate::sync::Repo) -> io::Result<(Option<PathBuf>, Project)> {
     resolve(
         &crate::ferry_home()?.join("projects"),

@@ -405,7 +405,8 @@ async fn answer(
             })
             .await
             .map_err(Fail::new)??;
-            let extra: Vec<PathBuf> = ferry_core::project::load(&project)?
+            let extra: Vec<PathBuf> = ferry_core::project::for_repo(&root, &project)?
+                .1
                 .files
                 .into_iter()
                 .map(PathBuf::from)
@@ -505,7 +506,8 @@ async fn answer(
             commit,
             tree,
         } => {
-            let extra: Vec<PathBuf> = ferry_core::project::load(&project)?
+            let extra: Vec<PathBuf> = ferry_core::project::for_repo(&root, &project)?
+                .1
                 .files
                 .into_iter()
                 .map(PathBuf::from)

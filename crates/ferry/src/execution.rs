@@ -558,3 +558,18 @@ mod tests {
         assert!(device("os:windows").is_err());
     }
 }
+
+pub fn project_profile(args: &[&str]) -> io::Result<i32> {
+    finish((|| {
+        let repo = ferry_core::sync::repo()?.ok_or_else(|| Fail::new("нет git-проекта"))?;
+        match args {
+            [] => {}
+            ["bind", name] => ferry_core::project::bind(&repo, Some(name))?,
+            ["unbind"] => ferry_core::project::bind(&repo, None)?,
+            _ => return Err(Fail::new("project [bind ПРОФИЛЬ|unbind]")),
+        }
+        let (path, _) = ferry_core::project::for_checkout(&repo)?;
+        println!("{}", json!({"root": repo.root, "profile_path": path}));
+        Ok(0)
+    })())
+}
