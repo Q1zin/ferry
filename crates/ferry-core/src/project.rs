@@ -3,9 +3,10 @@
 //! ```toml
 //! tools = ["cmake", "ninja"]   # doctor проверит их на узлах
 //! files = [".env"]             # sync возит их на узел мимо git
+//! caches = ["build", "dist"]   # игнорируемые git каталоги, доступные для storage preview
 //! ```
 //!
-//! Файла нет — оба списка пустые.
+//! Файла нет — списки пустые.
 
 use std::fs;
 use std::io;
@@ -15,9 +16,65 @@ use std::path::{Path, PathBuf};
 pub struct Project {
     pub tools: Vec<String>,
     pub files: Vec<String>,
+    pub caches: Vec<String>,
 }
 
 const BINDING: &str = "ferry-project";
+
+pub(crate) fn relative_cache_path(path: &str) -> io::Result<PathBuf> {
+    if path.is_empty()
+        || path.len() > 512
+        || path.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
+        || path.chars().any(char::is_control)
+        || path.split('/').any(|part| {
+            part.is_empty()
+                || matches!(part, "." | "..")
+                || part.eq_ignore_ascii_case(".git")
+                || part.ends_with(['.', ' '])
+        })
+    {
+        return Err(io::Error::other(
+            "caches: нужен относительный путь внутри проекта без .git и переходов",
+        ));
+    }
+    Ok(PathBuf::from(path))
+}
+
+pub(crate) fn paths_intersect(left: &str, right: &str) -> bool {
+    let left = left.to_lowercase();
+    let right = right.replace('\\', "/").to_lowercase();
+    left == right
+        || left.starts_with(&format!("{right}/"))
+        || right.starts_with(&format!("{left}/"))
+}
+
+pub fn validate_caches(paths: &[String], files: &[String]) -> io::Result<()> {
+    if paths.len() > 32 || files.len() > 256 {
+        return Err(io::Error::other(
+            "caches: максимум 32 каталога и 256 защищённых files",
+        ));
+    }
+    for (index, path) in paths.iter().enumerate() {
+        relative_cache_path(path)?;
+        if paths[..index]
+            .iter()
+            .any(|other| paths_intersect(path, other))
+        {
+            return Err(io::Error::other(
+                "caches: каталоги не должны повторяться или включать друг друга",
+            ));
+        }
+        if files.iter().any(|file| paths_intersect(path, file)) {
+            return Err(io::Error::other(
+                "caches: каталог пересекается с защищённым files проекта",
+            ));
+        }
+    }
+    for file in files {
+        relative_cache_path(&file.replace('\\', "/"))?;
+    }
+    Ok(())
+}
 
 fn profile_path(dir: &Path, name: &str) -> io::Result<PathBuf> {
     if name.is_empty()
@@ -135,10 +192,12 @@ fn parse(text: &str) -> Result<Project, String> {
         match key {
             "tools" => project.tools = items,
             "files" => project.files = items,
+            "caches" => project.caches = items,
             _ => return Err(format!("неизвестный ключ {key}")),
         }
         rest = after.trim_start();
     }
+    validate_caches(&project.caches, &project.files).map_err(|e| e.to_string())?;
     Ok(project)
 }
 
@@ -154,6 +213,7 @@ mod tests {
             Ok(Project {
                 tools: vec!["cmake".into(), "ninja".into()],
                 files: vec![".env".into(), "a#b".into()],
+                caches: vec![],
             })
         );
         assert_eq!(parse(""), Ok(Project::default()));
@@ -165,6 +225,26 @@ mod tests {
         assert!(parse("tools = [cmake]").is_err());
         assert!(parse("tool = [\"cmake\"]").is_err());
         assert!(parse("tools = [\"cmake\"").is_err());
+    }
+
+    #[test]
+    fn caches_are_relative_disjoint_and_never_include_extra_files() {
+        let profile =
+            parse("files = [\".env\"]\ncaches = [\"build\", \"frontend/.cache\"]").unwrap();
+        assert_eq!(profile.caches, ["build", "frontend/.cache"]);
+        for path in [
+            "", ".", "..", "../build", "/build", "C:/build", "a\\b", ".git", "a/.GIT/x", "build/",
+            "build.", "build ",
+        ] {
+            assert!(validate_caches(&[path.into()], &[]).is_err(), "{path}");
+        }
+        for file in ["build/.env", "BUILD", "build"] {
+            assert!(validate_caches(&["build".into()], &[file.into()]).is_err());
+        }
+        assert!(validate_caches(&["build/cache".into()], &["build".into()]).is_err());
+        assert!(validate_caches(&["build".into(), "build/cache".into()], &[]).is_err());
+        assert!(validate_caches(&["build".into(), "BUILD".into()], &[]).is_err());
+        assert!(validate_caches(&["build".into()], &["builder/.env".into()]).is_ok());
     }
 
     #[test]

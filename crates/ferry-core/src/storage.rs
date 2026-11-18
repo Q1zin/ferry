@@ -1,4 +1,5 @@
 //! Logical disk use and explicit cleanup of generated data. Source and run receipts stay.
+use crate::jobs::execution::Source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -83,7 +84,7 @@ impl Scan {
         metadata.len().hash(&mut m.hash);
         metadata.modified()?.hash(&mut m.hash);
         m.modified = m.modified.max(seconds(metadata.modified()?));
-        if metadata.is_dir() {
+        if metadata.is_dir() && !is_link(&metadata) {
             for child in children(path)? {
                 self.measure(&child, m, depth + 1)?;
             }
@@ -100,7 +101,7 @@ fn seconds(time: SystemTime) -> u64 {
         .as_secs()
 }
 fn children(path: &Path) -> io::Result<Vec<PathBuf>> {
-    if fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) {
+    if fs::symlink_metadata(path).is_ok_and(|m| is_link(&m)) {
         return Ok(Vec::new());
     }
     let mut paths = match fs::read_dir(path) {
@@ -115,10 +116,240 @@ fn children(path: &Path) -> io::Result<Vec<PathBuf>> {
 }
 fn json_file(path: &Path) -> io::Result<Value> {
     let meta = fs::symlink_metadata(path)?;
-    if !meta.is_file() || meta.len() > 8 * 1024 * 1024 {
+    if is_link(&meta) || !meta.is_file() || meta.len() > 8 * 1024 * 1024 {
         return Err(io::Error::other("небезопасный файл состояния"));
     }
     Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn is_link(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        meta.is_symlink()
+    }
+}
+
+fn no_link(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if is_link(&meta) => Err(io::Error::other(format!(
+            "storage: ссылка или reparse point {}",
+            path.display()
+        ))),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn safe_child(root: &Path, relative: &str) -> io::Result<PathBuf> {
+    let relative = crate::project::relative_cache_path(relative)?;
+    no_link(root)?;
+    let mut path = root.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        no_link(&path)?;
+    }
+    Ok(path)
+}
+
+fn managed_root(home: &Path, source: &Source) -> io::Result<PathBuf> {
+    crate::workspace::validate(source)?;
+    for path in [
+        home.to_path_buf(),
+        home.join(".ferry"),
+        home.join(".ferry/workspace-claims"),
+        home.join("ferry"),
+    ] {
+        no_link(&path)?;
+    }
+    let claim = home
+        .join(".ferry/workspace-claims")
+        .join(format!("{}.json", source.workspace));
+    let saved: Source = serde_json::from_value(json_file(&claim)?)?;
+    if saved != *source {
+        return Err(io::Error::other(
+            "storage: workspace принадлежит другому снимку",
+        ));
+    }
+    let name = crate::workspace::project_name(home, &source.workspace)?;
+    let root = home.join("ferry").join(name.as_ref());
+    no_link(&root)?;
+    no_link(&root.join(".git"))?;
+    no_link(&root.join(".git/ferry-workspace.json"))?;
+    if !root.is_dir() {
+        return Err(io::Error::other(
+            "storage: управляемая workspace отсутствует",
+        ));
+    }
+    Ok(root)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachePolicy {
+    source: Source,
+    paths: Vec<String>,
+    extras: Vec<String>,
+}
+
+/// Политика лишь добавляет кандидатов inventory; удаление требует отдельного preview/apply.
+pub fn save_workspace_caches(
+    state: &Path,
+    home: &Path,
+    source: &Source,
+    paths: &[String],
+    extras: &[String],
+) -> io::Result<()> {
+    crate::project::validate_caches(paths, extras)?;
+    let guard = lock(&state.join("storage.lock"))?;
+    guard.lock()?;
+    let root = managed_root(home, source)?;
+    for relative in paths {
+        let path = safe_child(&root, relative)?;
+        if fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_dir()) {
+            return Err(io::Error::other("caches: нужен каталог, не файл"));
+        }
+    }
+    no_link(state)?;
+    let folder = state.join("storage-policies");
+    no_link(&folder)?;
+    fs::create_dir_all(&folder)?;
+    let path = folder.join(format!("{}.json", source.workspace));
+    no_link(&path)?;
+    let policy = CachePolicy {
+        source: source.clone(),
+        paths: paths.to_vec(),
+        extras: extras.to_vec(),
+    };
+    crate::write_private(&path, &serde_json::to_string(&policy)?)
+}
+
+fn workspace_caches(
+    state: &Path,
+    home: &Path,
+    root: &Path,
+) -> io::Result<(Vec<PathBuf>, Vec<String>)> {
+    let marker = root.join(".git/ferry-workspace.json");
+    if !marker.exists() {
+        return Ok((vec![], vec![]));
+    }
+    no_link(&root.join(".git"))?;
+    let source: Source = serde_json::from_value(json_file(&marker)?)?;
+    crate::workspace::validate(&source)?;
+    let folder = state.join("storage-policies");
+    no_link(&folder)?;
+    let path = folder.join(format!("{}.json", source.workspace));
+    if !path.exists() {
+        return Ok((vec![], vec![]));
+    }
+    let policy: CachePolicy = serde_json::from_value(json_file(&path)?)?;
+    if policy.source != source || managed_root(home, &source)? != root {
+        return Err(io::Error::other(
+            "storage: политика принадлежит другой workspace",
+        ));
+    }
+    crate::workspace::verify(root, &source)?;
+    crate::project::validate_caches(&policy.paths, &policy.extras)?;
+    let paths = policy
+        .paths
+        .iter()
+        .map(|path| safe_child(root, path))
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok((paths, policy.extras))
+}
+
+struct ContentsScan {
+    entries: usize,
+    started: Instant,
+}
+impl ContentsScan {
+    fn measure(&mut self, path: &Path, depth: usize) -> io::Result<Option<u64>> {
+        self.entries += 1;
+        if self.entries > 100_000 || depth > 32 || self.started.elapsed().as_secs() >= 5 {
+            return Ok(None);
+        }
+        let meta = fs::symlink_metadata(path)?;
+        if is_link(&meta) {
+            return Ok(None);
+        }
+        if meta.is_file() {
+            return Ok(Some(meta.len()));
+        }
+        if !meta.is_dir() {
+            return Ok(None);
+        }
+        let mut bytes = 0u64;
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_name().eq_ignore_ascii_case(".git") {
+                continue;
+            }
+            let Some(size) = self.measure(&entry.path(), depth + 1)? else {
+                return Ok(None);
+            };
+            bytes = bytes.saturating_add(size);
+        }
+        Ok(Some(bytes))
+    }
+}
+
+/// Метаданные одного уровня. bytes=null означает, что полный размер не уложился в лимит.
+pub fn project_contents(home: &Path, source: &Source, directory: &str) -> io::Result<Value> {
+    let root = managed_root(home, source)?;
+    crate::workspace::verify(&root, source)?;
+    let path = if directory.is_empty() {
+        root
+    } else {
+        safe_child(&root, directory)?
+    };
+    if !path.is_dir() {
+        return Err(io::Error::other("contents: нужен каталог проекта"));
+    }
+    let mut scan = ContentsScan {
+        entries: 0,
+        started: Instant::now(),
+    };
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for (index, entry) in fs::read_dir(&path)?.enumerate() {
+        if index >= 200 {
+            truncated = true;
+            break;
+        }
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            truncated = true;
+            continue;
+        };
+        if name.eq_ignore_ascii_case(".git") {
+            continue;
+        }
+        let meta = fs::symlink_metadata(entry.path())?;
+        if is_link(&meta) || !(meta.is_file() || meta.is_dir()) {
+            truncated = true;
+            continue;
+        }
+        let relative = if directory.is_empty() {
+            name.into()
+        } else {
+            format!("{directory}/{name}")
+        };
+        let bytes = if meta.is_file() {
+            Some(meta.len())
+        } else {
+            scan.measure(&entry.path(), 0)?
+        };
+        truncated |= bytes.is_none();
+        entries.push(json!({"name":name,"path":relative,"bytes":bytes,"directory":meta.is_dir()}));
+    }
+    entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(json!({"directory":directory,"entries":entries,"truncated":truncated}))
 }
 fn lock(path: &Path) -> io::Result<fs::File> {
     if let Some(parent) = path.parent() {
@@ -142,6 +373,55 @@ fn locked(path: &Path) -> io::Result<bool> {
         Err(fs::TryLockError::Error(e)) => Err(e),
     }
 }
+
+pub struct ActivityGuard {
+    directory: PathBuf,
+    lock: Option<fs::File>,
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        // Windows не удаляет файл, пока открыт удерживающий его handle.
+        self.lock.take();
+        if no_link(&self.directory).is_err()
+            || self
+                .directory
+                .parent()
+                .is_some_and(|parent| no_link(parent).is_err())
+        {
+            return;
+        }
+        let _ = fs::remove_file(self.directory.join("activity.json"));
+        let _ = fs::remove_file(self.directory.join("lock"));
+        let _ = fs::remove_dir(&self.directory);
+    }
+}
+
+/// Не даёт storage удалить данные foreground-команды или синхронизации.
+pub fn protect_activity(state: &Path, cwd: &Path) -> io::Result<ActivityGuard> {
+    let cwd = fs::canonicalize(cwd)?;
+    let admission = lock(&state.join("job-locks/execution-admission"))?;
+    admission.lock()?;
+    no_link(state)?;
+    let folder = state.join("storage-activity");
+    no_link(&folder)?;
+    fs::create_dir_all(&folder)?;
+    let directory = folder.join(crate::jobs::unique_id());
+    fs::create_dir(&directory)?;
+    let mut guard = ActivityGuard {
+        directory,
+        lock: None,
+    };
+    let marker = lock(&guard.directory.join("lock"))?;
+    marker.lock()?;
+    guard.lock = Some(marker);
+    crate::write_private(
+        &guard.directory.join("activity.json"),
+        &json!({"cwd":cwd}).to_string(),
+    )?;
+    Ok(guard)
+}
+
 #[derive(Default)]
 struct Active {
     paths: Vec<PathBuf>,
@@ -151,6 +431,23 @@ struct Active {
 impl Active {
     fn collect(state: &Path, home: &Path) -> io::Result<Self> {
         let mut active = Self::default();
+        no_link(&state.join("storage-activity"))?;
+        for marker in children(&state.join("storage-activity"))? {
+            no_link(&marker)?;
+            no_link(&marker.join("lock"))?;
+            if !locked(&marker.join("lock"))? {
+                continue;
+            }
+            let value = json_file(&marker.join("activity.json"))?;
+            let cwd = value["cwd"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| io::Error::other("storage: неверная метка активной операции"))?;
+            active.paths.push(cwd);
+            active.running = true;
+        }
+        let copies = fs::canonicalize(home.join("ferry")).ok();
         for job in children(&state.join("jobs"))? {
             if !fs::symlink_metadata(&job)?.is_dir() {
                 continue;
@@ -161,7 +458,17 @@ impl Active {
             if running {
                 active.running = true;
                 if let Ok(cwd) = fs::read_to_string(job.join("cwd")) {
-                    active.paths.push(PathBuf::from(cwd));
+                    let cwd = PathBuf::from(cwd);
+                    let cwd = fs::canonicalize(&cwd).unwrap_or(cwd);
+                    // Задача из src/ может использовать соседний target всей копии.
+                    let copy = copies.as_ref().and_then(|copies| {
+                        cwd.strip_prefix(copies)
+                            .ok()?
+                            .components()
+                            .next()
+                            .map(|component| copies.join(component))
+                    });
+                    active.paths.push(copy.unwrap_or(cwd));
                 }
             }
         }
@@ -228,14 +535,21 @@ impl Active {
         if let Ok(exe) = std::env::current_exe() {
             active.paths.push(exe);
         }
+        active.paths = active
+            .paths
+            .into_iter()
+            .map(|path| fs::canonicalize(&path).unwrap_or(path))
+            .collect();
         Ok(active)
     }
     fn reason(&self, path: &Path, kind: Kind) -> Option<String> {
-        if self
-            .paths
-            .iter()
-            .any(|p| path.starts_with(p) || p.starts_with(path))
-        {
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.into());
+        if self.paths.iter().any(|p| {
+            path.starts_with(p)
+                || p.starts_with(path)
+                || canonical.starts_with(p)
+                || p.starts_with(&canonical)
+        }) {
             return Some("рабочий каталог или исполняемый файл активной задачи".into());
         }
         if self
@@ -255,7 +569,7 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
     let mut m = Measure::default();
     scan.measure(path, &mut m, 0)?;
     let mut protected = active.reason(path, kind);
-    if fs::symlink_metadata(path)?.is_symlink() {
+    if is_link(&fs::symlink_metadata(path)?) {
         protected = Some("ссылка: внешние каталоги не обходятся".into());
     }
     if !kind.removable() {
@@ -342,8 +656,21 @@ fn identity(path: &Path, kind: Kind) -> String {
     kind.hash(&mut hash);
     format!("s-{:016x}", hash.finish())
 }
-fn project(scan: &mut Scan, root: &Path, active: &Active, units: &mut Vec<Unit>) -> io::Result<()> {
-    if fs::symlink_metadata(root)?.is_symlink() {
+struct ProjectCaches {
+    root: PathBuf,
+    paths: Vec<PathBuf>,
+    extras: Vec<String>,
+}
+
+fn project(
+    scan: &mut Scan,
+    root: &Path,
+    active: &Active,
+    units: &mut Vec<Unit>,
+    state: &Path,
+    home: &Path,
+) -> io::Result<()> {
+    if is_link(&fs::symlink_metadata(root)?) {
         units.push(unit(scan, root, Kind::Projects, active)?);
         return Ok(());
     }
@@ -352,8 +679,14 @@ fn project(scan: &mut Scan, root: &Path, active: &Active, units: &mut Vec<Unit>)
     } else {
         Kind::Projects
     };
+    let (paths, extras) = workspace_caches(state, home, root)?;
+    let caches = ProjectCaches {
+        root: root.into(),
+        paths,
+        extras,
+    };
     let mut retained = Measure::default();
-    project_walk(scan, root, active, units, &mut retained, 0)?;
+    project_walk(scan, root, active, units, &mut retained, 0, &caches)?;
     units.push(Unit {
         id: identity(root, kind),
         kind,
@@ -373,16 +706,31 @@ fn project_walk(
     units: &mut Vec<Unit>,
     retained: &mut Measure,
     depth: usize,
+    caches: &ProjectCaches,
 ) -> io::Result<()> {
     scan.tick(depth)?;
     let meta = fs::symlink_metadata(path)?;
-    if meta.is_dir() {
+    if meta.is_dir() && !is_link(&meta) {
         let parent = path.parent().unwrap_or(path);
         let name = path.file_name().unwrap_or_default();
         let cache = (name == "target" && parent.join("Cargo.toml").is_file())
-            || (name == "node_modules" && parent.join("package.json").is_file());
+            || (name == "node_modules" && parent.join("package.json").is_file())
+            || caches.paths.iter().any(|cache| cache == path);
         if cache {
-            units.push(unit(scan, path, Kind::Caches, active)?);
+            let mut entry = unit(scan, path, Kind::Caches, active)?;
+            let relative = path
+                .strip_prefix(&caches.root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if caches
+                .extras
+                .iter()
+                .any(|extra| crate::project::paths_intersect(&relative, extra))
+            {
+                entry.protected = Some("каталог пересекается с защищённым files проекта".into());
+            }
+            units.push(entry);
             return Ok(());
         }
         if name == ".ferry-checks"
@@ -396,7 +744,7 @@ fn project_walk(
             return Ok(());
         }
         for child in children(path)? {
-            project_walk(scan, &child, active, units, retained, depth + 1)?;
+            project_walk(scan, &child, active, units, retained, depth + 1, caches)?;
         }
     } else {
         retained.bytes = retained.bytes.saturating_add(meta.len());
@@ -428,7 +776,7 @@ fn inventory(state: &Path, home: &Path) -> io::Result<Vec<Unit>> {
         ("questions", Kind::Questions),
     ] {
         let base = state.join(folder);
-        if base.exists() && fs::symlink_metadata(&base)?.is_symlink() {
+        if base.exists() && is_link(&fs::symlink_metadata(&base)?) {
             units.push(unit(&mut scan, &base, kind, &active)?);
             continue;
         }
@@ -443,11 +791,11 @@ fn inventory(state: &Path, home: &Path) -> io::Result<Vec<Unit>> {
         }
     }
     let projects = home.join("ferry");
-    if projects.exists() && fs::symlink_metadata(&projects)?.is_symlink() {
+    if projects.exists() && is_link(&fs::symlink_metadata(&projects)?) {
         units.push(unit(&mut scan, &projects, Kind::Projects, &active)?);
     } else {
         for root in children(&projects)? {
-            project(&mut scan, &root, &active, &mut units)?;
+            project(&mut scan, &root, &active, &mut units, state, home)?;
         }
     }
     units.sort_by(|a, b| a.path.cmp(&b.path));
@@ -554,7 +902,7 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
             }
             let removed = (|| -> io::Result<()> {
                 let meta = fs::symlink_metadata(&u.path)?;
-                if meta.is_symlink() {
+                if is_link(&meta) {
                     return Err(io::Error::other("каталог заменён ссылкой"));
                 }
                 let mut scan = Scan {
@@ -619,6 +967,270 @@ mod tests {
         git(&project, &["add", "Cargo.toml", "source.rs", ".gitignore"]);
         old(&project.join("target"));
         (root, state, home)
+    }
+    fn managed_fixture() -> (PathBuf, PathBuf, PathBuf, Source, PathBuf) {
+        let (temp, state, home) = fixture();
+        let project = home.join("ferry/app");
+        fs::write(
+            project.join(".gitignore"),
+            "/target/\n/node_modules/\n/build/\n",
+        )
+        .unwrap();
+        let repo = crate::sync::repo_at(&project).unwrap().unwrap();
+        let (commit, tree) = crate::sync::snapshot(&repo).unwrap();
+        let source = crate::workspace::source("app", "storage-test", &commit, &tree).unwrap();
+        let prepared = crate::workspace::prepare_local(&home, &project, &source, &[]).unwrap();
+        let root = PathBuf::from(prepared["cwd"].as_str().unwrap());
+        (temp, state, home, source, root)
+    }
+
+    #[test]
+    fn foreground_activity_blocks_cleanup_until_drop_and_stale_markers_do_not() {
+        let (temp, state, home) = fixture();
+        let project = home.join("ferry/app");
+        let guard = protect_activity(&state, &project).unwrap();
+        let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
+        assert!(preview["candidates"].as_array().unwrap().is_empty());
+        assert!(
+            preview["entries"][0]["protected"]
+                .as_str()
+                .unwrap()
+                .contains("активной")
+        );
+        drop(guard);
+        let stale = state.join("storage-activity/stale");
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("activity.json"), "broken stale data").unwrap();
+        let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        let mut q = request(Kind::Caches);
+        q.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        let guard = protect_activity(&state, &project).unwrap();
+        assert!(execute(&state, &home, q.clone()).is_err());
+        assert!(project.join("target/object").exists());
+        drop(guard);
+        assert_eq!(
+            execute(&state, &home, q).unwrap()["deleted"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn durable_job_in_subdirectory_protects_its_whole_ferry_copy_only() {
+        let (temp, state, home) = fixture();
+        let project = home.join("ferry/app");
+        let cwd = project.join("src");
+        fs::create_dir(&cwd).unwrap();
+        let job = state.join("jobs/subdirectory");
+        let guard = lock(&job.join("lock")).unwrap();
+        guard.lock().unwrap();
+        fs::write(job.join("run-id"), "subdirectory-id").unwrap();
+        fs::write(job.join("log"), "running").unwrap();
+        fs::write(job.join("cwd"), cwd.to_string_lossy().as_bytes()).unwrap();
+        let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
+        assert!(preview["candidates"].as_array().unwrap().is_empty());
+        assert!(
+            preview["entries"][0]["protected"]
+                .as_str()
+                .unwrap()
+                .contains("активной")
+        );
+
+        let external = home.join("work");
+        fs::create_dir_all(external.join("src")).unwrap();
+        fs::create_dir(external.join("target")).unwrap();
+        fs::write(
+            job.join("cwd"),
+            external.join("src").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        let active = Active::collect(&state, &home).unwrap();
+        assert!(active.reason(&external.join("src"), Kind::Caches).is_some());
+        assert!(
+            active
+                .reason(&external.join("target"), Kind::Caches)
+                .is_none()
+        );
+        assert_eq!(
+            execute(&state, &home, request(Kind::Caches)).unwrap()["candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(guard);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn configured_caches_still_require_policy_preview_and_untracked_ignored_data() {
+        let (temp, state, home, source, root) = managed_fixture();
+        fs::create_dir(root.join("build")).unwrap();
+        fs::write(root.join("build/object"), "generated").unwrap();
+        old(&root.join("build"));
+        let before = execute(&state, &home, request(Kind::Caches)).unwrap();
+        assert!(
+            !before["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == json!(root.join("build")))
+        );
+        save_workspace_caches(&state, &home, &source, &["build".into()], &[".env".into()]).unwrap();
+        let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
+        let candidate = preview["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == json!(root.join("build")))
+            .unwrap();
+        let mut q = request(Kind::Caches);
+        q.only = Some(candidate["id"].as_str().unwrap().into());
+        let preview = execute(&state, &home, q.clone()).unwrap();
+        q.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        save_workspace_caches(&state, &home, &source, &[], &[]).unwrap();
+        assert!(execute(&state, &home, q.clone()).is_err());
+        assert!(root.join("build/object").is_file());
+        save_workspace_caches(&state, &home, &source, &["build".into()], &[]).unwrap();
+        git(&root, &["add", "-f", "build/object"]);
+        q.apply = None;
+        let protected = execute(&state, &home, q.clone()).unwrap();
+        assert!(protected["candidates"].as_array().unwrap().is_empty());
+        assert!(
+            protected["entries"][0]["protected"]
+                .as_str()
+                .unwrap()
+                .contains("отслеживаемые")
+        );
+        git(&root, &["rm", "--cached", "-q", "build/object"]);
+        old(&root.join("build"));
+        let preview = execute(&state, &home, q.clone()).unwrap();
+        q.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        assert_eq!(
+            execute(&state, &home, q).unwrap()["deleted"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!root.join("build").exists());
+        assert!(root.join("source.rs").is_file());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn extras_and_active_workspace_protect_automatic_caches_too() {
+        let (temp, state, home, source, root) = managed_fixture();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::write(root.join("target/private"), "keep").unwrap();
+        old(&root.join("target"));
+        save_workspace_caches(&state, &home, &source, &[], &["target/private".into()]).unwrap();
+        let report = execute(&state, &home, request(Kind::Caches)).unwrap();
+        let entry = report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == json!(root.join("target")))
+            .unwrap();
+        assert!(entry["protected"].as_str().unwrap().contains("files"));
+        save_workspace_caches(&state, &home, &source, &[], &[]).unwrap();
+        let guard =
+            crate::workspace::lock(&state, root.file_name().unwrap().to_str().unwrap()).unwrap();
+        let report = execute(&state, &home, request(Kind::Caches)).unwrap();
+        let entry = report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == json!(root.join("target")))
+            .unwrap();
+        assert!(entry["protected"].as_str().unwrap().contains("активной"));
+        drop(guard);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn contents_stay_in_exact_workspace_and_report_incomplete_sizes() {
+        let (temp, state, home, source, root) = managed_fixture();
+        fs::create_dir(root.join("build")).unwrap();
+        fs::write(root.join("build/object"), "12345").unwrap();
+        let listed = project_contents(&home, &source, "").unwrap();
+        assert!(
+            !listed["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == ".git")
+        );
+        let inside = project_contents(&home, &source, "build").unwrap();
+        assert_eq!(
+            inside["entries"][0],
+            json!({"name":"object","path":"build/object","bytes":5,"directory":false})
+        );
+        for path in ["../app", ".git", "/tmp", "build/../.git"] {
+            assert!(project_contents(&home, &source, path).is_err());
+            assert!(save_workspace_caches(&state, &home, &source, &[path.into()], &[]).is_err());
+        }
+        assert!(
+            save_workspace_caches(
+                &state,
+                &home,
+                &source,
+                &["build".into()],
+                &["build/object".into()]
+            )
+            .is_err()
+        );
+        let mut wrong = source.clone();
+        wrong.tree = "a".repeat(40);
+        assert!(project_contents(&home, &wrong, "").is_err());
+        assert!(save_workspace_caches(&state, &home, &wrong, &["build".into()], &[]).is_err());
+        let mut deep = root.join("deep");
+        for _ in 0..35 {
+            deep = deep.join("d");
+        }
+        fs::create_dir_all(deep).unwrap();
+        let listed = project_contents(&home, &source, "").unwrap();
+        let deep = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "deep")
+            .unwrap();
+        assert!(deep["bytes"].is_null());
+        assert_eq!(listed["truncated"], true);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_paths_and_contents_never_follow_links() {
+        let (temp, state, home, source, root) = managed_fixture();
+        let outside = temp.join("outside");
+        fs::create_dir_all(outside.join("cache")).unwrap();
+        fs::write(outside.join("cache/private"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        assert!(
+            save_workspace_caches(&state, &home, &source, &["link/cache".into()], &[]).is_err()
+        );
+        assert!(project_contents(&home, &source, "link").is_err());
+        let listed = project_contents(&home, &source, "").unwrap();
+        assert!(
+            !listed["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "link")
+        );
+        assert_eq!(listed["truncated"], true);
+        assert_eq!(
+            fs::read_to_string(outside.join("cache/private")).unwrap(),
+            "keep"
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
     fn git(dir: &Path, args: &[&str]) {
         assert!(
