@@ -21,6 +21,9 @@ const USAGE: &str = "\
 ferry — разработка и тесты на нескольких устройствах: на каждом — приложение ferry, команды
 идут отсюда через приложение на этой машине
 
+  ferry help [<команда> [<подкоманда>]]  справка без подключения к устройству
+  ferry version|--version              версия CLI
+
 Устройства:
   ferry select [--os windows|macos] [--shell <имя>] [--tool <команда>]... [--desktop]
                                     JSON: подходящие связанные устройства и причины отказа; без брони
@@ -37,13 +40,16 @@ ferry — разработка и тесты на нескольких устр�
 первый ненулевой. Отказ устройства по режиму или роли — код 75.
 
 Новые возможности (0.1.24):
-  ferry setup status|install claude|codex|smoke DEVICE
+  ferry setup status
+  ferry setup install claude|codex
+  ferry setup smoke DEVICE
   ferry init --template smoke|tauri|electron|web [--root PATH]
   ferry check list [--limit 50] [--before CREATED:ID]
   ferry check compare BASE_ID CANDIDATE_ID
   ferry check export ID [--dest DIR]  общий отчёт, все тесты, логи и ZIP доказательств
   ferry queue add PROFILE --file PATH --devices SELECTOR [--os windows|macos] [--wait SEC]
-  ferry queue status|cancel|resume ID; ferry queue list
+  ferry queue status|cancel|resume|restart ID
+  ferry queue list
   ferry workflow validate FILE [--param K=V]
   ferry workflow run FILE --device DEVICE --job JOB --run RUN --window TITLE [--dry-run]
   ferry capture start DEVICE --job JOB --run RUN --window TITLE --id ID [--fps 10] [--max-seconds 300]
@@ -188,15 +194,19 @@ ferry — разработка и тесты на нескольких устр�
   ferry info                        свойства этой машины (ключ=значение)
   ferry mode [active|no-desktop|paused]
                                     режим: работать, не трогать рабочий стол, отключиться
-  ferry jobs | log <имя> [-f] | kill <имя>
-                                    фоновые задачи этой машины
+  ferry jobs [--tsv]                фоновые задачи этой машины
+  ferry log <имя> [-f]             лог локальной задачи
+  ferry kill <имя>                  остановить локальную задачу
   ferry skill                       поставить скилл для Claude Code (~/.claude/skills/ferry):
                                     как работать с устройствами через ferry
   ferry mcp                         MCP-сервер для Claude Code: claude mcp add ferry -- ferry mcp;
                                     снимки приходят в разговор картинками
 
-Служебные: ferry ssh — ssh для git на устройстве (релей), ferry job <имя> <команда> (запуск
-задачи), ferry job-supervise <имя> (надсмотрщик задачи).
+Служебные команды:
+  ferry dashboard <json>            запрос локального интерфейса
+  ferry ssh <аргументы>             ssh для git на устройстве (релей)
+  ferry job <имя> <команда>         запуск задачи
+  ferry job-supervise <имя>         надсмотрщик задачи
 ";
 
 fn managed_flags(mut args: &[&str]) -> bool {
@@ -217,6 +227,18 @@ fn managed_flags(mut args: &[&str]) -> bool {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    if let Some(help) = help(&args) {
+        match help {
+            Ok(syntax) => {
+                print!("{syntax}");
+                return;
+            }
+            Err(message) => {
+                eprint!("{message}");
+                std::process::exit(2);
+            }
+        }
+    }
     let result = match args.as_slice() {
         ["devices"] => devices::list(false),
         ["devices", "--json"] => devices::list(true),
@@ -610,4 +632,48 @@ fn owned(args: &[&str]) -> Vec<String> {
 fn usage() -> io::Result<i32> {
     eprint!("{USAGE}");
     Ok(2)
+}
+
+fn help(args: &[&str]) -> Option<Result<String, String>> {
+    let topic = match args {
+        ["-h" | "--help"] => &[][..],
+        ["help", "-h" | "--help"] => &args[..1],
+        ["help", topic @ ..] => topic,
+        [_, "-h" | "--help"] => &args[..1],
+        // Only recognize a documented subcommand. `run DEVICE --help` can be a shell command,
+        // and other arguments (especially after `--`) belong to the command being invoked.
+        [_, _, "-h" | "--help"] => return help_for(&args[..2]).map(Ok),
+        _ => return None,
+    };
+    Some(help_for(topic).ok_or_else(|| {
+        format!(
+            "ferry: неизвестная команда «{}». Список команд доступен через ferry help.\n",
+            topic.join(" ")
+        )
+    }))
+}
+
+fn help_for(topic: &[&str]) -> Option<String> {
+    if topic.is_empty() {
+        return Some(USAGE.into());
+    }
+    let mut selected = false;
+    let mut help = String::new();
+    for line in USAGE.lines() {
+        if let Some(syntax) = line.strip_prefix("  ferry ") {
+            let mut words = syntax.split_whitespace();
+            selected = topic.iter().all(|wanted| {
+                words
+                    .next()
+                    .is_some_and(|word| word.split('|').any(|form| form == *wanted))
+            });
+        } else if !line.starts_with("    ") {
+            selected = false;
+        }
+        if selected {
+            help.push_str(line);
+            help.push('\n');
+        }
+    }
+    (!help.is_empty()).then_some(help)
 }

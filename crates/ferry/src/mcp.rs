@@ -170,7 +170,7 @@ fn tool() -> Value {
             shot <устройство> [--window <окно> | --region x,y,w,h]; windows; focus; ui; text; \
             click <устройство> (x y | --name <имя> | --text <текст>); type; key; drag; clip; \
             wait <устройство> (--window | --name | --text | --port | --log <задача> <текст>); \
-            crashes; logs; info — включая возраст настоящего ввода; desk take --note — намерение на рамке; ask DEVICE вопрос — запрос человеку, --poll ID — ответ (done требует проверки). Пустой args — полный список команд.",
+            crashes; logs; info — включая возраст настоящего ввода; desk take --note — намерение на рамке; ask DEVICE вопрос — запрос человеку, --poll ID — ответ (done требует проверки). args: [\"help\", \"COMMAND\"] — синтаксис команды без подключения. Пустой args — полный список команд.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -189,6 +189,19 @@ fn tool() -> Value {
 fn run(args: &[String], cancelled: &AtomicBool) -> Value {
     if args.is_empty() {
         return answer(vec![text(crate::USAGE)], false);
+    }
+    let words: Vec<_> = args.iter().map(String::as_str).collect();
+    if let Some(help) = crate::help(&words) {
+        let (stdout, stderr, code) = match help {
+            Ok(syntax) => (syntax, String::new(), 0),
+            Err(message) => (String::new(), message, 2),
+        };
+        let mut value = answer(
+            vec![text(if code == 0 { &stdout } else { &stderr })],
+            code != 0,
+        );
+        value["structuredContent"] = json!({"schema_version":1,"exit_code":code,"stdout":stdout,"stderr":stderr,"truncated":false});
+        return value;
     }
     if args
         .first()
