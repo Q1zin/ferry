@@ -872,6 +872,7 @@ fn one(root: &Path, op: &Operation, index: usize, collect_only: bool) -> Result<
         collect_only,
     };
     if let Err(e) = run.execute(status) {
+        eprintln!("ferry check [{}]: {e}", op.target_label(index));
         error(&mut run.target, e);
         // Evidence collection may fail after cleanup; resuming must retry collection.
         if !journal::terminal(&run.target.state) || run.target.state == "succeeded" {

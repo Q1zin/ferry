@@ -197,6 +197,14 @@ struct Live {
     conn: Option<Connection>,
 }
 
+fn path_name(direct: Option<bool>) -> &'static str {
+    match direct {
+        Some(true) => "direct",
+        Some(false) => "relay",
+        None => "unknown",
+    }
+}
+
 /// DNS: публичные серверы через HTTPS (Cloudflare, Google) и системный резолвер — наперегонки,
 /// ответ — первый успешный. С VPN системный DNS отвечает ошибкой, которую резолвер считает
 /// окончательной, — её не ждём, ждём HTTPS. В корпоративной сети наружу закрыт любой DNS, кроме
@@ -1069,11 +1077,12 @@ impl Inner {
         let task = tokio::spawn(async move {
             let mut pause = Duration::from_secs(1);
             loop {
-                match inner.watch_peer(id).await {
+                let result = inner.watch_peer(id).await;
+                match &result {
                     Ok(()) => pause = Duration::from_secs(1),
                     Err(e) => tracing::debug!("{}: {e:#}", id.fmt_short()),
                 }
-                inner.lost(id);
+                inner.lost(id, result.as_ref().err());
                 tokio::time::sleep(pause).await;
                 pause = (pause * 2).min(Duration::from_secs(15));
             }
@@ -1104,7 +1113,14 @@ impl Inner {
             if let Some(conn) = live.conn.take() {
                 conn.close(0u32.into(), b"replaced");
             }
+            tracing::info!(
+                peer = %id.fmt_short(),
+                device = live.status.as_ref().map(|s| s.name.as_str()),
+                "повторное подключение устройства"
+            );
             live.client = None;
+            live.direct = None;
+            live.rtt_ms = None;
             live.since = None;
         }
         self.notify();
@@ -1184,6 +1200,16 @@ impl Inner {
             .rtt_ms
             .zip(rtt)
             .is_none_or(|(a, b)| a.abs_diff(b) > a.max(b) / 4 + 2);
+        if live.direct != direct {
+            tracing::info!(
+                peer = %id.fmt_short(),
+                device = live.status.as_ref().map(|s| s.name.as_str()),
+                previous = path_name(live.direct),
+                path = path_name(direct),
+                rtt_ms = rtt,
+                "сетевой путь устройства"
+            );
+        }
         if live.direct != direct || jumped {
             live.direct = direct;
             live.rtt_ms = rtt;
@@ -1192,11 +1218,21 @@ impl Inner {
         }
     }
 
-    fn lost(&self, id: EndpointId) {
+    fn lost(&self, id: EndpointId, error: Option<&anyhow::Error>) {
         if let Some(live) = self.peers.lock().unwrap().get_mut(&id) {
             if live.client.take().is_none() && live.direct.is_none() {
                 return;
             }
+            let quic = live.conn.as_ref().and_then(Connection::close_reason);
+            tracing::warn!(
+                peer = %id.fmt_short(),
+                device = live.status.as_ref().map(|s| s.name.as_str()),
+                path = path_name(live.direct),
+                rtt_ms = live.rtt_ms,
+                ?quic,
+                error = error.map(|cause| format!("{cause:#}")),
+                "связь с устройством оборвалась"
+            );
             live.direct = None;
             live.rtt_ms = None;
             live.since = None;

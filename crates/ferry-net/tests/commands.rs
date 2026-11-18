@@ -587,9 +587,9 @@ async fn durable_admission_respects_headless_modes_and_keeps_request_identity() 
         jobs::execution::{Resource, StartRequest},
     };
     let a = agent("durable-ctl").await;
-    let mut options = options("durable-node");
-    options.supervisor = "/usr/bin/true".into();
-    let b = agent_with("durable-node", options).await;
+    let mut settings = options("durable-node");
+    settings.supervisor = "/usr/bin/true".into();
+    let b = agent_with("durable-node", settings).await;
     pair(&a, &b).await;
     let node = a.device("durable-node").unwrap();
     b.set_mode(Mode::NoDesktop).unwrap();
@@ -617,6 +617,37 @@ async fn durable_admission_respects_headless_modes_and_keeps_request_identity() 
             .run_id,
         first.run_id
     );
+
+    let other_addr = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let next_port = other_addr.local_addr().unwrap().port();
+    let endpoint = b.id();
+    assert!(b.addr().ip_addrs().all(|addr| addr.port() != next_port));
+    b.shutdown().await;
+    let selector = endpoint.to_string();
+    until(&a, "старый адрес отключён", |s| {
+        !s.find(&selector).unwrap().online
+    })
+    .await;
+    drop(other_addr);
+    let mut settings = options("durable-node");
+    settings.supervisor = "/usr/bin/true".into();
+    settings.port = Some(next_port);
+    let b = ferry_net::Agent::start(settings).await.unwrap();
+    assert_eq!(b.id(), endpoint);
+    assert!(b.addr().ip_addrs().any(|addr| addr.port() == next_port));
+    a.learn(b.addr());
+    b.learn(a.addr());
+    until(
+        &a,
+        "устройство вернулось на новом адресе",
+        |s| s.find(&selector).unwrap().online,
+    )
+    .await;
+    let node = a.device(&selector).unwrap();
+    let after = node.atomic_start(request.clone()).await.unwrap();
+    assert!(after.reused);
+    assert_eq!(after.run_id, first.run_id);
+
     let mut conflict = request.clone();
     conflict.command = "echo different".into();
     assert!(
@@ -661,4 +692,6 @@ async fn durable_admission_respects_headless_modes_and_keeps_request_identity() 
     b.set_mode(Mode::Active).unwrap();
     b.set_role(None, Role::Console).await.unwrap();
     assert_eq!(node.atomic_start(request).await.unwrap_err().code, 75);
+    b.shutdown().await;
+    a.shutdown().await;
 }
