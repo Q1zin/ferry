@@ -151,7 +151,11 @@ fn remove_tunnel(
             "туннель {}:{} через {local_port} принадлежит {}",
             route.name,
             route.remote_port,
-            if owner.is_empty() { "терминалу" } else { owner }
+            if owner.is_empty() {
+                "терминалу"
+            } else {
+                owner
+            }
         )));
     }
     Ok(routes.remove(&local_port))
@@ -616,7 +620,10 @@ impl Agent {
         let requested = local.unwrap_or(remote_port);
         let mut tunnels = self.inner.tunnels.lock().unwrap();
         let same = |t: &Tunnel| {
-            t.id == id && t.remote_port == remote_port && t.owner.as_deref() == owner && t.keep == keep
+            t.id == id
+                && t.remote_port == remote_port
+                && t.owner.as_deref() == owner
+                && t.keep == keep
         };
         let found = if requested == 0 {
             tunnels.iter().find(|(_, t)| t.automatic && same(t))
@@ -625,9 +632,14 @@ impl Agent {
         };
         if let Some((&port, existing)) = found {
             if same(existing) {
-                return Ok(existing.status(port, session, format!(
-                    "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{}", existing.name, existing.remote_port
-                )));
+                return Ok(existing.status(
+                    port,
+                    session,
+                    format!(
+                        "ferry: туннель уже открыт: 127.0.0.1:{port} → {}:{}",
+                        existing.name, existing.remote_port
+                    ),
+                ));
             }
             let owner = existing.owner.as_deref().unwrap_or("терминал");
             return Err(Fail::refused(format!(
@@ -636,13 +648,16 @@ impl Agent {
             )));
         }
         self.device(&peer.id)?;
-        let socket = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, requested)).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                Fail::new(format!("порт {requested} здесь занят; укажи --local-port 0 для свободного порта"))
-            } else {
-                e.into()
-            }
-        })?;
+        let socket =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, requested)).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    Fail::new(format!(
+                        "порт {requested} здесь занят; укажи --local-port 0 для свободного порта"
+                    ))
+                } else {
+                    e.into()
+                }
+            })?;
         socket.set_nonblocking(true)?;
         let port = socket.local_addr()?.port();
         let listener = tokio::net::TcpListener::from_std(socket)?;
@@ -673,9 +688,11 @@ impl Agent {
             keep,
             automatic: requested == 0,
         };
-        let value = tunnel.status(port, session, format!(
-            "ferry: 127.0.0.1:{port} → {}:{remote_port}", tunnel.name
-        ));
+        let value = tunnel.status(
+            port,
+            session,
+            format!("ferry: 127.0.0.1:{port} → {}:{remote_port}", tunnel.name),
+        );
         tunnels.insert(port, tunnel);
         Ok(value)
     }
@@ -689,7 +706,9 @@ impl Agent {
         cleanup: bool,
     ) -> Result<serde_json::Value, Fail> {
         if local_port == 0 {
-            return Err(Fail::new("для закрытия укажи фактический --local-port из ferry tunnel --json"));
+            return Err(Fail::new(
+                "для закрытия укажи фактический --local-port из ferry tunnel --json",
+            ));
         }
         let snapshot = self.snapshot();
         let target = snapshot.find(who).ok().map(|p| p.id.as_str());
@@ -703,9 +722,14 @@ impl Agent {
             cleanup,
         )?;
         if let Some(tunnel) = tunnel {
-            let mut value = tunnel.status(local_port, session, format!(
-                "ferry: туннель {}:{} через {local_port} закрыт", tunnel.name, tunnel.remote_port
-            ));
+            let mut value = tunnel.status(
+                local_port,
+                session,
+                format!(
+                    "ferry: туннель {}:{} через {local_port} закрыт",
+                    tunnel.name, tunnel.remote_port
+                ),
+            );
             value["closed"] = true.into();
             tunnel.close().await;
             return Ok(value);
@@ -723,17 +747,36 @@ impl Agent {
     }
 
     pub fn tunnels(&self) -> Vec<(String, u16)> {
-        self.inner.tunnels.lock().unwrap().iter()
+        self.inner
+            .tunnels
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|(port, t)| **port == t.remote_port)
-            .map(|(&port, t)| (t.name.clone(), port)).collect()
+            .map(|(&port, t)| (t.name.clone(), port))
+            .collect()
     }
 
     pub(crate) fn tunnel_status(&self, session: &str) -> serde_json::Value {
-        let tunnels: Vec<_> = self.inner.tunnels.lock().unwrap().iter()
-            .map(|(&port, t)| t.status(port, session, format!(
-                "127.0.0.1:{port} → {}:{} (владелец: {})",
-                t.name, t.remote_port, t.owner.as_deref().unwrap_or("терминал")
-            ))).collect();
+        let tunnels: Vec<_> = self
+            .inner
+            .tunnels
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&port, t)| {
+                t.status(
+                    port,
+                    session,
+                    format!(
+                        "127.0.0.1:{port} → {}:{} (владелец: {})",
+                        t.name,
+                        t.remote_port,
+                        t.owner.as_deref().unwrap_or("терминал")
+                    ),
+                )
+            })
+            .collect();
         serde_json::json!({"session": session, "tunnels": tunnels})
     }
 
@@ -1507,19 +1550,46 @@ mod tests {
             while a.device(&target).is_err() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        })
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
         let remote_port = listener.local_addr().unwrap().port();
-        let first = a.open_tunnel(&target, remote_port, Some(0), "agent:first", true).unwrap();
-        let second = a.open_tunnel(&target, remote_port, Some(0), "agent:second", true).unwrap();
+        let first = a
+            .open_tunnel(&target, remote_port, Some(0), "agent:first", true)
+            .unwrap();
+        let second = a
+            .open_tunnel(&target, remote_port, Some(0), "agent:second", true)
+            .unwrap();
         let port = |value: &serde_json::Value| value["local_port"].as_u64().unwrap() as u16;
         assert_ne!(port(&first), port(&second));
         assert_eq!(
-            port(&a.open_tunnel(&target, remote_port, Some(0), "agent:first", true).unwrap()),
+            port(
+                &a.open_tunnel(&target, remote_port, Some(0), "agent:first", true)
+                    .unwrap()
+            ),
             port(&first)
         );
-        assert_eq!(a.tunnel_status("agent:second")["tunnels"].as_array().unwrap().len(), 2);
-        assert!(a.close_tunnel(&target, port(&first), Some(remote_port), "agent:second", false).await.is_err());
+        assert_eq!(
+            a.tunnel_status("agent:second")["tunnels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            a.close_tunnel(
+                &target,
+                port(&first),
+                Some(remote_port),
+                "agent:second",
+                false
+            )
+            .await
+            .is_err()
+        );
 
         let receive = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1528,27 +1598,63 @@ mod tests {
             stream.write_all(&input).await.unwrap();
         });
         tokio::time::timeout(Duration::from_secs(5), async {
-            let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port(&second))).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port(&second)))
+                .await
+                .unwrap();
             stream.write_all(b"f").await.unwrap();
             let mut echoed = [0];
             stream.read_exact(&mut echoed).await.unwrap();
             assert_eq!(&echoed, b"f");
             receive.await.unwrap();
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         b.shutdown().await;
         tokio::time::timeout(Duration::from_secs(5), async {
             while a.device(&target).is_ok() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let first_port = port(&first);
         let other_port = port(&second);
-        assert_eq!(a.close_tunnel(&target, first_port, None, "agent:first", true).await.unwrap()["already_closed"], true);
-        assert_eq!(a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false).await.unwrap()["owner"], "agent:first");
-        assert_eq!(a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false).await.unwrap()["already_closed"], true);
-        assert!(tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, first_port)).await.is_ok());
-        assert_eq!(a.close_tunnel(&target, other_port, Some(remote_port), "agent:second", false).await.unwrap()["owner"], "agent:second");
+        assert_eq!(
+            a.close_tunnel(&target, first_port, None, "agent:first", true)
+                .await
+                .unwrap()["already_closed"],
+            true
+        );
+        assert_eq!(
+            a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false)
+                .await
+                .unwrap()["owner"],
+            "agent:first"
+        );
+        assert_eq!(
+            a.close_tunnel(&target, first_port, Some(remote_port), "agent:first", false)
+                .await
+                .unwrap()["already_closed"],
+            true
+        );
+        assert!(
+            tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, first_port))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            a.close_tunnel(
+                &target,
+                other_port,
+                Some(remote_port),
+                "agent:second",
+                false
+            )
+            .await
+            .unwrap()["owner"],
+            "agent:second"
+        );
         a.shutdown().await;
     }
 

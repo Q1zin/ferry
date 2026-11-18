@@ -114,10 +114,24 @@ pub fn desk(device: &str, args: &[&str]) -> io::Result<i32> {
         }
     }
     let request = if let Some(note) = note {
-        Request::DeskNote { device: device.into(), minutes, note }
+        Request::DeskNote {
+            device: device.into(),
+            minutes,
+            note,
+        }
     } else {
-        let action = if json { "show-json" } else if force { "force" } else { action };
-        Request::Desk { device: device.into(), minutes, action: action.into() }
+        let action = if json {
+            "show-json"
+        } else if force {
+            "force"
+        } else {
+            action
+        };
+        Request::Desk {
+            device: device.into(),
+            minutes,
+            action: action.into(),
+        }
     };
     devices::finish(match control::call_session(request, &session) {
         Ok(Response::Message(text)) => {

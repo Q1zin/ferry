@@ -660,17 +660,17 @@ impl Node {
             let cwd = self.resolve(&dir)?;
             let (command, script) = desk::task_shell(&cmd, shell, &self.dir)?;
             let child = tokio::process::Command::from(command)
-            .envs(
-                self.relay
-                    .env(from, &trust, &self.supervisor)
-                    .map_err(Fail::new)?,
-            )
-            .current_dir(&cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))?;
+                .envs(
+                    self.relay
+                        .env(from, &trust, &self.supervisor)
+                        .map_err(Fail::new)?,
+                )
+                .current_dir(&cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))?;
             Ok((child, script))
         })();
         let (mut child, _script) = match spawned {

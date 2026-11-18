@@ -113,13 +113,15 @@ async fn cleanup(agent: &Agent) {
             let cleaned = async {
                 match binding.kind {
                     Kind::Tunnel { port } => {
-                        agent.close_tunnel(
-                            binding.device.as_deref().unwrap_or(""),
-                            port,
-                            None,
-                            &binding.session,
-                            true,
-                        ).await?;
+                        agent
+                            .close_tunnel(
+                                binding.device.as_deref().unwrap_or(""),
+                                port,
+                                None,
+                                &binding.session,
+                                true,
+                            )
+                            .await?;
                     }
                     Kind::Job { request_id } => match &binding.device {
                         Some(who) => {

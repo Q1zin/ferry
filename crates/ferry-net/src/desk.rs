@@ -80,7 +80,8 @@ impl Lease {
                 "owned": holder.as_ref().is_some_and(mine),
                 "remaining_seconds": holder.as_ref().map(left),
                 "note": holder.as_ref().and_then(|h| h.note.as_ref())
-            }).to_string()),
+            })
+            .to_string()),
             (DeskAction::Show, None) => Ok("свободен".into()),
             (DeskAction::Show, Some(h)) => Ok(format!("занят: {} — ещё {} с", who(h), left(h))),
             (DeskAction::ForceFree, None) => Ok("свободен".into()),
@@ -163,8 +164,11 @@ mod tests {
         let now = Instant::now();
         let mut desk = Lease::default();
         let name = |_| "console".to_string();
-        desk.apply(from, "agent:first", DeskAction::Hold(60), now, name).unwrap();
-        let report = desk.apply(from, "agent:second", DeskAction::ShowReport, now, name).unwrap();
+        desk.apply(from, "agent:first", DeskAction::Hold(60), now, name)
+            .unwrap();
+        let report = desk
+            .apply(from, "agent:second", DeskAction::ShowReport, now, name)
+            .unwrap();
         let report: serde_json::Value = serde_json::from_str(&report).unwrap();
         assert_eq!(report["session"], "agent:second");
         assert_eq!(report["owner"]["session"], "agent:first");

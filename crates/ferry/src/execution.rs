@@ -421,13 +421,16 @@ pub fn tunnel(args: &[&str]) -> io::Result<i32> {
             let Some(device) = device(who)? else {
                 return Err(Fail::new("туннелю нужно удалённое устройство"));
             };
-            let result = report(Request::TunnelRoute {
-                device,
-                port,
-                local_port,
-                close,
-                keep,
-            }, &session)?;
+            let result = report(
+                Request::TunnelRoute {
+                    device,
+                    port,
+                    local_port,
+                    close,
+                    keep,
+                },
+                &session,
+            )?;
             if json || !session.is_empty() || keep || local_port.is_some() {
                 println!("{result}");
             } else if let Some(message) = result["message"].as_str() {
@@ -577,9 +580,14 @@ fn workspace_put(path: &Path, file: &Path) -> Result<i32, Fail> {
     let prefix = format!(".git/ferry-inputs/{id}");
     if let Some(device) = device(who)? {
         let base = std::env::temp_dir().join(format!("ferry-input-{id}"));
-        let mut directory = fs::DirBuilder::new();
+        let directory = fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut directory, 0o700);
+        let directory = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut directory = directory;
+            directory.mode(0o700);
+            directory
+        };
         directory.create(&base)?;
         let sent = (|| {
             fs::write(base.join(name), &bytes)?;
@@ -618,6 +626,21 @@ fn workspace_put(path: &Path, file: &Path) -> Result<i32, Fail> {
     );
     Ok(0)
 }
+pub fn project_profile(args: &[&str]) -> io::Result<i32> {
+    finish((|| {
+        let repo = ferry_core::sync::repo()?.ok_or_else(|| Fail::new("нет git-проекта"))?;
+        match args {
+            [] => {}
+            ["bind", name] => ferry_core::project::bind(&repo, Some(name))?,
+            ["unbind"] => ferry_core::project::bind(&repo, None)?,
+            _ => return Err(Fail::new("project [bind ПРОФИЛЬ|unbind]")),
+        }
+        let (path, _) = ferry_core::project::for_checkout(&repo)?;
+        println!("{}", json!({"root": repo.root, "profile_path": path}));
+        Ok(0)
+    })())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,19 +688,4 @@ mod tests {
         assert!(device("all").is_err());
         assert!(device("os:windows").is_err());
     }
-}
-
-pub fn project_profile(args: &[&str]) -> io::Result<i32> {
-    finish((|| {
-        let repo = ferry_core::sync::repo()?.ok_or_else(|| Fail::new("нет git-проекта"))?;
-        match args {
-            [] => {}
-            ["bind", name] => ferry_core::project::bind(&repo, Some(name))?,
-            ["unbind"] => ferry_core::project::bind(&repo, None)?,
-            _ => return Err(Fail::new("project [bind ПРОФИЛЬ|unbind]")),
-        }
-        let (path, _) = ferry_core::project::for_checkout(&repo)?;
-        println!("{}", json!({"root": repo.root, "profile_path": path}));
-        Ok(0)
-    })())
 }

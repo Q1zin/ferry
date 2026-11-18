@@ -365,7 +365,7 @@ async fn cli_drives_devices_through_the_app() {
     let said = text(&out.stderr);
     assert!(
         said.contains("рабочий стол win занят: ctl (a) — ещё 1")
-            && said.contains("ferry desk win free --force"),
+            && said.contains("ferry select --desktop"),
         "{said}"
     );
     assert!(text(&out.stdout).is_empty(), "команда не запускалась");

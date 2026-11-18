@@ -296,7 +296,9 @@ async fn answer(
             close,
             keep,
         } => Response::Message(tunnel_message(if close {
-            agent.close_tunnel(&device, port, Some(port), session, false).await?
+            agent
+                .close_tunnel(&device, port, Some(port), session, false)
+                .await?
         } else {
             agent.open_tunnel(&device, port, None, session, keep)?
         })?),
@@ -306,11 +308,22 @@ async fn answer(
             local_port,
             close,
             keep,
-        } => Response::Report(if close {
-            agent.close_tunnel(&device, local_port.unwrap_or(port), Some(port), session, false).await?
-        } else {
-            agent.open_tunnel(&device, port, local_port, session, keep)?
-        }.to_string()),
+        } => Response::Report(
+            if close {
+                agent
+                    .close_tunnel(
+                        &device,
+                        local_port.unwrap_or(port),
+                        Some(port),
+                        session,
+                        false,
+                    )
+                    .await?
+            } else {
+                agent.open_tunnel(&device, port, local_port, session, keep)?
+            }
+            .to_string(),
+        ),
         Request::TunnelStatus => Response::Report(agent.tunnel_status(session).to_string()),
         Request::AtomicStart {
             device,
@@ -653,13 +666,17 @@ async fn answer(
             root,
             project,
         } => Response::Message(agent.device(&device)?.pull(&root, &project).await?),
-        Request::Tunnel { device, port, close } => {
-            Response::Message(tunnel_message(if close {
-                agent.close_tunnel(&device, port, Some(port), session, false).await?
-            } else {
-                agent.open_tunnel(&device, port, None, session, false)?
-            })?)
-        }
+        Request::Tunnel {
+            device,
+            port,
+            close,
+        } => Response::Message(tunnel_message(if close {
+            agent
+                .close_tunnel(&device, port, Some(port), session, false)
+                .await?
+        } else {
+            agent.open_tunnel(&device, port, None, session, false)?
+        })?),
         Request::Tunnels => Response::Tunnels(agent.tunnels()),
         Request::ActV2 {
             device,
@@ -776,11 +793,18 @@ async fn answer(
             Response::Report(observation_value(observation, &file, lease)?.to_string())
         }
         Request::Evidence { device, query } => Response::Report(match device {
-            Some(who) => agent
-                .device(&who)
-                .map_err(|e| Fail::new(format!("{}{e}", ferry_core::jobs::evidence::TRANSPORT_ERROR)))?
-                .evidence(query)
-                .await?,
+            Some(who) => {
+                agent
+                    .device(&who)
+                    .map_err(|e| {
+                        Fail::new(format!(
+                            "{}{e}",
+                            ferry_core::jobs::evidence::TRANSPORT_ERROR
+                        ))
+                    })?
+                    .evidence(query)
+                    .await?
+            }
             None => agent.evidence_self(query).await?,
         }),
         Request::Capabilities { device, request } => Response::Capabilities(if device == "local" {
@@ -857,7 +881,9 @@ async fn answer(
 }
 
 fn tunnel_message(report: serde_json::Value) -> Result<String, Fail> {
-    report["message"].as_str().map(str::to_owned)
+    report["message"]
+        .as_str()
+        .map(str::to_owned)
         .ok_or_else(|| Fail::new("нет ответа о туннеле"))
 }
 
