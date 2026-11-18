@@ -970,8 +970,17 @@ pub fn run() {
             stream::stream_ack,
             stream::control_screen
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building ferry")
+        .run(|_, event| {
+            // При запуске с --hidden рамка может быть единственным окном приложения.
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = event
+            {
+                api.prevent_exit();
+            }
+        });
 }
 
 #[cfg(test)]
