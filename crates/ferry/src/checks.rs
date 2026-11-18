@@ -223,13 +223,12 @@ fn preflight(
     p: &Profile,
     session: &str,
 ) -> Result<Value, Fail> {
-    let version = status
-        .version
-        .split('.')
-        .map(str::parse::<u32>)
-        .collect::<Result<Vec<_>, _>>();
-    if !version.is_ok_and(|v| v.len() == 3 && v.as_slice() >= [0, 1, 23].as_slice()) {
-        return Err(Fail::new("check требует ferry 0.1.23 на устройстве"));
+    use ferry_core::device::version;
+    if !version::at_least(&status.version, version::CHECK) {
+        return Err(Fail::new(format!(
+            "check требует ferry {} на устройстве",
+            version::CHECK
+        )));
     }
     if (!p.headless && status.mode != Mode::Active)
         || status.mode == Mode::Paused

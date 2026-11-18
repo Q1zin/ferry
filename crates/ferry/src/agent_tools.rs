@@ -2,7 +2,7 @@
 use crate::devices::{ask, finish, state};
 use ferry_core::{
     control::{Request, Response},
-    device::{Dir, Fail, PeerView},
+    device::{Dir, Fail, PeerView, version},
     jobs::evidence::{Action, Query},
     mode::Mode,
 };
@@ -420,9 +420,109 @@ fn rejected(peer: &PeerView, os: Option<&str>, desktop: bool) -> Vec<String> {
     };
     reasons
 }
+
+fn compatibility(peer: &PeerView, minimum: Option<&str>) -> (&'static str, Option<String>) {
+    let Some(minimum) = minimum else {
+        return ("not_requested", None);
+    };
+    let reported = peer.status.as_ref().map(|status| status.version.as_str());
+    if let Some(reported) = reported.filter(|value| version::parse(value).is_some()) {
+        if version::at_least(reported, minimum) {
+            ("compatible", None)
+        } else {
+            (
+                "incompatible",
+                Some(format!("ferry {reported}; требуется {minimum} или новее")),
+            )
+        }
+    } else {
+        (
+            "unknown",
+            Some(format!(
+                "версия ferry неизвестна; требуется {minimum} или новее"
+            )),
+        )
+    }
+}
+
+fn selection_row(
+    peer: &PeerView,
+    os: Option<&str>,
+    request: &ferry_core::capabilities::Request,
+    minimum: Option<&str>,
+) -> Value {
+    let (compatibility, version_reason) = compatibility(peer, minimum);
+    let mut unavailable = rejected(peer, os, request.desktop);
+    let mut capabilities = Value::Null;
+    let needs_probe =
+        request.desktop || !request.tools.is_empty() || request.shell != Default::default();
+    let older_than_probe = peer
+        .status
+        .as_ref()
+        .is_some_and(|status| !version::at_least(&status.version, version::CAPABILITIES));
+    let probe = minimum.is_none() || needs_probe || !older_than_probe;
+
+    if unavailable.is_empty() && version_reason.is_none() && request.desktop {
+        match ask(Request::Desk {
+            device: peer.name.clone(),
+            action: "show".into(),
+            minutes: 0,
+        }) {
+            Ok(Response::Message(text)) if text == "свободен" => {}
+            Ok(Response::Message(text)) => unavailable.push(text),
+            Ok(_) => unavailable.push("бронь неизвестна".into()),
+            Err(e) => unavailable.push(e.to_string()),
+        }
+    }
+    if unavailable.is_empty() && version_reason.is_none() && probe {
+        match ask(Request::Capabilities {
+            device: peer.name.clone(),
+            request: request.clone(),
+        }) {
+            Ok(Response::Capabilities(c)) => {
+                if !c.shell_available {
+                    unavailable.push("оболочка недоступна".into());
+                }
+                if !c.missing_tools.is_empty() {
+                    unavailable.push(format!("нет инструментов: {}", c.missing_tools.join(", ")));
+                }
+                if request.desktop && c.locked != Some(false) {
+                    unavailable.push("экран заблокирован или состояние неизвестно".into());
+                }
+                unavailable.extend(c.warnings.clone());
+                capabilities = serde_json::to_value(c).unwrap_or(Value::Null);
+            }
+            Err(e) => unavailable.push(e.to_string()),
+            _ => unavailable.push("не удалось проверить инструменты".into()),
+        }
+    }
+    let availability = if !unavailable.is_empty() {
+        "unavailable"
+    } else if version_reason.is_some() && needs_probe {
+        "unknown"
+    } else {
+        "available"
+    };
+    let reasons: Vec<_> = unavailable.iter().chain(version_reason.iter()).collect();
+    let human = if peer.online {
+        report(Request::Human {
+            device: Some(peer.name.clone()),
+            request: ferry_core::human::Request::Presence,
+        })
+        .unwrap_or_else(|e| json!({"available":false,"error":e.to_string()}))
+    } else {
+        json!({"available":false,"error":"устройство не на связи"})
+    };
+    json!({"device":peer.name,"eligible":reasons.is_empty(),"reasons":reasons,
+        "compatibility":{"state":compatibility,"min_version":minimum,"reason":version_reason},
+        "availability":{"state":availability,"reasons":unavailable},
+        "capabilities":capabilities,"status":peer.status,"human":human})
+}
+
 pub fn select(args: &[&str]) -> io::Result<i32> {
     let (mut os, mut shell, mut desktop, mut tools) =
         (None, ferry_core::desk::Shell::Default, false, Vec::new());
+    let (mut features, mut minimum) = (Vec::new(), None);
     let mut rest = args;
     while !rest.is_empty() {
         match rest {
@@ -442,13 +542,40 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
                 desktop = true;
                 rest = tail;
             }
+            ["--feature", feature, tail @ ..] => {
+                let (name, _) = version::FEATURES
+                    .into_iter()
+                    .find(|(name, _)| name == feature)
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "неизвестная функция ferry: {feature:?}; список в ferry select --help"
+                        ))
+                    })?;
+                if !features.contains(&name) {
+                    features.push(name);
+                }
+                rest = tail;
+            }
+            ["--min-version", value, tail @ ..] => {
+                if version::parse(value).is_none() {
+                    return Err(io::Error::other("--min-version: ожидается версия X.Y.Z"));
+                }
+                minimum = Some(*value);
+                rest = tail;
+            }
             _ => return crate::usage(),
         }
     }
+    let minimum = version::FEATURES
+        .into_iter()
+        .filter(|(name, _)| features.contains(name))
+        .map(|(_, since)| since)
+        .chain(minimum)
+        .max_by_key(|since| version::parse(since));
     let request = ferry_core::capabilities::Request {
         shell,
         tools,
-        desktop,
+        desktop: desktop || features.contains(&"desk-note"),
     };
     ferry_core::capabilities::validate(&request)?;
     finish((|| {
@@ -457,35 +584,13 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
         let mut rejections = Vec::new();
         for batch in snap.peers.chunks(8) {
             let rows = std::thread::scope(|scope| {
-                let handles:Vec<_>=batch.iter().map(|peer| {let request=&request;scope.spawn(move||{
-                    let mut reasons=rejected(peer,os,desktop);
-                    let mut cap=Value::Null;
-                    if reasons.is_empty() && desktop {
-                        match ask(Request::Desk{device:peer.name.clone(),action:"show".into(),minutes:0}) {
-                            Ok(Response::Message(text)) if text=="свободен"=>{},
-                            Ok(Response::Message(text))=>reasons.push(text),
-                            Ok(_)=>reasons.push("бронь неизвестна".into()),
-                            Err(e)=>reasons.push(e.to_string()),
-                        }
-                    }
-                    if reasons.is_empty() {
-                        match ask(Request::Capabilities{device:peer.name.clone(),request:request.clone()}) {
-                            Ok(Response::Capabilities(c))=>{
-                                if !c.shell_available {reasons.push("оболочка недоступна".into());}
-                                if !c.missing_tools.is_empty() {reasons.push(format!("нет инструментов: {}",c.missing_tools.join(", ")));}
-                                if desktop && c.locked!=Some(false) {reasons.push("экран заблокирован или состояние неизвестно".into());}
-                                reasons.extend(c.warnings.clone()); cap=serde_json::to_value(c).unwrap_or(Value::Null);
-                            }
-                            Err(e)=>reasons.push(e.to_string()),
-                            _=>reasons.push("не удалось проверить инструменты".into()),
-                        }
-                    }
-                    let human = if peer.online {
-                        report(Request::Human { device:Some(peer.name.clone()), request:ferry_core::human::Request::Presence })
-                            .unwrap_or_else(|e|json!({"available":false,"error":e.to_string()}))
-                    } else { json!({"available":false,"error":"устройство не на связи"}) };
-                    json!({"device":peer.name,"eligible":reasons.is_empty(),"reasons":reasons,"capabilities":cap,"status":peer.status,"human":human})
-                })}).collect();
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|peer| {
+                        let request = &request;
+                        scope.spawn(move || selection_row(peer, os, request, minimum))
+                    })
+                    .collect();
                 handles
                     .into_iter()
                     .map(|h| {
@@ -505,7 +610,7 @@ pub fn select(args: &[&str]) -> io::Result<i32> {
         let code = i32::from(matches.is_empty());
         println!(
             "{}",
-            json!({"matches":matches,"rejected":rejections,"checked_at":ferry_core::now(),"requirements":request,"os":os,"reserved":false,"note":"Снимок доступности ferry. Human/idle — сигнал активности, не разрешение трогать рабочий стол. Перед GUI-прогоном учитывай указания пользователя и займи стол через desk take."})
+            json!({"matches":matches,"rejected":rejections,"checked_at":ferry_core::now(),"requirements":request,"os":os,"features":features,"min_version":minimum,"reserved":false,"note":"Снимок доступности ferry. Human/idle — сигнал активности, не разрешение трогать рабочий стол. Перед GUI-прогоном учитывай указания пользователя и займи стол через desk take."})
         );
         Ok(code)
     })())
@@ -857,5 +962,46 @@ mod tests {
     fn refuses_unknown_offline_and_wrong_os_before_probing() {
         let peer:PeerView=serde_json::from_value(json!({"id":"id","name":"test","online":false,"direct":null,"rtt_ms":null,"status":null})).unwrap();
         assert_eq!(rejected(&peer, Some("windows"), true).len(), 2);
+    }
+    #[test]
+    fn explains_offline_devices_independently_of_protocol_compatibility() {
+        use ferry_core::{
+            desk::Shell,
+            device::{Role, Status},
+        };
+        let mut peer = PeerView {
+            id: "id".into(),
+            name: "old-windows".into(),
+            online: false,
+            status: Some(Status {
+                name: "old-windows".into(),
+                role: Role::Node,
+                mode: Mode::Active,
+                os: "windows".into(),
+                version: "0.1.17".into(),
+            }),
+            direct: None,
+            rtt_ms: None,
+        };
+        let request = ferry_core::capabilities::Request {
+            shell: Shell::Default,
+            tools: vec![],
+            desktop: false,
+        };
+        let row = selection_row(&peer, Some("windows"), &request, Some(version::SHELL));
+        assert_eq!(row["compatibility"]["state"], "incompatible");
+        assert_eq!(row["availability"]["state"], "unavailable");
+        assert_eq!(row["availability"]["reasons"], json!(["не на связи"]));
+        assert_eq!(row["eligible"], false);
+
+        peer.status.as_mut().unwrap().version = "0.1.100".into();
+        let row = selection_row(&peer, Some("windows"), &request, Some(version::CHECK));
+        assert_eq!(row["compatibility"]["state"], "compatible");
+        assert_eq!(row["eligible"], false);
+
+        peer.status = None;
+        let row = selection_row(&peer, Some("windows"), &request, Some(version::CHECK));
+        assert_eq!(row["compatibility"]["state"], "unknown");
+        assert_eq!(row["availability"]["state"], "unavailable");
     }
 }

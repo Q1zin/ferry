@@ -119,13 +119,12 @@ fn requirements<'a>(item: &'a Item, candidate: &Candidate) -> Result<(&'a Value,
     if !status.role.accepts_commands() || status.mode == Mode::Paused {
         return Err(Fail::new("режим или роль запрещают команды"));
     }
-    let version: Vec<_> = status
-        .version
-        .split('.')
-        .filter_map(|v| v.parse::<u32>().ok())
-        .collect();
-    if version.len() != 3 || version.as_slice() < [0, 1, 23].as_slice() {
-        return Err(Fail::new("нужен ferry 0.1.23 или новее"));
+    use ferry_core::device::version;
+    if !version::at_least(&status.version, version::CHECK) {
+        return Err(Fail::new(format!(
+            "нужен ferry {} или новее",
+            version::CHECK
+        )));
     }
     if item.os.as_ref().is_some_and(|os| os != &status.os) {
         return Err(Fail::new("другая операционная система"));

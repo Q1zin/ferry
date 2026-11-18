@@ -1,11 +1,20 @@
+use ferry_core::device::version;
 use serde_json::{Value, json};
 use std::io;
 pub(super) fn tools() -> Vec<Value> {
     vec![
         definition(
             "ferry_devices",
-            "Find available devices and capabilities before starting work.",
-            json!({"os":{"type":"string","enum":["windows","macos"]},"desktop":{"type":"boolean"},"tool":{"type":"string"}}),
+            "Find available devices with the required Ferry features and tools before starting work.",
+            json!({
+                "os":{"type":"string","enum":["windows","macos"]},
+                "desktop":{"type":"boolean"},
+                "tool":{"type":"string"},
+                "shell":{"type":"string","enum":["default","bash","powershell","cmd"]},
+                "min_version":{"type":"string","pattern":"^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+                "features":{"type":"array","maxItems":version::FEATURES.len(),
+                    "items":{"type":"string","enum":version::FEATURES.map(|(name, _)| name)}}
+            }),
             &[],
         ),
         definition(
@@ -68,6 +77,10 @@ pub(super) fn args(name: &str, a: &Value) -> io::Result<Vec<String>> {
                 .is_some_and(|s| !s.is_empty() && s.len() <= 4096 && !s.contains('\0')),
             "boolean" => v.is_boolean(),
             "integer" => v.as_u64().is_some_and(|n| (1..=100).contains(&n)),
+            "array" => v.as_array().is_some_and(|values| {
+                let choices = p["items"]["enum"].as_array().unwrap();
+                values.len() <= choices.len() && values.iter().all(|value| choices.contains(value))
+            }),
             _ => false,
         };
         if !valid || p["enum"].as_array().is_some_and(|vs| !vs.contains(v)) {
@@ -78,6 +91,14 @@ pub(super) fn args(name: &str, a: &Value) -> io::Result<Vec<String>> {
         if !values.contains_key(k.as_str().unwrap()) {
             return Err(io::Error::other(format!("missing argument: {k}")));
         }
+    }
+    if a["min_version"]
+        .as_str()
+        .is_some_and(|value| version::parse(value).is_none())
+    {
+        return Err(io::Error::other(
+            "invalid argument: min_version must be X.Y.Z",
+        ));
     }
     // Positional values must never be interpreted as another CLI action or option.
     for key in ["device", "devices", "profile", "id", "base", "candidate"] {
@@ -126,7 +147,7 @@ pub(super) fn args(name: &str, a: &Value) -> io::Result<Vec<String>> {
         _ => unreachable!(),
     };
     let keys: &[&str] = match name {
-        "ferry_devices" => &["os", "tool"],
+        "ferry_devices" => &["os", "tool", "shell", "min_version"],
         "ferry_check_start" => &["file"],
         "ferry_check_history" => &["limit", "before"],
         "ferry_observe" => &["window"],
@@ -134,12 +155,17 @@ pub(super) fn args(name: &str, a: &Value) -> io::Result<Vec<String>> {
     };
     for k in keys {
         if let Some(v) = a.get(k) {
-            result.push(format!("--{k}"));
+            result.push(format!("--{}", k.replace('_', "-")));
             result.push(
                 v.as_str()
                     .map(String::from)
                     .unwrap_or_else(|| v.to_string()),
             );
+        }
+    }
+    if let Some(features) = a["features"].as_array() {
+        for feature in features {
+            result.extend(["--feature".into(), feature.as_str().unwrap().into()]);
         }
     }
     if a["desktop"] == true {
@@ -212,5 +238,28 @@ mod tests {
             args("ferry_check_status", &json!({"id":"x"})).unwrap(),
             vec!["check", "status", "x"]
         );
+    }
+    #[test]
+    fn device_features_and_minimum_version_are_typed() {
+        assert_eq!(
+            args(
+                "ferry_devices",
+                &json!({"features":["result","check"],"min_version":"0.1.25","shell":"powershell"})
+            )
+            .unwrap(),
+            [
+                "select",
+                "--shell",
+                "powershell",
+                "--min-version",
+                "0.1.25",
+                "--feature",
+                "result",
+                "--feature",
+                "check"
+            ]
+        );
+        assert!(args("ferry_devices", &json!({"features":["--desktop"]})).is_err());
+        assert!(args("ferry_devices", &json!({"min_version":"0.1.latest"})).is_err());
     }
 }

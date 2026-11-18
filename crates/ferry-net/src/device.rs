@@ -50,7 +50,7 @@ impl Device {
             need(
                 &self.name,
                 self.version.as_deref(),
-                "0.1.18",
+                ferry_core::device::version::SHELL,
                 "выбор оболочки",
             )?;
             self.client
@@ -77,7 +77,7 @@ impl Device {
         need(
             &self.name,
             self.version.as_deref(),
-            "0.1.20",
+            ferry_core::device::version::RESULT,
             "ferry result",
         )?;
         let deadline = std::time::Duration::from_secs(u64::from(request.wait.min(60)) + 5);
@@ -118,7 +118,7 @@ impl Device {
         need(
             &self.name,
             self.version.as_deref(),
-            "0.1.23",
+            ferry_core::device::version::DURABLE_START,
             "durable start",
         )?;
         self.client
@@ -302,7 +302,7 @@ impl Device {
         need(
             &self.name,
             self.version.as_deref(),
-            "0.1.21",
+            ferry_core::device::version::CAPABILITIES,
             "ferry select",
         )?;
         tokio::time::timeout(
@@ -340,7 +340,7 @@ impl Device {
             need(
                 &self.name,
                 self.version.as_deref(),
-                "0.1.18",
+                ferry_core::device::version::SHELL,
                 "выбор оболочки",
             )?;
             self.client.ask(StartShell { start, shell }).await
@@ -368,7 +368,7 @@ impl Device {
             need(
                 &self.name,
                 self.version.as_deref(),
-                "0.1.23",
+                ferry_core::device::version::DESK_NOTE,
                 "заметка стола",
             )?;
         }
@@ -808,11 +808,12 @@ fn make_bundle(root: &Path, commit: &str, head: Option<&str>, out: &Path) -> std
 /// Знает ли устройство запрос, появившийся в версии `since`. Устройство старше не разберёт его
 /// и оборвёт связь — лучше сразу сказать, что его надо обновить.
 fn need(name: &str, version: Option<&str>, since: &str, what: &str) -> Reply<()> {
-    let parts = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap_or(0)).collect() };
     match version {
-        Some(version) if parts(version) < parts(since) => Err(Fail::new(format!(
-            "на {name} ferry {version}, а {what} — с {since}: обнови его — ferry update {name}"
-        ))),
+        Some(version) if !ferry_core::device::version::at_least(version, since) => {
+            Err(Fail::new(format!(
+                "на {name} ferry {version}, а {what} — с {since}: обнови его — ferry update {name}"
+            )))
+        }
         _ => Ok(()),
     }
 }

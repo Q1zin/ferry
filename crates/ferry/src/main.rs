@@ -29,6 +29,7 @@ ferry — разработка и тесты на нескольких устр�
 
 Устройства:
   ferry select [--os windows|macos] [--shell <имя>] [--tool <команда>]... [--desktop]
+               [--min-version X.Y.Z] [--feature shell|result|desk-note|durable-start|check]...
                                     JSON: подходящие связанные устройства и причины отказа; без брони
   ferry devices [--json]            это устройство и связанные: на связи ли, путь, роль, режим
   ferry pair                        показать код: это устройство ждёт, что его добавят

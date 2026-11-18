@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::mode::Mode;
 
+pub mod version;
+
 /// Что устройство делает. Меняется с любого связанного устройства, в отличие от режима —
 /// его выбирает только человек за самим устройством.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
