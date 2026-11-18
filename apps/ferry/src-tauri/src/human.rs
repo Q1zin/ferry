@@ -17,11 +17,11 @@ pub fn answer(window: tauri::WebviewWindow, id: String, answer: String) -> Resul
     Ok(())
 }
 
-pub fn watch(app: AppHandle, root: std::path::PathBuf) {
+pub fn watch(app: AppHandle, root: std::path::PathBuf) -> tokio::sync::watch::Receiver<usize> {
+    let (count, pending) = tokio::sync::watch::channel(0);
     tauri::async_runtime::spawn(async move {
         let mut stamp = None;
         let mut expires = u64::MAX;
-        let mut previous = Vec::<String>::new();
         loop {
             let modified = std::fs::metadata(root.join("questions"))
                 .and_then(|m| m.modified())
@@ -33,22 +33,19 @@ pub fn watch(app: AppHandle, root: std::path::PathBuf) {
                     .await
                 {
                     Ok(Ok(questions)) => {
-                        let ids: Vec<_> = questions
-                            .iter()
-                            .filter_map(|q| q["id"].as_str().map(String::from))
-                            .collect();
-                        let new = ids.iter().any(|id| !previous.contains(id));
-                        previous = ids;
+                        count.send_if_modified(|previous| {
+                            if *previous == questions.len() {
+                                return false;
+                            }
+                            *previous = questions.len();
+                            true
+                        });
                         expires = questions
                             .iter()
                             .filter_map(|q| q["expires_at"].as_u64())
                             .min()
                             .unwrap_or(u64::MAX);
                         let _ = app.emit("human-questions", questions);
-                        if new {
-                            let handle = app.clone();
-                            let _ = app.run_on_main_thread(move || super::show(&handle, false));
-                        }
                     }
                     _ => tracing::warn!("не удалось прочитать вопросы человеку"),
                 }
@@ -56,4 +53,5 @@ pub fn watch(app: AppHandle, root: std::path::PathBuf) {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     });
+    pending
 }

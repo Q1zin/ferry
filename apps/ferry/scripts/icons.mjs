@@ -60,6 +60,7 @@ const modes = {
   // Не режим: устройством сейчас управляют с другого — белый круг с коралловой обводкой,
   // заметный и на тёмной панели, и на светлой.
   controlled: { fill: '#FFFFFF', ring: CORAL, ink: CORAL },
+  question: { fill: '#F2B84B', ink: INK },
 }
 const route = ink => `
   <path d="M262 742 C420 742 392 520 512 512 C632 504 604 282 762 282" stroke="${ink}" stroke-width="104" ${line}/>
@@ -71,6 +72,7 @@ const trayIcon = mode => {
     ? `<circle cx="512" cy="512" r="440" fill="${m.fill ?? 'none'}" stroke="${m.ring}" stroke-width="112"/>`
     : `<circle cx="512" cy="512" r="508" fill="${m.fill}"/>`
   const scale = m.ring ? 0.6 : 0.72
+  if (mode === 'question') return svg(`${disc}<path d="M369 365 C369 250 655 246 655 392 C655 502 512 497 512 606" stroke="${m.ink}" stroke-width="92" ${line}/><circle cx="512" cy="748" r="53" fill="${m.ink}"/>`)
   return svg(`${disc}<g transform="translate(512 512) scale(${scale}) translate(-512 -512)">${route(m.ink)}</g>`)
 }
 

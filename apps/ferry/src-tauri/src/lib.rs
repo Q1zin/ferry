@@ -651,7 +651,7 @@ struct Tray {
     /// «Остановить управление» — активен, пока устройством управляют.
     stop: MenuItem<tauri::Wry>,
     /// Режим и управляют ли — что сейчас показано.
-    look: std::sync::Mutex<Option<(Mode, bool)>>,
+    look: std::sync::Mutex<Option<(Mode, bool, bool)>>,
 }
 
 impl Tray {
@@ -723,17 +723,21 @@ impl Tray {
         snapshot: &Snapshot,
         control: Option<String>,
         note: Option<String>,
+        questions: usize,
     ) -> Option<std::time::Duration> {
         let icon = self.app.tray_by_id(TRAY)?;
         let mode = snapshot.me.mode;
 
-        let look = (mode, control.is_some());
+        let look = (mode, control.is_some(), questions > 0);
         if self.look.lock().unwrap().replace(look) != Some(look) {
             for (m, item) in &self.modes {
                 let _ = item.set_checked(*m == mode);
             }
             let image = if control.is_some() {
                 tray_controlled()
+            } else if questions > 0 {
+                tauri::image::Image::from_bytes(include_bytes!("../icons/tray/question-32.png"))
+                    .expect("иконка трея — PNG из репозитория")
             } else {
                 tray_icon(mode)
             };
@@ -749,11 +753,14 @@ impl Tray {
                 None => label(mode).to_string(),
             },
         };
-        let tip = format!(
+        let mut tip = format!(
             "ferry — {}: {state}\nна связи {online} из {}",
             snapshot.me.name,
             snapshot.peers.len()
         );
+        if questions > 0 {
+            tip.insert_str(0, &format!("Вопросы от агента: {questions}\n"));
+        }
         let mut units = 0;
         let tip: String = tip
             .chars()
@@ -835,7 +842,6 @@ pub fn run() {
         .setup(|app| {
             let dir = ferry_core::ferry_home()?;
             ferry_core::human::presence::start(dir.clone());
-            human::watch(app.handle().clone(), dir.clone());
             // Обновить это устройство по команде с другого (`ferry update <цели>`).
             let handle = app.handle().clone();
             let hook: ferry_net::agent::UpdateHook = std::sync::Arc::new(move || {
@@ -868,7 +874,9 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let tray = Tray::build(app.handle())?;
-            let mut expires = tray.update(&agent.snapshot(), controller(&agent), agent.desk_note());
+            let mut questions = human::watch(app.handle().clone(), dir.clone());
+            let mut expires =
+                tray.update(&agent.snapshot(), controller(&agent), agent.desk_note(), 0);
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut changes = agent.subscribe();
@@ -876,13 +884,15 @@ pub fn run() {
                     // Ждать изменений, а пока устройством управляют — не дольше, чем до конца
                     // отметки: тогда трей вернётся к обычному виду сам.
                     let wait = expires.unwrap_or(std::time::Duration::from_secs(3600));
-                    let changed = match tokio::time::timeout(wait, changes.changed()).await {
-                        Ok(Ok(())) => true,
-                        Ok(Err(_)) => break,
-                        Err(_) => false,
+                    let changed = tokio::select! {
+                        next = changes.changed() => if next.is_err() { break; } else { true },
+                        next = questions.changed() => if next.is_err() { break; } else { false },
+                        _ = tokio::time::sleep(wait) => false,
                     };
                     let snapshot = agent.snapshot();
-                    expires = tray.update(&snapshot, controller(&agent), agent.desk_note());
+                    let pending = *questions.borrow_and_update();
+                    expires =
+                        tray.update(&snapshot, controller(&agent), agent.desk_note(), pending);
                     if changed {
                         let _ = handle.emit("state", snapshot);
                     }
@@ -898,8 +908,9 @@ pub fn run() {
                     if who != shown {
                         if let Err(e) = frame(&handle, who.as_deref()) {
                             tracing::warn!("рамка управления: {e}");
+                        } else {
+                            shown = who;
                         }
-                        shown = who;
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
