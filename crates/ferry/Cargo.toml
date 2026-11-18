@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 sha2 = "0.10.9"
 base64 = "0.22.1"
 ferry-core = { path = "../ferry-core" }

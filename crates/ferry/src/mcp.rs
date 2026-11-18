@@ -1,3 +1,4 @@
+mod images;
 mod recovery;
 mod typed;
 use std::collections::HashMap;
@@ -9,11 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use base64::Engine;
 use serde_json::{Value, json};
-
-/// Больше — не картинкой, а подсказкой: такую Claude Code не примет.
-const IMAGE_LIMIT: u64 = 4 << 20;
 
 pub fn serve() -> io::Result<i32> {
     let output = Arc::new(Mutex::new(io::stdout()));
@@ -218,6 +215,9 @@ fn run(args: &[String], cancelled: &AtomicBool) -> Value {
     let captured = (|| -> io::Result<Captured> {
         let mut command = Command::new(std::env::current_exe()?);
         command.args(args);
+        if words.first() == Some(&"shot") && !words.contains(&"--json") {
+            command.arg("--json");
+        }
         capture_command(command, cancelled, std::time::Duration::from_secs(120))
     })();
     let captured = match captured {
@@ -256,10 +256,7 @@ fn run(args: &[String], cancelled: &AtomicBool) -> Value {
     }
     said += &format!("(код {code})");
     let mut parts = vec![text(&said)];
-    if args
-        .first()
-        .is_some_and(|arg| matches!(arg.as_str(), "shot" | "rec"))
-    {
+    if words.first() == Some(&"rec") {
         parts.extend(images(&stdout));
     }
     if out_truncated || err_truncated {
@@ -407,6 +404,29 @@ fn failure(code: &str, message: &str, retryable: bool) -> Value {
 
 fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -> Value {
     let mut result = answer(parts, code != 0);
+    if args.first().is_some_and(|arg| arg == "shot") {
+        let mut shots: Vec<Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|v| v["path"].is_string())
+            .collect();
+        for shot in shots.iter_mut().take(2) {
+            let mapping = if shot["coordinates_verified"] != true {
+                images::Mapping::Unknown
+            } else if let Some(rect) = images::rect(&shot["desktop_rect"]) {
+                images::Mapping::Rect(rect)
+            } else {
+                images::Mapping::Screen
+            };
+            shot["image"] = images::append(
+                result["content"].as_array_mut().unwrap(),
+                shot["path"].as_str().unwrap(),
+                mapping,
+            );
+        }
+        result["structuredContent"] = json!({"schema_version":1,"exit_code":code,"shots":shots});
+        return result;
+    }
     if args.first().is_some_and(|arg| {
         matches!(
             arg.as_str(),
@@ -433,23 +453,24 @@ fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -
                 | "capture"
                 | "setup"
         )
-    }) && let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(stdout)
+    }) && let Ok(mut value @ Value::Object(_)) = serde_json::from_str::<Value>(stdout)
     {
-        if args.first().is_some_and(|a| a == "observe")
-            && let Some(path) = value["screenshot"].as_str()
+        let observation = match args.first().map(String::as_str) {
+            Some("observe") => Some(&mut value),
+            Some("act") => value.get_mut("observation"),
+            _ => None,
+        };
+        if let Some(observation) = observation
+            && let Some(path) = observation["screenshot"].as_str()
         {
-            result["content"]
-                .as_array_mut()
-                .unwrap()
-                .extend(images(path));
-        }
-        if args.first().is_some_and(|a| a == "act")
-            && let Some(path) = value["observation"]["screenshot"].as_str()
-        {
-            result["content"]
-                .as_array_mut()
-                .unwrap()
-                .extend(images(path));
+            let mapping = if observation["changed_during_capture"] == false {
+                images::rect(&observation["window"]["rect"])
+                    .map_or(images::Mapping::Unknown, images::Mapping::Rect)
+            } else {
+                images::Mapping::Unknown
+            };
+            observation["image"] =
+                images::append(result["content"].as_array_mut().unwrap(), path, mapping);
         }
         result["structuredContent"] = value;
     }
@@ -458,7 +479,8 @@ fn command_answer(args: &[String], stdout: &str, parts: Vec<Value>, code: i32) -
 
 /// Картинки по путям к PNG в выводе: строка — путь, у нескольких целей — с `[устройство] `.
 fn images(stdout: &str) -> Vec<Value> {
-    stdout
+    let mut parts = Vec::new();
+    for path in stdout
         .lines()
         .map(|line| match line.split_once("] ") {
             Some((device, path)) if device.starts_with('[') => path.trim(),
@@ -466,15 +488,10 @@ fn images(stdout: &str) -> Vec<Value> {
         })
         .filter(|path| path.ends_with(".png") && Path::new(path).is_file())
         .take(2)
-        .map(|path| {
-            let bytes=(||->io::Result<Vec<u8>>{let mut bytes=Vec::new();std::fs::File::open(path)?.take(IMAGE_LIMIT+1).read_to_end(&mut bytes)?;Ok(bytes)})();
-            match bytes {
-                Ok(png) if png.len() as u64>IMAGE_LIMIT=>text(&format!("{path}: снимок больше 4 МБ — картинкой не прислать; возьми --window или --region")),
-                Ok(png)=>json!({"type":"image","mimeType":"image/png","data":base64::engine::general_purpose::STANDARD.encode(png)}),
-                Err(error)=>text(&format!("{path}: не прочитался ({error})")),
-            }
-        })
-        .collect()
+    {
+        images::append(&mut parts, path, images::Mapping::Unknown);
+    }
+    parts
 }
 
 fn text(text: &str) -> Value {
@@ -607,22 +624,39 @@ mod tests {
 
     #[test]
     fn png_paths_in_output_become_images() {
-        let dir = std::env::temp_dir().join(format!("ferry-mcp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ferry-mcp-{}", ferry_core::jobs::unique_id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (shot, big) = (dir.join("win.png"), dir.join("big.png"));
-        std::fs::write(&shot, b"\x89PNG...").unwrap();
-        std::fs::write(&big, vec![0u8; (IMAGE_LIMIT + 1) as usize]).unwrap();
+        let (shot, bad) = (dir.join("win.png"), dir.join("bad.png"));
+        image::RgbImage::from_pixel(32, 20, image::Rgb([50, 60, 70]))
+            .save(&shot)
+            .unwrap();
+        std::fs::write(&bad, b"not a PNG").unwrap();
         let out = format!(
             "{}\n[mac] {}\nне путь.png\n{}/missing.png\n",
             shot.display(),
-            big.display(),
+            bad.display(),
             dir.display()
         );
         let parts = images(&out);
         assert_eq!(parts.len(), 2, "{parts:?}");
         assert_eq!(parts[0]["type"], "image");
-        assert_eq!(parts[0]["data"], "iVBORy4uLg==");
-        assert!(parts[1]["text"].as_str().unwrap().contains("больше 4 МБ"));
+        assert_eq!(parts[0]["mimeType"], "image/png");
+        assert!(parts[1]["text"].as_str().unwrap().contains("bad.png"));
+        let metadata = json!({
+            "path": shot, "desktop_rect": [123, 96, 64, 40], "coordinates_verified": true,
+        });
+        let reply = command_answer(&["shot".into()], &metadata.to_string(), vec![], 0);
+        assert_eq!(reply["content"][0]["type"], "image");
+        let field = &reply["structuredContent"]["shots"][0]["image"]["desktop_mapping"];
+        assert_eq!(field["origin_x"], 123);
+        assert_eq!(field["origin_y"], 96);
+        assert_eq!(field["desktop_pixels_per_image_pixel_x"], 2.0);
+        assert_eq!(field["desktop_pixels_per_image_pixel_y"], 2.0);
+        let legacy = json!({
+            "path": shot, "desktop_rect": [123, 96, 64, 40], "coordinates_verified": false,
+        });
+        let reply = command_answer(&["shot".into()], &legacy.to_string(), vec![], 0);
+        assert!(reply["structuredContent"]["shots"][0]["image"]["desktop_mapping"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

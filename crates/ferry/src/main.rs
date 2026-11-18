@@ -160,11 +160,11 @@ ferry — разработка и тесты на нескольких устр�
   ferry observe [<устройство>] [--window <окно>] [--ocr] [--structured] [--no-screenshot]
                 [--element <locator.json> | --subtree <locator.json>] [--since <observe.json>]
                                     JSON: окно, фокус, элементы и путь снимка; OCR — координаты в снимке
-  ferry shot <цели> [файл.png] [--window <окно> | --region x,y,ширина,высота]
+  ferry shot <цели> [файл.png] [--window <окно> | --region x,y,ширина,высота] [--json]
                                     снимок экрана (по умолчанию ~/.ferry/shots/<устройство>.png);
                                     --window — само окно (@ID, процесс или часть заголовка), даже закрытое
                                     другими, --region — область; печатает, что прибавить к точке на
-                                    снимке для click
+                                    снимке для click; --json — строка JSON с путём и координатами для каждой цели
   ferry windows <устройство>        окна сверху вниз: @ID, процесс, место, размер; * — фокус;
                                     свёрнутые и на других рабочих столах — «не на экране»
   ferry focus <устройство> <окно>   вывести окно (@ID, процесс или часть заголовка) вперёд, с фокусом,
@@ -536,6 +536,7 @@ fn script_argument(args: &[&str]) -> io::Result<String> {
 /// `shot <цели> [файл.png] [--window <окно>] [--region x,y,ширина,высота]`.
 fn shot(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
     let (mut file, mut area) = (None, devices::Area::Screen);
+    let mut json = false;
     while let Some((first, tail)) = rest.split_first() {
         match (*first, tail) {
             ("--window", [name, tail @ ..]) => {
@@ -543,14 +544,21 @@ fn shot(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
                 rest = tail;
             }
             ("--region", [region, tail @ ..]) => {
-                let numbers: Vec<i32> = region
+                let Ok(numbers) = region
                     .split(',')
-                    .filter_map(|n| n.trim().parse().ok())
-                    .collect();
+                    .map(|n| n.trim().parse())
+                    .collect::<Result<Vec<i32>, _>>()
+                else {
+                    return usage();
+                };
                 let Ok(region) = numbers.try_into() else {
                     return usage();
                 };
                 area = devices::Area::Region(region);
+                rest = tail;
+            }
+            ("--json", tail) => {
+                json = true;
                 rest = tail;
             }
             (path, tail) if file.is_none() && !path.starts_with("--") => {
@@ -560,7 +568,7 @@ fn shot(spec: &str, mut rest: &[&str]) -> io::Result<i32> {
             _ => return usage(),
         }
     }
-    devices::shot(spec, file, area)
+    devices::shot(spec, file, area, json)
 }
 
 /// `wait <устройство> (--window <окно> | --name <имя> | --port <порт> | --log <задача> <текст>)

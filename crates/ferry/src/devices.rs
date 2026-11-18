@@ -814,14 +814,30 @@ pub enum Area<'a> {
     Region([i32; 4]),
 }
 
-pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
-    each(spec, |device, printer| {
+pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Result<i32> {
+    let names = match targets(spec, false) {
+        Ok(names) => names,
+        Err(fail) => return finish(Err(fail)),
+    };
+    if json && file.is_some() && names.len() > 1 {
+        return finish(Err(Fail::new(
+            "shot --json: файл можно задать только для одной цели",
+        )));
+    }
+    each_names(&names, |device, printer| {
         let path = match file {
             Some(file) => std::path::absolute(file)?,
-            None => ferry_core::ferry_home()?
-                .join("shots")
-                .join(format!("{device}.png")),
+            None => {
+                let name = if json {
+                    format!("{device}-{}.png", ferry_core::jobs::unique_id())
+                } else {
+                    format!("{device}.png")
+                };
+                ferry_core::ferry_home()?.join("shots").join(name)
+            }
         };
+        let mut verified = true;
+        let mut window_id = None;
         let region = match area {
             Area::Screen => {
                 ask(Request::Shot {
@@ -848,11 +864,13 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
                         let window: ferry_core::screen::Window =
                             serde_json::from_str(&info).map_err(Fail::new)?;
                         let (x, y, w, h) = window.rect().ok_or_else(unexpected)?;
+                        window_id = Some(window.id());
                         printer.line(&format!("ferry: снято окно @{}", window.id()), true);
                         Some([x, y, w, h])
                     }
                     Response::Done => {
                         // Старые узлы передают PNG отдельно от координат.
+                        verified = false;
                         let Response::Message(place) = ask(Request::Input {
                             device: device.into(),
                             args: vec!["window".into(), name.into()],
@@ -878,7 +896,17 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
                 }
             }
         };
-        printer.line(&path.display().to_string(), false);
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "device": device, "path": path, "desktop_rect": region,
+                    "window_id": window_id, "coordinates_verified": verified,
+                })
+            );
+        } else {
+            printer.line(&path.display().to_string(), false);
+        }
         // Клик и ввод ждут координаты всего экрана — к точке на снимке прибавить начало области.
         if let Some([x, y, width, height]) = region {
             printer.line(
