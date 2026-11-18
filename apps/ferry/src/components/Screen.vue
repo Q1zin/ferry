@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { api, blocked as why, type DeviceRef } from '../api'
+import AdminScreen from './AdminScreen.vue'
 
 const props = defineProps<{ device: DeviceRef; checking: boolean }>()
 const emit = defineEmits<{ say: [text: string, error?: boolean]; refresh: [] }>()
@@ -12,6 +13,8 @@ const live = ref(false)
 const controlling = ref(false)
 const following = ref(false)
 const fps = ref(0)
+const adminMode = ref(false)
+const switching = ref(false)
 const frame = ref<{source_width:number;source_height:number;origin_x:number;origin_y:number}|null>(null)
 let streamToken:number|null=null
 let generation=0
@@ -37,6 +40,31 @@ const img = ref<HTMLImageElement | null>(null)
 
 // Рабочий стол трогать можно, только если устройство на связи и в режиме «работает».
 const blocked = computed(() => why(props.device, true) || (props.checking ? 'Проверяю состояние рабочего стола…' : ''))
+const supportsAdmin = computed(() => {
+  const status = props.device.status
+  if (!status || status.os !== 'windows') return false
+  const [major, minor, patch] = status.version.split('.').map(Number)
+  return major > 0 || minor > 1 || (minor === 1 && patch >= 30)
+})
+
+async function openAdmin() {
+  if (switching.value || blocked.value || !supportsAdmin.value) return
+  switching.value = true
+  clearTimeout(clickTimer)
+  clickTimer = 0
+  disableControl()
+  await Promise.all([stopLive(), controlTail.catch(() => {})])
+  image.value = ''
+  frame.value = null
+  pointer.value = null
+  adminMode.value = true
+  switching.value = false
+}
+
+function closeAdmin() {
+  adminMode.value = false
+  void shoot()
+}
 
 const keys = [
   ['Enter', 'enter'],
@@ -51,7 +79,7 @@ const keys = [
 ] as const
 
 async function shoot() {
-  if (loading.value || blocked.value) return
+  if (loading.value || blocked.value || adminMode.value || switching.value) return
   loading.value = true
   const current = generation
   try {
@@ -76,6 +104,7 @@ async function stopLive() {
   if (token!==null) await invoke('stop_stream',{token}).catch(()=>{})
 }
 async function toggleLive() {
+  if (adminMode.value || switching.value || blocked.value) return
   if (live.value) { await stopLive(); return }
   const current=++generation
   live.value=true
@@ -101,23 +130,31 @@ async function toggleLive() {
   } catch(e) { if(current===generation) {emit('say',String(e),true);await stopLive()} }
 }
 async function acknowledge() { if(streamToken!==null) await invoke('stream_ack',{token:streamToken}).catch(()=>{}) }
-async function stopControl() {
+function disableControl() {
   controlGeneration++
   controlling.value=false
   following.value=false
   pendingMove=null
   clearInterval(heartbeat)
+}
+async function stopControl() {
+  disableControl()
   await control(null).catch(()=>{})
 }
 async function toggleControl() {
+  if (adminMode.value || switching.value || blocked.value) return
   if(controlling.value) return stopControl()
   const epoch=++controlGeneration
   try {
     await control([],epoch)
     if(epoch!==controlGeneration) return
     controlling.value=true
-    heartbeat=window.setInterval(()=>{if(controlling.value) control([]).catch(e=>{emit('say',String(e),true);stopControl()})},10000)
-  } catch(e) {emit('say',String(e),true)}
+    heartbeat=window.setInterval(()=>{if(controlling.value) control([],epoch).catch(e=>{
+      if (epoch !== controlGeneration) return
+      emit('say',String(e),true)
+      stopControl()
+    })},10000)
+  } catch(e) {if(epoch===controlGeneration) emit('say',String(e),true)}
 }
 function pointerMove(event:MouseEvent) {
   pointer.value=where(event)
@@ -135,12 +172,15 @@ async function flushMove() {
 }
 
 async function send(args: string[]) {
-  if(!controlling.value || blocked.value) return
+  if(!controlling.value || blocked.value || adminMode.value || switching.value) return
+  const epoch = controlGeneration
   try {
-    await control(args)
+    await control(args, epoch)
+    if (epoch !== controlGeneration) return
     // Показать результат: снимок чуть погодя, когда узел успеет отрисовать.
     if (!live.value) window.setTimeout(shoot, 600)
   } catch (e) {
+    if (epoch !== controlGeneration) return
     emit('say', String(e), true)
     await stopControl()
   }
@@ -196,6 +236,7 @@ function pressCombo() {
 watch(
   blocked,
   (b) => {
+    if (adminMode.value) return
     if (b) { stopLive(); stopControl(); image.value = ''; frame.value = null }
     else if (!image.value) shoot()
   },
@@ -203,7 +244,7 @@ watch(
 )
 onUnmounted(() => {
   stopLive()
-  stopControl()
+  if (!adminMode.value) stopControl()
   clearTimeout(clickTimer)
 })
 </script>
@@ -215,13 +256,17 @@ onUnmounted(() => {
       <p v-if="device.locked && device.online">В разделе «Задачи» можно запускать команды без рабочего стола и читать логи.</p>
       <button v-if="device.locked && device.online" :disabled="checking" @click="emit('refresh')">Проверить блокировку</button>
     </div>
+    <AdminScreen v-else-if="adminMode" :id="device.id!" @close="closeAdmin" />
     <template v-else>
       <div class="row toolbar">
-        <button :disabled="loading || live" :aria-busy="loading && !live" @click="shoot">Обновить</button>
-        <button :class="{ primary: live }" :aria-pressed="live" @click="toggleLive">Живой экран</button>
-        <button :class="{primary:controlling}" :aria-pressed="controlling" @click="toggleControl">{{controlling ? 'Отключить управление' : 'Управлять'}}</button>
+        <button :disabled="loading || live || switching" :aria-busy="loading && !live" @click="shoot">Обновить</button>
+        <button :class="{ primary: live }" :aria-pressed="live" :disabled="switching" @click="toggleLive">Живой экран</button>
+        <button :class="{primary:controlling}" :aria-pressed="controlling" :disabled="switching" @click="toggleControl">{{controlling ? 'Отключить управление' : 'Управлять'}}</button>
         <label v-if="controlling"><input v-model="following" type="checkbox" /> Курсор за мышью</label>
         <span class="muted">{{live ? `${fps} кадров/с · основной экран` : 'Просмотр'}} · {{controlling ? 'Управление включено' : 'Ввод выключен'}}</span>
+      </div>
+      <div v-if="supportsAdmin" class="row">
+        <button :disabled="switching" @click="openAdmin">Управление окном администратора</button>
       </div>
 
       <div class="frame">

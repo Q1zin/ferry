@@ -34,7 +34,7 @@ use windows_sys::Win32::{
     System::{
         IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
         Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId,
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
             GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_TYPE_BYTE, PeekNamedPipe,
         },
@@ -59,6 +59,7 @@ const MAX_RESPONSE: usize = 64 * 1024;
 const MAX_SECONDS: u64 = 15 * 60;
 const REQUEST_TIME: Duration = Duration::from_secs(60);
 const CONFIRM_TIME: Duration = Duration::from_secs(90);
+const REVOKE_TIME_MS: u32 = 3000;
 
 fn error(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
@@ -424,10 +425,68 @@ pub struct Broker {
     expires: Option<Instant>,
     sequence: u64,
     window: i64,
+    revoked: Arc<AtomicBool>,
 }
+
+/// Отзыв не ждёт mutex команды: разрывает её pipe и подтверждает остановку helper.
+#[derive(Clone)]
+pub struct Revoker(Arc<Revocation>);
+
+struct Revocation {
+    pipe: OwnedHandle,
+    child: OwnedHandle,
+    revoked: Arc<AtomicBool>,
+}
+
+impl Revoker {
+    pub fn mark_revoked(&self) {
+        self.0.revoked.store(true, Ordering::Release);
+    }
+
+    pub fn revoke(&self) -> io::Result<()> {
+        self.mark_revoked();
+        disconnect(raw(&self.0.pipe), raw(&self.0.child));
+        match unsafe { WaitForSingleObject(raw(&self.0.child), REVOKE_TIME_MS) } {
+            WAIT_OBJECT_0 => Ok(()),
+            WAIT_TIMEOUT => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "admin GUI: отзыв начат, но помощник ещё не подтвердил остановку; повтори отзыв",
+            )),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+fn disconnect(pipe: HANDLE, child: HANDLE) {
+    unsafe {
+        // Разрыв действует на все дубликаты handle, включая выполняющийся запрос.
+        DisconnectNamedPipe(pipe);
+        CancelIoEx(pipe, null());
+        // Medium integrity может не иметь PROCESS_TERMINATE; helper проверяет pipe сам.
+        if live(child) {
+            TerminateProcess(child, 1);
+        }
+    }
+}
+
 impl Broker {
     pub fn is_active(&self) -> bool {
-        self.pipe.is_some() && !expired(self.expires) && live(raw(&self.child))
+        !self.revoked.load(Ordering::Acquire)
+            && self.pipe.is_some()
+            && !expired(self.expires)
+            && live(raw(&self.child))
+    }
+
+    pub fn revoker(&self) -> io::Result<Revoker> {
+        Ok(Revoker(Arc::new(Revocation {
+            pipe: duplicate(
+                self.pipe
+                    .as_ref()
+                    .ok_or_else(|| error("admin GUI: канал закрыт"))?,
+            )?,
+            child: duplicate(&self.child)?,
+            revoked: self.revoked.clone(),
+        })))
     }
 
     /// `window == 0` запрашивает согласие для всех административных окон этого стола.
@@ -474,6 +533,7 @@ impl Broker {
             expires: Some(Instant::now() + CONFIRM_TIME),
             sequence: 0,
             window,
+            revoked: Arc::new(AtomicBool::new(false)),
         };
         let link = broker.pipe.as_ref().unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -559,12 +619,9 @@ impl Broker {
         }
     }
     fn stop(&mut self) {
-        self.pipe.take();
-        if live(raw(&self.child)) {
-            // Medium integrity может не получить PROCESS_TERMINATE; helper следит за pipe сам.
-            unsafe {
-                TerminateProcess(raw(&self.child), 1);
-            }
+        self.revoked.store(true, Ordering::Release);
+        if let Some(pipe) = self.pipe.take() {
+            disconnect(raw(&pipe), raw(&self.child));
         }
     }
 }
@@ -755,6 +812,87 @@ pub fn worker(args: &[&str]) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revoke_interrupts_inflight_io_and_waits_for_helper_exit() {
+        use std::sync::mpsc;
+        use windows_sys::Win32::System::Threading::SetEvent;
+
+        // Event моделирует завершение helper; настоящий локальный pipe проверяет отмену I/O.
+        // Ни UAC, ни ввод, ни запуск процессов этому тесту не нужны.
+        let exited = owned(unsafe { CreateEventW(null(), 1, 0, null()) }).unwrap();
+        let name = format!(r"\\.\pipe\ferry-admin-test-{}", crate::jobs::unique_id());
+        let server = owned(unsafe {
+            CreateNamedPipeW(
+                wide(&name).as_ptr(),
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                65536,
+                65536,
+                0,
+                null(),
+            )
+        })
+        .unwrap();
+        let client = owned(unsafe {
+            CreateFileW(
+                wide(&name).as_ptr(),
+                0xc0000000,
+                0,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                null_mut(),
+            )
+        })
+        .unwrap();
+        connect(&server, &exited, Instant::now() + Duration::from_secs(2)).unwrap();
+        let broker = Broker {
+            pipe: Some(server),
+            child: duplicate(&exited).unwrap(),
+            expires: None,
+            sequence: 1,
+            window: 12,
+            revoked: Arc::new(AtomicBool::new(false)),
+        };
+        let revoker = broker.revoker().unwrap();
+        let broker = Arc::new(Mutex::new(broker));
+        let running = broker.clone();
+        let inflight = std::thread::spawn(move || running.lock().unwrap().execute(Action::Probe));
+        let request: Request = receive(
+            &client,
+            &exited,
+            MAX_REQUEST,
+            Some(Instant::now() + Duration::from_secs(2)),
+        )
+        .unwrap();
+        assert_eq!(request.sequence, 1);
+        let queued = broker.clone();
+        let queued = std::thread::spawn(move || queued.lock().unwrap().execute(Action::Probe));
+        let (sent, stopped) = mpsc::channel();
+        let revoking = std::thread::spawn(move || sent.send(revoker.revoke()).unwrap());
+        let disconnected: io::Result<Request> = receive(
+            &client,
+            &exited,
+            MAX_REQUEST,
+            Some(Instant::now() + Duration::from_secs(2)),
+        );
+        assert!(disconnected.is_err());
+        assert!(matches!(
+            stopped.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert_ne!(unsafe { SetEvent(raw(&exited)) }, 0);
+        stopped
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        revoking.join().unwrap();
+        assert!(inflight.join().unwrap().is_err());
+        assert!(queued.join().unwrap().is_err());
+        assert!(!broker.lock().unwrap().is_active());
+    }
+
     #[test]
     fn worker_rejects_external_channels_and_invalid_scope_lifetime() {
         let pipe = format!("{PREFIX}{}", "a".repeat(32));

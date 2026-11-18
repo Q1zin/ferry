@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use ferry_core::admin_desktop::Broker;
+use ferry_core::admin_desktop::{Broker, Revoker};
 use ferry_core::screen::{Window, admin};
 use serde_json::{Value, json};
 
@@ -13,8 +13,64 @@ const MAX_GRANT: Duration = Duration::from_secs(15 * 60);
 #[derive(Default)]
 pub(super) struct State {
     selection: Option<Selection>,
-    pending: Option<String>,
+    pending: Option<Pending>,
     grant: Option<Grant>,
+    revoking: Option<Arc<Revoker>>,
+}
+
+struct Pending {
+    id: String,
+    owner: Owner,
+}
+
+impl State {
+    fn retire_grant(&mut self) -> Option<Arc<Revoker>> {
+        if self.revoking.is_none() {
+            self.revoking = self.grant.as_ref().map(|grant| {
+                grant.revoker.mark_revoked();
+                Arc::new(grant.revoker.clone())
+            });
+        }
+        self.revoking.clone()
+    }
+
+    fn begin_revoke(&mut self) -> Option<Arc<Revoker>> {
+        self.selection = None;
+        self.pending = None;
+        self.retire_grant()
+    }
+
+    fn pending_is(&self, id: &str) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.id == id)
+    }
+
+    fn forget(&mut self, id: EndpointId) -> Option<Arc<Revoker>> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.owner.from == id)
+        {
+            self.pending = None;
+        }
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.owner.from == id)
+        {
+            self.selection = None;
+        }
+        if self
+            .grant
+            .as_ref()
+            .is_some_and(|grant| grant.owner.from == id)
+        {
+            self.retire_grant()
+        } else {
+            None
+        }
+    }
 }
 
 struct Selection {
@@ -28,6 +84,7 @@ struct Grant {
     window: Option<Window>,
     until: Option<Instant>,
     broker: Arc<Mutex<Broker>>,
+    revoker: Revoker,
 }
 
 impl Grant {
@@ -64,17 +121,58 @@ impl Inner {
             .map_or_else(|| owner.from.fmt_short().to_string(), |p| p.name.clone())
     }
 
-    pub(super) fn forget_admin(&self, id: EndpointId) {
-        let mut state = self.admin.lock().unwrap();
-        if state
-            .grant
-            .as_ref()
-            .is_some_and(|grant| grant.owner.from == id)
-        {
-            let grant = state.grant.take();
-            drop(state);
-            drop(grant);
+    fn finish_admin_revoke(&self, revoker: Option<Arc<Revoker>>) -> Result<(), Fail> {
+        let Some(revoker) = revoker else {
+            return Ok(());
+        };
+        revoker.revoke()?;
+        let old = {
+            let mut state = self.admin.lock().unwrap();
+            if state
+                .revoking
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &revoker))
+            {
+                state.revoking = None;
+                state.grant.take()
+            } else {
+                None
+            }
+        };
+        drop(old);
+        Ok(())
+    }
+
+    pub(super) fn forget_admin(&self, id: EndpointId) -> Result<(), Fail> {
+        let revoker = self.admin.lock().unwrap().forget(id);
+        self.finish_admin_revoke(revoker)
+    }
+
+    fn revoke_admin(&self) -> Result<(), Fail> {
+        let revoker = self.admin.lock().unwrap().begin_revoke();
+        let result = self.finish_admin_revoke(revoker);
+        self.notify();
+        result
+    }
+
+    pub(super) fn list_admin(&self, from: EndpointId, session: &str) -> Result<Vec<Window>, Fail> {
+        let (broker, all_windows) = self.broker(from, session)?;
+        let mut connection = broker.lock().unwrap();
+        if !Arc::ptr_eq(&broker, &self.broker(from, session)?.0) || !connection.is_active() {
+            return Err(Fail::refused("разрешение для окна изменилось"));
         }
+        let windows = if all_windows {
+            admin::candidates()?
+        } else {
+            vec![
+                serde_json::from_str(&connection.execute_on(None, admin::Action::Probe)?)
+                    .map_err(Fail::new)?,
+            ]
+        };
+        if !connection.is_active() || !Arc::ptr_eq(&broker, &self.broker(from, session)?.0) {
+            return Err(Fail::refused("разрешение для окна изменилось"));
+        }
+        Ok(windows)
     }
 
     pub(super) fn expire_admin(&self) {
@@ -85,6 +183,9 @@ impl Inner {
         let owner = self.admin_owner();
         let desktop_available = admin::desktop_available();
         let mut state = self.admin.lock().unwrap();
+        if state.revoking.is_some() {
+            return;
+        }
         if state.grant.as_ref().is_some_and(|grant| {
             grant.until.is_some_and(|until| {
                 !desktop_available
@@ -98,9 +199,10 @@ impl Inner {
                 Err(TryLockError::WouldBlock) => false,
             }
         }) {
-            let expired = state.grant.take();
+            let revoker = state.begin_revoke();
             drop(state);
-            drop(expired);
+            // При ошибке grant остаётся отозванным; повторный revoke дождётся helper.
+            let _ = self.finish_admin_revoke(revoker);
             self.notify();
         }
     }
@@ -114,10 +216,16 @@ impl Inner {
         let approved_controller = state
             .grant
             .as_ref()
+            .filter(|_| state.revoking.is_none())
             .filter(|grant| grant.all_windows())
             .map(|grant| grant.owner.clone());
-        let window = state.grant.as_ref().and_then(|grant| grant.window.clone());
+        let window = state
+            .grant
+            .as_ref()
+            .filter(|_| state.revoking.is_none())
+            .and_then(|grant| grant.window.clone());
         let pending = state.pending.is_some();
+        let revoking = state.revoking.is_some();
         drop(state);
         json!({
             "owner": owner,
@@ -125,6 +233,7 @@ impl Inner {
             "all_windows": approved_controller.is_some(),
             "approved_controller": approved_controller.as_ref().map(|owner| self.owner_name(owner)),
             "pending": pending,
+            "revoking": revoking,
             "candidates": windows,
         })
     }
@@ -143,7 +252,8 @@ impl Inner {
             .grant
             .as_ref()
             .filter(|grant| {
-                grant.until.is_none_or(|until| until > Instant::now())
+                state.revoking.is_none()
+                    && grant.until.is_none_or(|until| until > Instant::now())
                     && grant.matches_owner(&owner)
                     && owner.from == from
                     && owner.session == session
@@ -212,9 +322,10 @@ impl Agent {
                 Ok(inner.admin_report(Some(&windows)))
             }
             "revoke" => {
-                let old = std::mem::take(&mut *inner.admin.lock().unwrap());
-                drop(old);
-                inner.notify();
+                let revoking = inner.clone();
+                tokio::task::spawn_blocking(move || revoking.revoke_admin())
+                    .await
+                    .map_err(Fail::new)??;
                 Ok(inner.admin_report(None))
             }
             "grant" | "grant_all" => {
@@ -229,10 +340,11 @@ impl Agent {
                         "рабочий стол Windows заблокирован или защищён",
                     ));
                 }
+                let candidates = (!all_windows).then(admin::candidates).transpose()?;
                 let (approved, old) = {
                     let mut state = inner.admin.lock().unwrap();
-                    if state.pending.is_some() {
-                        return Err(Fail::refused("подтверждение уже открыто"));
+                    if state.pending.is_some() || state.revoking.is_some() {
+                        return Err(Fail::refused("подтверждение или отзыв уже выполняется"));
                     }
                     let selection = state.selection.take();
                     let approved = if all_windows {
@@ -250,7 +362,7 @@ impl Agent {
                             .into_iter()
                             .find(|w| Some(w.id()) == window)
                             .ok_or_else(|| Fail::refused("выбери окно из списка"))?;
-                        if !admin::candidates()?.iter().any(|candidate| {
+                        if !candidates.as_ref().unwrap().iter().any(|candidate| {
                             candidate.id() == approved.id() && candidate.pid() == approved.pid()
                         }) {
                             return Err(Fail::refused(
@@ -259,10 +371,21 @@ impl Agent {
                         }
                         Some(approved)
                     };
-                    state.pending = Some(request_id.clone());
-                    (approved, state.grant.take())
+                    state.pending = Some(Pending {
+                        id: request_id.clone(),
+                        owner: owner.clone(),
+                    });
+                    (approved, state.retire_grant())
                 };
-                drop(old);
+                if let Some(old) = old {
+                    let inner = inner.clone();
+                    tokio::task::spawn_blocking(move || inner.finish_admin_revoke(Some(old)))
+                        .await
+                        .map_err(Fail::new)??;
+                }
+                if !inner.admin.lock().unwrap().pending_is(&request_id) {
+                    return Err(Fail::refused("подтверждение отозвано"));
+                }
                 inner.notify();
                 let mut label = inner.owner_name(&owner);
                 if !all_windows {
@@ -295,21 +418,29 @@ impl Agent {
                     }
                 }) && admin::desktop_available()
                     && until.is_none_or(|until| until > Instant::now());
+                let prepared = broker
+                    .map_err(Fail::new)
+                    .and_then(|broker| broker.map_err(Fail::from))
+                    .and_then(|broker| {
+                        let revoker = broker.revoker()?;
+                        Ok((broker, revoker))
+                    });
                 {
                     let mut state = inner.admin.lock().unwrap();
-                    if state.pending.as_deref() != Some(&request_id) {
+                    if !state.pending_is(&request_id) || state.revoking.is_some() {
                         return Err(Fail::refused("подтверждение отозвано"));
                     }
                     state.pending = None;
-                    let broker = broker.map_err(Fail::new)??;
                     if !still_ours {
                         return Err(Fail::refused("бронь изменилась или истекла"));
                     }
+                    let (broker, revoker) = prepared?;
                     state.grant = Some(Grant {
                         owner,
                         window: approved,
                         until,
                         broker: Arc::new(Mutex::new(broker)),
+                        revoker,
                     });
                 }
                 inner.notify();
@@ -317,5 +448,54 @@ impl Agent {
             }
             _ => Err(Fail::new("неизвестное действие разрешения Windows")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forget_cancels_pending_consent_only_for_its_controller() {
+        let controller = iroh::SecretKey::generate().public();
+        let other = iroh::SecretKey::generate().public();
+        let now = Instant::now();
+        let mut lease = crate::desk::Lease::default();
+        lease
+            .apply(
+                controller,
+                "agent",
+                crate::proto::DeskAction::Hold(60),
+                now,
+                |_| "test".into(),
+            )
+            .unwrap();
+        let owner = lease.owner(now).unwrap().0;
+        let mut state = State {
+            pending: Some(Pending {
+                id: "old".into(),
+                owner: owner.clone(),
+            }),
+            selection: Some(Selection {
+                owner: owner.clone(),
+                windows: vec![],
+                until: now + MAX_GRANT,
+            }),
+            ..Default::default()
+        };
+        assert!(state.forget(other).is_none());
+        assert!(state.pending_is("old"));
+        assert!(state.selection.is_some());
+        assert!(state.forget(controller).is_none());
+        assert!(!state.pending_is("old"));
+        assert!(state.selection.is_none());
+        state.pending = Some(Pending {
+            id: "new".into(),
+            owner,
+        });
+        assert!(!state.pending_is("old"));
+        assert!(state.pending_is("new"));
+        state.begin_revoke();
+        assert!(!state.pending_is("new"));
     }
 }

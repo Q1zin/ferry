@@ -9,6 +9,8 @@ const selected = ref<number | null>(null)
 const busy = ref<Action | null>(null)
 const error = ref<{ action: Action; message: string } | null>(null)
 const granted = computed(() => state.value?.all_windows === true || !!state.value?.window)
+const confirming = computed(() => state.value?.pending || busy.value === 'grant' || busy.value === 'grant_all')
+const revoking = computed(() => state.value?.revoking || busy.value === 'revoke')
 
 function windowName(window: AdminWindow) {
   return [window.title || 'Окно без заголовка', window.process, `PID ${window.pid}`, `@${window.id}`].join(' · ')
@@ -21,7 +23,7 @@ function clearChoice() {
 
 async function run(action: Action) {
   const choosingAccess = action === 'choose' || action === 'grant' || action === 'grant_all'
-  if (busy.value || (choosingAccess && (!state.value?.owner || granted.value))) return
+  if (busy.value || (choosingAccess && (!state.value?.owner || granted.value || confirming.value || revoking.value))) return
   if (action === 'grant' && selected.value === null) return
   busy.value = action
   try {
@@ -70,25 +72,28 @@ onUnmounted(() => window.clearInterval(timer))
       Разрешено: все окна администратора · пульт <strong>{{ state.approved_controller }}</strong>
     </p>
     <p v-else-if="state?.window" role="status">Разрешено: {{ windowName(state.window) }}</p>
+    <p v-if="confirming" role="status">Ожидается подтверждение Windows</p>
+    <p v-if="revoking" role="status">Отзыв доступа ещё не завершён</p>
 
     <div class="row wrap">
-      <button v-if="granted" class="danger" :disabled="!!busy" @click="run('revoke')">Отозвать доступ</button>
+      <button v-if="revoking" class="danger" :disabled="!!busy" @click="run('revoke')">Завершить отзыв доступа</button>
+      <button v-else-if="granted" class="danger" :disabled="!!busy" @click="run('revoke')">Отозвать доступ</button>
       <template v-else>
-        <button class="primary" :disabled="!!busy || !state?.owner" @click="run('grant_all')">Разрешить для всех окон администратора</button>
-        <button :disabled="!!busy || !state?.owner" @click="run('choose')">Выбрать окно администратора</button>
+        <button class="primary" :disabled="!!busy || !state?.owner || confirming" @click="run('grant_all')">Разрешить для всех окон администратора</button>
+        <button :disabled="!!busy || !state?.owner || confirming" @click="run('choose')">Выбрать окно администратора</button>
       </template>
     </div>
 
-    <template v-if="state?.owner && !granted && candidates">
+    <template v-if="state?.owner && !granted && candidates && !revoking">
       <div v-if="candidates.length" class="admin-choice">
         <label>
           Окно
-          <select v-model="selected" :disabled="!!busy">
+          <select v-model="selected" :disabled="!!busy || confirming">
             <option :value="null" disabled>Выбери окно</option>
             <option v-for="window in candidates" :key="window.id" :value="window.id">{{ windowName(window) }}</option>
           </select>
         </label>
-        <button :disabled="!!busy || selected === null" @click="run('grant')">Разрешить управление окном администратора</button>
+        <button :disabled="!!busy || confirming || selected === null" @click="run('grant')">Разрешить управление окном администратора</button>
       </div>
       <p v-else class="muted">Подходящих окон администратора пока нет.</p>
     </template>

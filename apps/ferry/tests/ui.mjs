@@ -40,6 +40,10 @@ const screen = new Resvg(
   `<svg xmlns="http://www.w3.org/2000/svg" width="1366" height="768">
     <rect width="1366" height="768" fill="#1d4f91"/><rect x="221" y="125" width="474" height="531" fill="#fff"/></svg>`,
 ).render().asPng()
+const adminScreen = new Resvg(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450"><rect width="800" height="450" fill="#1d4f91"/></svg>',
+).render().asPng()
+const adminRect = [420, -180, 800, 450]
 
 const fixtures = {
   questions: [],
@@ -54,6 +58,7 @@ const fixtures = {
     warnings: ['на диске 6 ГБ — для сборки с CEF мало'],
   },
   screenshot: `data:image/png;base64,${Buffer.from(screen).toString('base64')}`,
+  adminShot: { image: 'data:image/png;base64,' + Buffer.from(adminScreen).toString('base64'), rect: adminRect },
   input: '',
   jobs: [
     { name: 'app', label: 'работает', ago: '2 мин назад', running: true, cmd: './logarithmica.exe --remote-debugging-port=9322' },
@@ -140,6 +145,7 @@ try {
           if (cmd === 'admin_windows') {
             if (args.action === 'grant') adminWindow = adminCandidates.find((w) => w.id === args.window) ?? null
             if (args.action === 'grant_all') {
+              await new Promise(resolve => { window.__confirmAdminConsent = resolve })
               approvedController = adminOwner.device
               adminOwner = null
             }
@@ -152,6 +158,22 @@ try {
               approved_controller: approvedController,
               ...(args.action === 'choose' ? { candidates: adminCandidates } : {}),
             }
+          }
+          if (cmd === 'admin_screen') {
+            const error = window.__adminScreenError?.[args.action]
+            if (error) throw error
+            if (args.action === 'list') {
+              if (window.__holdAdminList) await new Promise(resolve => {
+                window.__holdAdminList = false
+                window.__finishAdminList = resolve
+              })
+              return adminCandidates
+            }
+            if (args.action === 'shot') {
+              const window = adminCandidates.find(candidate => candidate.id === args.window.id && candidate.pid === args.window.pid)
+              return { ...fx.adminShot, window }
+            }
+            return null
           }
           if (cmd === 'dashboard') {
             if (args.request.action === 'run') {
@@ -271,6 +293,70 @@ try {
     await fits('экран')
     await shot('screen')
 
+    // Управление администратором привязано к выбранному HWND, PID и геометрии снимка.
+    const openAdmin = page.getByRole('button', { name: 'Управление окном администратора', exact: true })
+    assert.equal(await openAdmin.count(), 0)
+    const updated = { ...snapshot, peers: [{ ...snapshot.peers[0], status: { ...win, version: '0.1.30' } }, snapshot.peers[1]] }
+    await emit('state', updated)
+    await page.evaluate(() => { window.__adminScreenError = { list: 'Пульту ещё не разрешено управление' } })
+    await calls()
+    await openAdmin.click()
+    await page.getByRole('alert').filter({ hasText: 'Пульту ещё не разрешено управление' }).waitFor()
+    await page.getByText('и выдай разрешение этому пульту.', { exact: false }).waitFor()
+    assert.deepEqual((await calls()).filter(([c]) => c === 'admin_screen').map(([, a]) => a.action), ['list'])
+    assert.equal(await img.count(), 0, 'ошибка разрешения не возвращает обычный экран')
+    await page.evaluate(() => { window.__adminScreenError = {} })
+    await page.getByRole('button', { name: 'Обновить список окон' }).click()
+    const target = page.getByRole('combobox', { name: 'Окно администратора' })
+    await target.waitFor()
+    assert.ok(!(await calls()).some(([c, a]) => c === 'admin_screen' && a.action !== 'list'))
+    await target.selectOption('506:101')
+    const adminImg = page.getByRole('img', { name: 'Снимок окна администратора' })
+    const focusAdmin = page.getByRole('button', { name: 'Активировать окно', exact: true })
+    await page.locator('.admin-frame .interactive').waitFor()
+    assert.ok(!(await calls()).some(([c, a]) => c === 'admin_screen' && a.action === 'focus'), 'выбор окна не меняет фокус')
+    await focusAdmin.click()
+    await page.locator('.admin-frame .interactive').waitFor()
+    assert.deepEqual((await calls()).find(([c, a]) => c === 'admin_screen' && a.action === 'focus')[1].window, { id: 101, pid: 506 })
+    await fits('экран окна администратора')
+    const adminBox = await adminImg.boundingBox()
+    const [ax, ay] = [Math.round(adminBox.x + adminBox.width * 0.5), Math.round(adminBox.y + adminBox.height * 0.25)]
+    const adminX = adminRect[0] + Math.floor((ax - adminBox.x) * adminRect[2] / adminBox.width)
+    const adminY = adminRect[1] + Math.floor((ay - adminBox.y) * adminRect[3] / adminBox.height)
+    await page.mouse.click(ax, ay)
+    await page.waitForFunction(() => window.__calls.some(([c, a]) => c === 'admin_screen' && a.action === 'input'))
+    const targetCalls = await calls()
+    const [, adminClick] = targetCalls.find(([c, a]) => c === 'admin_screen' && a.action === 'input')
+    assert.deepEqual(adminClick.window, { id: 101, pid: 506 })
+    assert.deepEqual(adminClick.rect, adminRect)
+    assert.equal(adminClick.args[0], 'click')
+    assert.ok(Math.abs(adminClick.args[1] - adminX) <= 1 && Math.abs(adminClick.args[2] - adminY) <= 1)
+    assert.ok(!targetCalls.some(([c]) => c === 'control_screen' || c === 'start_stream'))
+    await page.locator('.admin-frame .interactive').waitFor()
+    await page.evaluate(() => { window.__adminScreenError.input = 'Рабочий стол Windows заблокирован или защищён' })
+    await page.getByPlaceholder('Текст для окна администратора').fill('Тест')
+    await page.getByRole('button', { name: 'Ввести текст', exact: true }).click()
+    await page.getByRole('alert').filter({ hasText: 'Рабочий стол Windows заблокирован или защищён' }).waitFor()
+    assert.ok(await page.getByPlaceholder('Текст для окна администратора').isDisabled())
+    assert.equal(await adminImg.count(), 0)
+    await page.getByRole('button', { name: 'Вернуться к обычному экрану' }).click()
+    await img.waitFor()
+    assert.ok((await calls()).some(([c, a]) => c === 'admin_screen' && a.id === WIN && a.action === 'release'))
+    await page.evaluate(() => { window.__holdAdminList = true })
+    await openAdmin.click()
+    await page.waitForFunction(() => typeof window.__finishAdminList === 'function')
+    await page.getByRole('button', { name: 'Задачи', exact: true }).click()
+    await page.getByRole('button', { name: 'Экран', exact: true }).click()
+    await openAdmin.click()
+    await page.getByRole('heading', { name: 'Управление окном администратора', exact: true }).waitFor()
+    assert.deepEqual((await calls()).filter(([c]) => c === 'admin_screen').map(([, a]) => a.action), ['list'])
+    await page.evaluate(() => window.__finishAdminList())
+    await target.waitFor()
+    assert.deepEqual((await calls()).filter(([c]) => c === 'admin_screen').map(([, a]) => a.action), ['release', 'list'])
+    await page.getByRole('button', { name: 'Вернуться к обычному экрану' }).click()
+    await img.waitFor()
+    await emit('state', snapshot)
+
     // «Задачи»: список, лог, запуск.
     await page.getByRole('button', { name: 'Задачи', exact: true }).click()
     await page.getByText('logarithmica.exe').waitFor()
@@ -361,6 +447,10 @@ try {
     assert.ok((await calls()).some(([c, a]) => c === 'admin_windows' && a.action === 'revoke'))
     const grantAll = page.getByRole('button', { name: 'Разрешить для всех окон администратора', exact: true })
     await grantAll.click()
+    await page.getByRole('status').filter({ hasText: 'Ожидается подтверждение Windows' }).waitFor()
+    assert.ok(await grantAll.isDisabled())
+    assert.ok(await page.getByRole('button', { name: 'Выбрать окно администратора' }).isDisabled())
+    await page.evaluate(() => window.__confirmAdminConsent())
     const allGranted = page.getByRole('status').filter({ hasText: 'Разрешено: все окна администратора' })
     await allGranted.waitFor()
     assert.ok((await allGranted.innerText()).includes('пульт win-10'))

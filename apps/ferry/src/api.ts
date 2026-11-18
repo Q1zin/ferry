@@ -34,11 +34,22 @@ export type DeskReservation = {
   awake_remaining_seconds: number | null
 }
 export type AdminWindow = { id: number; title: string; process: string; pid: number }
+export type DesktopRect = [x: number, y: number, width: number, height: number]
+export type AdminFrame = { image: string; window: AdminWindow; rect: DesktopRect }
+type AdminScreenReplies = {
+  list: AdminWindow[]
+  shot: AdminFrame
+  focus: null
+  input: null
+  release: null
+}
 export type AdminWindowsState = {
   owner: DeskReservation['owner']
   window: AdminWindow | null
   all_windows: boolean
   approved_controller: string | null
+  pending?: boolean
+  revoking?: boolean
   candidates?: AdminWindow[]
 }
 
@@ -105,6 +116,22 @@ export type RunTarget = { device: string; state: string; duration_seconds?: numb
 export type RunReport = { id: string; profile: string; state: string; created?: number; duration_seconds?: number | null; worker_active?: boolean; results: RunTarget[] }
 export type SetupStatus = { agents: { id: 'claude' | 'codex'; available: boolean; skill_installed: boolean; skill_state?: 'missing' | 'current' | 'upgrade_available' | 'custom' | 'unreadable'; mcp_configured: boolean; command: string | null; config_conflict?: boolean; error?: string | null }[]; cli_available: boolean; app_available: boolean }
 
+// При повторном открытии вкладки старый запрос освобождения брони должен
+// дойти до устройства до нового запроса списка окон с той же сессией пульта.
+const adminScreenTail = new Map<string, Promise<unknown>>()
+function adminScreen<Action extends keyof AdminScreenReplies>(
+  id: string, action: Action, window?: Pick<AdminWindow, 'id' | 'pid'>, args?: string[], rect?: DesktopRect,
+) {
+  const previous = adminScreenTail.get(id) ?? Promise.resolve()
+  const next = previous.catch(() => {}).then(() =>
+    invoke<AdminScreenReplies[Action]>('admin_screen', { id, action, window, args, rect }),
+  )
+  adminScreenTail.set(id, next)
+  return next.finally(() => {
+    if (adminScreenTail.get(id) === next) adminScreenTail.delete(id)
+  })
+}
+
 export const api = {
   state: () => desktop ? invoke<Snapshot>('state') : dashboard<Snapshot>({ action: 'snapshot' }),
   openPairing: () => invoke<PairingInfo>('open_pairing'),
@@ -130,6 +157,7 @@ export const api = {
     invoke<DeskReservation>('desk_reservation', { id, action, minutes }),
   adminWindows: (action: 'show' | 'choose' | 'grant' | 'grant_all' | 'revoke', window?: number) =>
     invoke<AdminWindowsState>('admin_windows', { action, window }),
+  adminScreen,
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),
   /// Версия новее этой, если есть в релизах.

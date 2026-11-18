@@ -414,6 +414,20 @@ impl Device {
         self.desk(session, action).await
     }
 
+    pub async fn admin_windows(&self, session: &str) -> Reply<Vec<ferry_core::screen::Window>> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            ferry_core::device::version::ADMIN_SCREEN,
+            "список окон администратора",
+        )?;
+        self.client
+            .ask(AdminWindowList {
+                session: session.into(),
+            })
+            .await
+    }
+
     pub async fn admin_input(
         &self,
         session: &str,

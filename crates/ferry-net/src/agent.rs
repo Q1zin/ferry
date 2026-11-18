@@ -592,7 +592,7 @@ impl Agent {
         }
         inner.desk.lock().unwrap().forget(id);
         #[cfg(windows)]
-        inner.forget_admin(id);
+        inner.forget_admin(id)?;
         inner.notify();
         Ok(())
     }
@@ -1400,6 +1400,24 @@ impl Inner {
                     .clone()
                     .admin_input(from, inner.session, Some(inner.window), inner.action)
                     .await;
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::AdminWindowList(WithChannels { tx, inner, .. }) => {
+                #[cfg(windows)]
+                let result = {
+                    let agent = self.clone();
+                    tokio::task::spawn_blocking(move || agent.list_admin(from, &inner.session))
+                        .await
+                        .map_err(Fail::new)
+                        .and_then(|result| result)
+                };
+                #[cfg(not(windows))]
+                let result = {
+                    let _ = inner;
+                    Err(Fail::refused(
+                        "окна администратора доступны только на Windows",
+                    ))
+                };
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,

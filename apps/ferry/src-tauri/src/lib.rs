@@ -1055,7 +1055,8 @@ pub fn run() {
             stream::start_stream,
             stream::stop_stream,
             stream::stream_ack,
-            stream::control_screen
+            stream::control_screen,
+            stream::admin_screen
         ])
         .build(tauri::generate_context!())
         .expect("error while building ferry")

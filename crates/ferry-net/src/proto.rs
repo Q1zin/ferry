@@ -401,6 +401,8 @@ pub enum DeviceProtocol {
     AdminInput(AdminInput),
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     AdminInputForWindow(AdminInputForWindow),
+    #[rpc(tx = oneshot::Sender<Reply<Vec<ferry_core::screen::Window>>>)]
+    AdminWindowList(AdminWindowList),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -414,6 +416,11 @@ pub struct AdminInputForWindow {
     pub session: String,
     pub window: i64,
     pub action: ferry_core::screen::admin::Action,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminWindowList {
+    pub session: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
