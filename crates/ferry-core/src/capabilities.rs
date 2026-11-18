@@ -116,13 +116,8 @@ pub fn collect(request: Request) -> io::Result<Capabilities> {
         }
         #[cfg(windows)]
         {
-            match crate::info::collect() {
-                Ok(info) => {
-                    report.locked = info
-                        .iter()
-                        .find(|(k, _)| k == "locked")
-                        .map(|(_, v)| v.eq_ignore_ascii_case("true") || v == "1")
-                }
+            match crate::info::windows_session_locked() {
+                Ok(locked) => report.locked = Some(locked),
                 Err(e) => report
                     .warnings
                     .push(format!("состояние рабочего стола неизвестно: {e}")),

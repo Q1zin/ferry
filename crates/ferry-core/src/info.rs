@@ -176,6 +176,54 @@ fn duration(secs: u64) -> String {
 }
 
 #[cfg(windows)]
+pub(crate) fn windows_session_locked() -> io::Result<bool> {
+    use std::mem::size_of;
+    use std::ptr::null_mut;
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
+        WTS_SESSIONSTATE_UNLOCK, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
+        WTSSessionInfoEx,
+    };
+    let mut buffer = null_mut();
+    let mut size = 0u32;
+    if unsafe {
+        WTSQuerySessionInformationW(
+            WTS_CURRENT_SERVER_HANDLE,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut size,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if buffer.is_null() {
+        return Err(io::Error::other(
+            "Windows не вернула состояние текущей сессии",
+        ));
+    }
+    let flags = if size as usize >= size_of::<WTSINFOEXW>() {
+        let info = unsafe { buffer.cast::<WTSINFOEXW>().read_unaligned() };
+        if info.Level == 1 {
+            Some(unsafe { info.Data.WTSInfoExLevel1.SessionFlags } as u32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    unsafe { WTSFreeMemory(buffer.cast()) };
+    match flags {
+        Some(WTS_SESSIONSTATE_LOCK) => Ok(true),
+        Some(WTS_SESSIONSTATE_UNLOCK) => Ok(false),
+        _ => Err(io::Error::other(
+            "состояние текущей сессии Windows неизвестно",
+        )),
+    }
+}
+
+#[cfg(windows)]
 fn platform() -> io::Result<Vec<(String, String)>> {
     // UTF-8 на выходе: имя системы на русской Windows — кириллицей.
     const SCRIPT: &str = r#"
@@ -200,10 +248,13 @@ $power = [System.Windows.Forms.SystemInformation]::PowerStatus
 "screens=$(($video | ForEach-Object { "$($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)" }) -join ' ')"
 "ac=$($power.PowerLineStatus -eq 'Online')"
 if ("$($power.BatteryChargeStatus)" -notmatch 'NoSystemBattery') { "battery=$([int]($power.BatteryLifePercent * 100))" }
-"locked=$([bool](Get-Process LogonUI))"
 "#;
     let out = crate::screen::powershell("ferry-info.ps1", SCRIPT)?.output()?;
-    Ok(parse(&String::from_utf8_lossy(&out.stdout)))
+    let mut pairs = parse(&String::from_utf8_lossy(&out.stdout));
+    if let Ok(locked) = windows_session_locked() {
+        pairs.push(("locked".into(), locked.to_string()));
+    }
+    Ok(pairs)
 }
 
 /// Не Windows — то, что есть без лишних утилит; полные свойства пока только у Windows-узлов.
