@@ -389,6 +389,14 @@ pub enum DeviceProtocol {
     ExecutionCancelOwned(ExecutionCancelOwned),
     #[rpc(tx = mpsc::Sender<Reply<ferry_core::screen::live::Frame>>)]
     ScreenStream(ScreenStream),
+    /// С 0.1.26: первый кусок содержит метаданные выбранного окна, дальше PNG.
+    #[rpc(tx = mpsc::Sender<Chunk>)]
+    ShotWindowInfo(ShotWindowInfo),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ShotWindowInfo {
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

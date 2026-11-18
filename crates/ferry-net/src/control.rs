@@ -562,6 +562,18 @@ async fn answer(
             agent.device(&device)?.shot_window(&file, &name).await?;
             Response::Done
         }
+        Request::ShotWindowInfo { device, file, name } => {
+            match agent
+                .device(&device)?
+                .shot_window_with_info(&file, &name)
+                .await?
+            {
+                Some(window) => {
+                    Response::Report(serde_json::to_string(&window).map_err(Fail::new)?)
+                }
+                None => Response::Done,
+            }
+        }
         Request::ShotArea { device, file, area } => {
             agent.device(&device)?.shot_area(&file, area).await?;
             Response::Done

@@ -7,6 +7,7 @@
 //! масштабом координаты разъехались бы).
 
 use std::io;
+use std::path::Path;
 use std::process::Command;
 
 use crate::exit_code;
@@ -162,9 +163,15 @@ pub fn input(args: &[&str]) -> io::Result<String> {
         ["window", name @ ..] if !name.is_empty() => window_rect(&os::windows()?, &name.join(" ")),
         ["focus", name @ ..] if !name.is_empty() => {
             let name = name.join(" ");
-            os::focus(find_any_window(&os::windows()?, &name)?)?;
-            // Окно могло сменить место: развернулось, приехало с другого рабочего стола.
-            window_rect(&os::windows()?, &name)
+            let windows = os::windows()?;
+            let requested = find_any_window(&windows, &name)?;
+            let attempt = os::focus(requested);
+            let after = os::windows().unwrap_or_default();
+            #[cfg(target_os = "macos")]
+            let active = mac::focused_window(&after);
+            #[cfg(not(target_os = "macos"))]
+            let active = after.iter().find(|w| w.focused);
+            focus_result(requested, active, attempt)
         }
         // Для `ferry wait`: есть ли сейчас — ответ, а не ошибка, чтобы «нет» не спутать с обрывом.
         ["probe-window", name @ ..] if !name.is_empty() => {
@@ -248,11 +255,54 @@ pub struct Window {
     focused: bool,
 }
 
+impl Window {
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    pub fn rect(&self) -> Option<(i64, i64, i64, i64)> {
+        self.rect
+    }
+}
+
+fn window_label(window: &Window) -> String {
+    format!(
+        "@{} {} (pid {}) {:?}",
+        window.id, window.process, window.pid, window.title
+    )
+}
+
+fn focus_result(
+    requested: &Window,
+    active: Option<&Window>,
+    attempt: io::Result<()>,
+) -> io::Result<String> {
+    if attempt.is_ok()
+        && let Some(active) = active
+        && active.id == requested.id
+        && active.pid == requested.pid
+        && let Some((x, y, width, height)) = active.rect
+    {
+        return Ok(format!("{x} {y} {width} {height}\n"));
+    }
+    let active = active.map_or_else(|| "не удалось определить".into(), window_label);
+    let error = attempt
+        .err()
+        .unwrap_or_else(|| io::Error::other("фокус не подтверждён"));
+    Err(io::Error::new(
+        error.kind(),
+        format!(
+            "{error}; запрошено {}; активное окно: {active}",
+            window_label(requested)
+        ),
+    ))
+}
+
 /// Окна сверху вниз: процесс (pid), место, размер, заголовок; `*` — с фокусом.
 fn table(windows: &[Window]) -> String {
     let mut table = format!(
-        "  {:<26} {:>11} {:>11}  заголовок\n",
-        "процесс (pid)", "x,y", "ширина×выс."
+        "  {:<26} {:>11} {:>11}  {:<10} заголовок\n",
+        "процесс (pid)", "x,y", "ширина×выс.", "ID"
     );
     for w in windows {
         let process = format!("{} ({})", w.process, w.pid);
@@ -261,7 +311,11 @@ fn table(windows: &[Window]) -> String {
             None => ("не на экране".to_string(), String::new()),
         };
         let mark = if w.focused { '*' } else { ' ' };
-        table += &format!("{mark} {process:<26} {place:>11} {size:>11}  {}\n", w.title);
+        let id = format!("@{}", w.id);
+        table += &format!(
+            "{mark} {process:<26} {place:>11} {size:>11}  {id:<10} {}\n",
+            w.title
+        );
     }
     table
 }
@@ -270,16 +324,26 @@ fn table(windows: &[Window]) -> String {
 /// .exe), потом по части заголовка — иначе `ferry` нашёл бы окно с файлом `ferry-test.txt`
 /// поверх самого ferry. Его место — `rect`, всегда есть.
 fn find_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
-    pick_window(windows, name, true)
+    pick_window(windows, name, true, false)
 }
 
 /// Как [`find_window`], но и среди окон вне экрана — свёрнутых, на другом рабочем столе: их
 /// выводит вперёд `focus`.
 fn find_any_window<'a>(windows: &'a [Window], name: &str) -> io::Result<&'a Window> {
-    pick_window(windows, name, false)
+    pick_window(windows, name, false, true)
 }
 
-fn pick_window<'a>(windows: &'a [Window], name: &str, visible: bool) -> io::Result<&'a Window> {
+fn pick_window<'a>(
+    windows: &'a [Window],
+    name: &str,
+    visible: bool,
+    unique: bool,
+) -> io::Result<&'a Window> {
+    if unique && name.trim().is_empty() {
+        return Err(io::Error::other(
+            "укажи окно по @ID, процессу или заголовку",
+        ));
+    }
     if let Some(id) = name.strip_prefix('@').and_then(|id| id.parse::<i64>().ok()) {
         return windows
             .iter()
@@ -287,16 +351,43 @@ fn pick_window<'a>(windows: &'a [Window], name: &str, visible: bool) -> io::Resu
             .ok_or_else(|| io::Error::other("выбранное окно исчезло"));
     }
     let want = name.to_lowercase();
-    let bare = |p: &str| p.trim_end_matches(".exe").to_string();
+    let bare = |p: &str| p.to_lowercase().trim_end_matches(".exe").to_string();
     let open = || windows.iter().filter(|w| w.rect.is_some() || !visible);
-    open()
-        .find(|w| bare(&w.process.to_lowercase()) == bare(&want))
-        .or_else(|| open().find(|w| w.title.to_lowercase().contains(&want)))
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
-            ))
-        })
+    let process = bare(&want);
+    let mut candidates: Vec<_> = open()
+        .filter(|w| bare(&w.process) == process)
+        .take(13)
+        .collect();
+    if candidates.is_empty() {
+        candidates.extend(
+            open()
+                .filter(|w| w.title.to_lowercase().contains(&want))
+                .take(13),
+        );
+    }
+    match candidates.as_slice() {
+        [] => Err(io::Error::other(format!(
+            "нет окна «{name}» (процесс или часть заголовка) — ferry windows покажет, какие есть"
+        ))),
+        [selected] => Ok(selected),
+        [first, ..] if !unique => Ok(first),
+        many => {
+            let labels = many
+                .iter()
+                .take(12)
+                .map(|w| window_label(w))
+                .collect::<Vec<_>>();
+            let rest = if many.len() > 12 {
+                "; остальные покажет ferry windows"
+            } else {
+                ""
+            };
+            Err(io::Error::other(format!(
+                "несколько окон для «{name}», выбери @ID: {}{rest}",
+                labels.join("; ")
+            )))
+        }
+    }
 }
 
 /// Текст в окне — с фокусом или по процессу / части заголовка. Распознаём снимок его области
@@ -381,6 +472,37 @@ pub fn screenshot_window(file: &str, name: &str) -> io::Result<i32> {
     let windows = os::windows()?;
     let window = find_window(&windows, name)?;
     screenshot_selected(&file, window)
+}
+
+pub fn screenshot_window_with_info(file: &Path, name: &str) -> io::Result<Window> {
+    let windows = os::windows()?;
+    let window = pick_window(&windows, name, true, true)?;
+    let captured = (|| {
+        let code = screenshot_selected(file, window)?;
+        if code != 0 || !file.is_file() {
+            return Err(io::Error::other(format!(
+                "снимок окна не вышел (код {code})"
+            )));
+        }
+        if !os::windows()?
+            .iter()
+            .any(|w| same_capture_window(window, w))
+        {
+            return Err(io::Error::other(format!(
+                "окно {} переместилось или исчезло во время снимка; сделай новый снимок",
+                window_label(window)
+            )));
+        }
+        Ok(window.clone())
+    })();
+    if captured.is_err() {
+        std::fs::remove_file(file).ok();
+    }
+    captured
+}
+
+fn same_capture_window(before: &Window, after: &Window) -> bool {
+    before.id == after.id && before.pid == after.pid && before.rect == after.rect
 }
 
 fn screenshot_selected(file: &std::path::Path, window: &Window) -> io::Result<i32> {
@@ -1399,15 +1521,9 @@ mod mac {
         let app = unsafe {
             CFType::wrap_under_create_rule(AXUIElementCreateApplication(found.pid as i32))
         };
-        let title = |w: &CFType| {
-            attribute(w, "AXTitle")
-                .and_then(|t| t.downcast_into::<CFString>())
-                .map(|t| t.to_string())
-                .unwrap_or_default()
-        };
         let all = items(attribute(&app, "AXWindows"));
         if filter.starts_with('@') {
-            let hits: Vec<_> = all.iter().filter(|w| title(w) == found.title).collect();
+            let hits: Vec<_> = all.iter().filter(|w| ax_title(w) == found.title).collect();
             if hits.len() != 1 {
                 return Err(io::Error::other(
                     "не удалось однозначно сопоставить окно Accessibility",
@@ -1417,12 +1533,12 @@ mod mac {
         }
         let window = all
             .iter()
-            .find(|w| !found.title.is_empty() && title(w) == found.title)
+            .find(|w| !found.title.is_empty() && ax_title(w) == found.title)
             .cloned()
             .or_else(|| attribute(&app, "AXFocusedWindow"))
             .or_else(|| all.first().cloned())
             .ok_or_else(|| io::Error::other(format!("у {} нет окон", found.process)))?;
-        let name = title(&window);
+        let name = ax_title(&window);
         Ok((window, name))
     }
 
@@ -1709,17 +1825,20 @@ mod mac {
         let app = unsafe {
             CFType::wrap_under_create_rule(AXUIElementCreateApplication(window.pid as i32))
         };
-        let title = |w: &CFType| {
-            attribute(w, "AXTitle")
-                .and_then(|t| t.downcast_into::<CFString>())
-                .map(|t| t.to_string())
-                .unwrap_or_default()
-        };
         let all = items(attribute(&app, "AXWindows"));
-        let target = all
-            .iter()
-            .find(|w| !window.title.is_empty() && title(w) == window.title)
-            .or(all.first());
+        let mut matches = all.iter().filter(|w| {
+            if window.title.is_empty() {
+                all.len() == 1
+            } else {
+                ax_title(w) == window.title
+            }
+        });
+        let target = matches
+            .next()
+            .filter(|_| matches.next().is_none())
+            .ok_or_else(|| {
+                io::Error::other("не удалось однозначно сопоставить окно Accessibility")
+            })?;
         let (yes, no) = (
             CFBoolean::true_value().as_CFType(),
             CFBoolean::false_value().as_CFType(),
@@ -1729,9 +1848,7 @@ mod mac {
             unsafe { AXUIElementPerformAction(w.as_CFTypeRef(), action.as_concrete_TypeRef()) };
             set_attribute(w, "AXMain", &yes);
         };
-        if let Some(target) = target {
-            set_attribute(target, "AXMinimized", &no);
-        }
+        set_attribute(target, "AXMinimized", &no);
         // С macOS 14 активным приложение делает только то, что активно само: AXFrontmost и
         // activate отвечают «готово» и ничего не делают. Dock может — жмём значок, как человек.
         if !press_dock(&window.process) {
@@ -1742,18 +1859,30 @@ mod mac {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(150));
-            if let Some(target) = target {
-                raise(target);
-            }
-            // Готово, когда окно сверху и клавиатура — у его приложения: поднятое окно
-            // неактивного приложения ввод не получает.
-            let front = windows()?.into_iter().find(|w| w.rect.is_some());
-            let keyboard = focused_pid().is_none_or(|pid| i64::from(pid) == window.pid);
-            if front.is_some_and(|w| w.pid == window.pid) && keyboard {
+            raise(target);
+            if focused_window(&windows()?).is_some_and(|w| w.id == window.id && w.pid == window.pid)
+            {
                 return Ok(());
             }
         }
         Err(io::Error::other("macOS не дал вывести окно вперёд"))
+    }
+
+    fn ax_title(w: &CFType) -> String {
+        attribute(w, "AXTitle")
+            .and_then(|t| t.downcast_into::<CFString>())
+            .map(|t| t.to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn focused_window(windows: &[super::Window]) -> Option<&super::Window> {
+        let pid = focused_pid()?;
+        let app = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid)) };
+        let title = ax_title(&attribute(&app, "AXFocusedWindow")?);
+        let mut active = windows.iter().filter(|w| {
+            w.rect.is_some() && w.pid == i64::from(pid) && (w.title == title || w.title.is_empty())
+        });
+        active.next().filter(|_| active.next().is_none())
     }
 
     /// pid приложения, у которого клавиатура.
@@ -2267,6 +2396,11 @@ mod win {
     /// Вывести окно вперёд, с фокусом. Windows отдаёт фокус только тому, у кого он уже есть, —
     /// окна задач ferry открываются позади, — поэтому на время подключаемся к вводу окна с фокусом.
     pub fn focus(window: &super::Window) -> io::Result<()> {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(window.id as isize, &mut pid) };
+        if i64::from(pid) != window.pid {
+            return Err(io::Error::other("выбранное окно исчезло"));
+        }
         let window = window.id as isize;
         const SW_RESTORE: i32 = 9;
         // Свёрнутое — сначала развернуть: SetForegroundWindow его не показывает.
@@ -2604,6 +2738,46 @@ mod tests {
         assert_eq!(
             window_rect(&windows, "test.txt").unwrap(),
             "300 134 1312 844\n"
+        );
+    }
+
+    #[test]
+    fn window_selection_and_focus_do_not_confuse_two_windows_of_one_process() {
+        let wanted = Window {
+            id: 24,
+            process: "browser.exe".into(),
+            pid: 10,
+            title: "Main".into(),
+            rect: Some((100, 50, 600, 400)),
+            focused: false,
+        };
+        let mut helper = Window {
+            id: 25,
+            title: "Helper".into(),
+            focused: true,
+            ..wanted.clone()
+        };
+        let windows = [helper.clone(), wanted.clone()];
+        let error = find_any_window(&windows, "browser")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("@24") && error.contains("@25"), "{error}");
+        assert_eq!(pick_window(&windows, "@24", true, true).unwrap(), &wanted);
+        assert!(!same_capture_window(&wanted, &helper));
+        let error = focus_result(&wanted, Some(&helper), Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("запрошено @24") && error.contains("активное окно: @25"),
+            "{error}"
+        );
+        helper.id = wanted.id;
+        assert!(same_capture_window(&wanted, &helper));
+        helper.rect = Some((12, 34, 600, 400));
+        assert!(!same_capture_window(&wanted, &helper));
+        assert_eq!(
+            focus_result(&wanted, Some(&helper), Ok(())).unwrap(),
+            "12 34 600 400\n"
         );
     }
 

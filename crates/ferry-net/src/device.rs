@@ -505,6 +505,42 @@ impl Device {
         files::recv_file(&mut rx, file).await
     }
 
+    pub async fn shot_window_with_info(
+        &self,
+        file: &Path,
+        name: &str,
+    ) -> Reply<Option<ferry_core::screen::Window>> {
+        if self.version.is_none()
+            || need(
+                &self.name,
+                self.version.as_deref(),
+                "0.1.26",
+                "геометрия снимка окна",
+            )
+            .is_err()
+        {
+            return Ok(None);
+        }
+        let mut rx = self
+            .client
+            .0
+            .server_streaming(ShotWindowInfo { name: name.into() }, 8)
+            .await
+            .map_err(lost)?;
+        let window = match rx.recv().await.map_err(lost)? {
+            Some(Chunk::Data(bytes)) if bytes.len() <= 64 * 1024 => {
+                serde_json::from_slice(&bytes).map_err(Fail::new)?
+            }
+            Some(Chunk::Fail(fail)) => return Err(fail),
+            _ => return Err(Fail::new("нет метаданных снимка окна")),
+        };
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        files::recv_file(&mut rx, file).await?;
+        Ok(Some(window))
+    }
+
     /// Снимок области `[x, y, ширина, высота]` — окна или части экрана.
     pub async fn shot_area(&self, file: &Path, area: [i32; 4]) -> Reply<()> {
         need(

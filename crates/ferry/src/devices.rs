@@ -823,41 +823,60 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area) -> io::Result<i32> {
                 .join(format!("{device}.png")),
         };
         let region = match area {
-            Area::Screen => None,
-            Area::Region(region) => Some(region),
-            // Место окна знает устройство: ответ — `x y ширина высота`.
-            Area::Window(name) => {
-                let Response::Message(place) = ask(Request::Input {
+            Area::Screen => {
+                ask(Request::Shot {
                     device: device.into(),
-                    args: vec!["window".into(), name.into()],
-                })?
-                else {
-                    return Err(unexpected());
-                };
-                let numbers: Vec<i32> = place
-                    .split_whitespace()
-                    .filter_map(|n| n.parse().ok())
-                    .collect();
-                let region: [i32; 4] = numbers.try_into().map_err(|_| unexpected())?;
-                Some(region)
+                    file: path.clone(),
+                })?;
+                None
             }
-        };
-        match (&area, region) {
-            (Area::Screen, _) | (_, None) => ask(Request::Shot {
-                device: device.into(),
-                file: path.clone(),
-            })?,
-            // Окно — само окно, даже закрытое другими; место нужно только для координат.
-            (Area::Window(name), Some(_)) => ask(Request::ShotWindow {
-                device: device.into(),
-                file: path.clone(),
-                name: (*name).into(),
-            })?,
-            (Area::Region(_), Some(area)) => ask(Request::ShotArea {
-                device: device.into(),
-                file: path.clone(),
-                area,
-            })?,
+            Area::Region(region) => {
+                ask(Request::ShotArea {
+                    device: device.into(),
+                    file: path.clone(),
+                    area: region,
+                })?;
+                Some(region.map(i64::from))
+            }
+            Area::Window(name) => {
+                match ask(Request::ShotWindowInfo {
+                    device: device.into(),
+                    file: path.clone(),
+                    name: name.into(),
+                })? {
+                    Response::Report(info) => {
+                        let window: ferry_core::screen::Window =
+                            serde_json::from_str(&info).map_err(Fail::new)?;
+                        let (x, y, w, h) = window.rect().ok_or_else(unexpected)?;
+                        printer.line(&format!("ferry: снято окно @{}", window.id()), true);
+                        Some([x, y, w, h])
+                    }
+                    Response::Done => {
+                        // Старые узлы передают PNG отдельно от координат.
+                        let Response::Message(place) = ask(Request::Input {
+                            device: device.into(),
+                            args: vec!["window".into(), name.into()],
+                        })?
+                        else {
+                            return Err(unexpected());
+                        };
+                        let numbers: Vec<i64> = place
+                            .split_whitespace()
+                            .map(str::parse)
+                            .collect::<Result<_, _>>()
+                            .map_err(Fail::new)?;
+                        let region: [i64; 4] = numbers.try_into().map_err(|_| unexpected())?;
+                        ask(Request::ShotWindow {
+                            device: device.into(),
+                            file: path.clone(),
+                            name: name.into(),
+                        })?;
+                        printer.line("ferry: старый узел вернул координаты до снимка; проверь положение окна перед вводом", true);
+                        Some(region)
+                    }
+                    _ => return Err(unexpected()),
+                }
+            }
         };
         printer.line(&path.display().to_string(), false);
         // Клик и ввод ждут координаты всего экрана — к точке на снимке прибавить начало области.

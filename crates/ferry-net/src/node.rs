@@ -338,6 +338,27 @@ impl Node {
                 };
                 files::reply_file(result.await, &tx).await;
             }
+            DeviceMessage::ShotWindowInfo(WithChannels { inner, tx, .. }) => {
+                let result = async {
+                    self.check(true)?;
+                    let file = files::temp(&self.dir, "png")?;
+                    let path = file.clone();
+                    let window =
+                        blocking(move || screen::screenshot_window_with_info(&path, &inner.name))
+                            .await?;
+                    let sent = async {
+                        let data = serde_json::to_vec(&window).map_err(Fail::new)?;
+                        tx.send(Chunk::Data(data)).await.map_err(lost)
+                    }
+                    .await;
+                    if let Err(fail) = sent {
+                        std::fs::remove_file(&file).ok();
+                        return Err(fail);
+                    }
+                    Ok(file)
+                };
+                files::reply_file(result.await, &tx).await;
+            }
             DeviceMessage::ShotArea(WithChannels { inner, tx, .. }) => {
                 let result = async {
                     self.check(true)?;

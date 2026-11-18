@@ -238,6 +238,11 @@ pub enum Request {
         file: PathBuf,
         name: String,
     },
+    ShotWindowInfo {
+        device: String,
+        file: PathBuf,
+        name: String,
+    },
     /// Хвост лога приложения: устройства или (`device` пуст) этой машины.
     Logs {
         device: Option<String>,
