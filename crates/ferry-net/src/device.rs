@@ -200,6 +200,26 @@ impl Device {
             .await?;
         self.save_patch(&source.workspace, &prepared.changes)
     }
+
+    pub async fn project_transfer(&self, request: ProjectTransfer) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            ferry_core::device::version::PROJECT_TRANSFER,
+            "передача проекта из пульта",
+        )?;
+        self.client.ask(request).await
+    }
+
+    pub async fn project_contents(&self, request: ProjectContents) -> Reply<String> {
+        need(
+            &self.name,
+            self.version.as_deref(),
+            ferry_core::device::version::PROJECT_TRANSFER,
+            "размеры файлов переданного проекта",
+        )?;
+        self.client.ask(request).await
+    }
     pub async fn act_v2(
         &self,
         request: ferry_core::screen::act::RequestV2,

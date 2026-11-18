@@ -19,6 +19,7 @@ pub mod mode;
 pub mod ocr;
 pub mod power;
 pub mod project;
+pub mod project_transfer;
 pub mod relay;
 pub mod screen;
 pub mod session;

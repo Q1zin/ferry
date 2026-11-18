@@ -48,6 +48,125 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 #[tokio::test]
+async fn project_transfer_uses_unpushed_changes_and_tracks_exact_incoming_run() {
+    use ferry_core::jobs::execution::{Resource, StartRequest};
+    use ferry_core::project_transfer::{self, Direction, State};
+    use ferry_net::proto::{
+        PROJECT_SESSION, ProjectContents, ProjectTransfer, ProjectTransferAction,
+    };
+
+    let control = agent("project-sender").await;
+    let mut settings = options("project-receiver");
+    #[cfg(unix)]
+    {
+        settings.supervisor = "/usr/bin/true".into();
+    }
+    #[cfg(windows)]
+    {
+        settings.supervisor = std::env::current_exe().unwrap();
+    }
+    let receiver = agent_with("project-receiver", settings).await;
+    pair(&control, &receiver).await;
+    receiver.set_mode(Mode::NoDesktop).unwrap();
+    let node = control.device("project-receiver").unwrap();
+
+    let source_dir = path("project-sender").join("test-app");
+    std::fs::create_dir_all(source_dir.join("src")).unwrap();
+    git(&source_dir, &["init", "-q"]);
+    std::fs::write(source_dir.join(".gitignore"), "private.env\nbuild/\n").unwrap();
+    std::fs::write(source_dir.join("src/value.txt"), "staged only\n").unwrap();
+    git(&source_dir, &["add", "src/value.txt"]);
+    std::fs::write(source_dir.join("src/value.txt"), "latest local source\n").unwrap();
+    std::fs::write(source_dir.join("new.txt"), "untracked\n").unwrap();
+    std::fs::write(source_dir.join("private.env"), "TEST_KEY=1\n").unwrap();
+    let repo = ferry_core::sync::repo_at(&source_dir).unwrap().unwrap();
+    let (commit, tree) = ferry_core::sync::snapshot(&repo).unwrap();
+    let id = "gui-integration";
+    let source = ferry_core::workspace::source("test-app", id, &commit, &tree).unwrap();
+    let transfer = |action| ProjectTransfer {
+        id: id.into(),
+        source: source.clone(),
+        action,
+    };
+    let state = path("project-receiver");
+    let incoming = || {
+        project_transfer::get(&state, id, Direction::Incoming)
+            .unwrap()
+            .unwrap()
+    };
+    node.project_transfer(transfer(ProjectTransferAction::Prepare {
+        extras: vec!["private.env".into()],
+        caches: vec!["build".into()],
+    }))
+    .await
+    .unwrap();
+    assert_eq!(incoming().state, State::Transferring);
+    assert_eq!(incoming().peer_id, control.id().to_string());
+    node.sync(
+        &source_dir,
+        &source.workspace,
+        &commit,
+        &tree,
+        &["private.env".into()],
+    )
+    .await
+    .unwrap();
+    node.project_transfer(transfer(ProjectTransferAction::Seal))
+        .await
+        .unwrap();
+    assert_eq!(incoming().state, State::Ready);
+    let files = node
+        .project_contents(ProjectContents {
+            source: source.clone(),
+            directory: "src".into(),
+        })
+        .await
+        .unwrap();
+    let files: serde_json::Value = serde_json::from_str(&files).unwrap();
+    assert_eq!(files["entries"][0]["name"], "value.txt");
+    assert_eq!(files["entries"][0]["bytes"], "latest local source\n".len());
+    let dir = Dir::Project {
+        name: source.workspace.clone(),
+        prefix: "src/".into(),
+    };
+    assert_eq!(
+        run(
+            &node,
+            "cat value.txt; cat ../new.txt; cat ../private.env",
+            dir.clone(),
+            false
+        )
+        .await
+        .0,
+        "latest local source\nuntracked\nTEST_KEY=1\n"
+    );
+    let request = StartRequest {
+        request_id: id.into(),
+        name: id.into(),
+        command: "exit 0".into(),
+        dir,
+        shell: Default::default(),
+        resource: Resource::Headless,
+        source: Some(source),
+        session: PROJECT_SESSION.into(),
+        keep: true,
+        timeout_sec: Some(30),
+    };
+    let first = node.atomic_start(request.clone()).await.unwrap();
+    let repeated = node.atomic_start(request).await.unwrap();
+    assert_eq!(first.run_id, repeated.run_id);
+    let receipt = incoming();
+    assert_eq!(receipt.state, State::Started);
+    assert_eq!(receipt.run.unwrap().run_id, first.run_id);
+    assert!(git(&source_dir, &["remote"]).is_empty());
+    assert_eq!(git(&source_dir, &["show", ":src/value.txt"]), "staged only");
+    control.shutdown().await;
+    receiver.shutdown().await;
+    let _ = std::fs::remove_dir_all(path("project-sender"));
+    let _ = std::fs::remove_dir_all(path("project-receiver"));
+}
+
+#[tokio::test]
 async fn commands_stream_output_and_respect_role_and_mode() {
     let (a, b) = paired("ctl", "node").await;
     let node = a.device("node").unwrap();

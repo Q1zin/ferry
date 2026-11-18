@@ -403,6 +403,10 @@ pub enum DeviceProtocol {
     AdminInputForWindow(AdminInputForWindow),
     #[rpc(tx = oneshot::Sender<Reply<Vec<ferry_core::screen::Window>>>)]
     AdminWindowList(AdminWindowList),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    ProjectTransfer(ProjectTransfer),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    ProjectContents(ProjectContents),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -421,6 +425,31 @@ pub struct AdminInputForWindow {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AdminWindowList {
     pub session: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProjectTransfer {
+    pub id: String,
+    pub source: ferry_core::jobs::execution::Source,
+    pub action: ProjectTransferAction,
+}
+
+pub const PROJECT_SESSION: &str = "console:projects";
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ProjectTransferAction {
+    Prepare {
+        extras: Vec<String>,
+        caches: Vec<String>,
+    },
+    Seal,
+    Failed(String),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProjectContents {
+    pub source: ferry_core::jobs::execution::Source,
+    pub directory: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

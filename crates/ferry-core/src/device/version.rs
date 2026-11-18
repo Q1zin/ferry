@@ -8,8 +8,9 @@ pub const DESK_AWAKE: &str = "0.1.27";
 pub const ADMIN_WINDOW: &str = "0.1.28";
 pub const ADMIN_WINDOWS: &str = "0.1.29";
 pub const ADMIN_SCREEN: &str = "0.1.30";
+pub const PROJECT_TRANSFER: &str = "0.1.31";
 
-pub const FEATURES: [(&str, &str); 9] = [
+pub const FEATURES: [(&str, &str); 10] = [
     ("shell", SHELL),
     ("result", RESULT),
     ("desk-note", DESK_NOTE),
@@ -19,6 +20,7 @@ pub const FEATURES: [(&str, &str); 9] = [
     ("admin-window", ADMIN_WINDOW),
     ("admin-windows", ADMIN_WINDOWS),
     ("admin-screen", ADMIN_SCREEN),
+    ("project-transfer", PROJECT_TRANSFER),
 ];
 
 pub fn parse(value: &str) -> Option<[u32; 3]> {

@@ -17,6 +17,8 @@ use tokio::sync::watch;
 use crate::files;
 use crate::proto::*;
 
+mod project_transfer;
+
 /// Сколько ждать хвост вывода после выхода команды. Запущенные ею фоновые процессы держат
 /// pipe открытым — их конца не ждём (как старый демон рабочего стола и ssh).
 const TAIL: Duration = Duration::from_millis(500);
@@ -249,6 +251,12 @@ impl Node {
                 };
                 tx.send(result).await.ok();
             }
+            DeviceMessage::ProjectTransfer(WithChannels { inner, tx, .. }) => {
+                tx.send(self.receive_project(inner, from).await).await.ok();
+            }
+            DeviceMessage::ProjectContents(WithChannels { inner, tx, .. }) => {
+                tx.send(self.project_contents(inner, from).await).await.ok();
+            }
             DeviceMessage::ActV2(WithChannels { inner, tx, .. }) => {
                 tx.send(self.act_v2(*inner.0, true).await).await.ok();
             }
@@ -467,6 +475,7 @@ impl Node {
                     self.check(false)?;
                     let name = workspace::project_name(&self.home, &inner.project)?;
                     let repo = self.home.join("ferry").join(name.as_ref());
+                    let _activity = self.protect_storage(&repo).await?;
                     files::recv_file(&mut rx, &repo.join(".git/ferry.bundle")).await?;
                     // Пустой бандл — снимок уже здесь, нужен только checkout поверх правок.
                     let script = format!(
@@ -485,6 +494,7 @@ impl Node {
                 let result = async {
                     self.check(false)?;
                     let dest = self.resolve(&inner.dir)?;
+                    let _activity = self.protect_storage(&dest).await?;
                     let archive = files::temp(&self.dir, "tar")?;
                     files::recv_file(&mut rx, &archive).await?;
                     let from = archive.clone();
@@ -646,6 +656,19 @@ impl Node {
             .map_err(Fail::new)
     }
 
+    async fn protect_storage(&self, cwd: &Path) -> Reply<ferry_core::storage::ActivityGuard> {
+        let state = self.dir.clone();
+        let cwd = cwd.to_path_buf();
+        blocking(move || {
+            let existing = cwd
+                .ancestors()
+                .find(|path| path.is_dir())
+                .ok_or_else(|| std::io::Error::other("нет каталога для защиты файлов"))?;
+            Ok(ferry_core::storage::protect_activity(&state, existing)?)
+        })
+        .await
+    }
+
     async fn run(
         &self,
         Run {
@@ -658,9 +681,19 @@ impl Node {
         tx: mpsc::Sender<Output>,
         shell: Shell,
     ) {
-        let spawned = (|| {
+        let spawned = async {
             self.check(desk)?;
             let cwd = self.resolve(&dir)?;
+            let scope = match dir {
+                ferry_core::device::Dir::Project { name, .. } => {
+                    self.resolve(&ferry_core::device::Dir::Project {
+                        name,
+                        prefix: String::new(),
+                    })?
+                }
+                ferry_core::device::Dir::Home => cwd.clone(),
+            };
+            let activity = self.protect_storage(&scope).await?;
             let (command, script) = desk::task_shell(&cmd, shell, &self.dir)?;
             let child = tokio::process::Command::from(command)
                 .envs(
@@ -674,9 +707,10 @@ impl Node {
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|e| Fail::new(format!("шелл не запустился: {e}")))?;
-            Ok((child, script))
-        })();
-        let (mut child, _script) = match spawned {
+            Ok((child, script, activity))
+        }
+        .await;
+        let (mut child, _script, _activity) = match spawned {
             Ok(value) => value,
             Err(fail) => {
                 tx.send(Output::Fail(fail)).await.ok();
@@ -794,15 +828,20 @@ impl Node {
         let state = self.dir.clone();
         let source = self.supervisor.clone();
         let supervisor = blocking(move || jobs::prepare_supervisor(&state, &source)).await?;
-        let env = match remote {
+        let env = match &remote {
             Some((from, trust)) => self
                 .relay
-                .env(from, &trust, &supervisor)
+                .env(*from, trust, &supervisor)
                 .map_err(Fail::new)?,
             None => Vec::new(),
         };
+        let transfer = remote
+            .as_ref()
+            .map(|(from, _)| self.transfer_for_start(&request, *from))
+            .transpose()?
+            .flatten();
         let root = self.dir.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             jobs::execution::start_at(&root, request, &cwd, &env, &supervisor)
         })
         .await
@@ -813,7 +852,11 @@ impl Node {
             } else {
                 Fail::new(e)
             }
-        })
+        });
+        if let Some(transfer) = transfer {
+            self.record_project_start(transfer, &result);
+        }
+        result
     }
     pub async fn execution_cancel(
         &self,
