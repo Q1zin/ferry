@@ -215,14 +215,21 @@ try {
           if (cmd === 'project_storage') {
             const { request } = args
             const { storage } = fx.project
+            const partial = !!args.id && !request.kind
             if (request.apply) cacheRemoved = true
             const entries = storage.entries.filter(entry =>
               (!request.kind || request.kind === entry.kind)
               && (!cacheRemoved || entry.id !== 's-cached')
               && (!request.only || request.only === entry.id)
             )
+            if (partial) entries.push({
+              id: 's-partial', kind: 'workspaces', path: 'C:\\ferry\\large-workspace', bytes: 1800, files: 3,
+              protected: 'Измерение прервано', measurement_complete: false,
+            })
             return {
-              ...storage, entries, entry_count: entries.length,
+              ...storage, entries, entry_count: entries.length, scan_complete: !partial, scan_truncated: partial,
+              logical_bytes: storage.logical_bytes + (partial ? 1800 : 0),
+              categories: partial ? { ...storage.categories, workspaces: 1800 } : storage.categories,
               candidates: request.older_than_days != null ? entries.filter(entry => !entry.protected) : [],
               freed_bytes: request.apply ? 4096 : 0,
             }
@@ -690,8 +697,18 @@ try {
     await page.getByLabel('Устройство', { exact: true }).selectOption(WIN)
     const storageRows = page.locator('.storage-entries > li')
     await storageRows.first().waitFor()
+    await page.getByText('Сканирование неполное.', { exact: false }).waitFor()
+    await page.getByText('Выбери категорию, чтобы сузить поиск.', { exact: false }).waitFor()
+    const partialRow = storageRows.filter({ hasText: 'Измерение прервано' })
+    const lowerBound = await page.evaluate(() => (1.7).toLocaleString())
+    await partialRow.getByText('не менее ' + lowerBound + ' КиБ', { exact: false }).waitFor()
+    assert.equal(await partialRow.getByRole('button').count(), 0)
     assert.equal(await storageRows.filter({ hasText: 'исходники не удаляются' }).getByRole('button').count(), 0)
     assert.equal(await storageRows.filter({ hasText: 'использует активная задача' }).getByRole('button').count(), 0)
+    await page.getByLabel('Категория').selectOption('caches')
+    await partialRow.waitFor({ state: 'hidden' })
+    await page.getByText('5 КиБ', { exact: true }).waitFor()
+    assert.equal(await page.getByText('Сканирование неполное.', { exact: false }).count(), 0)
     await calls()
     await storageRows.filter({ hasText: storageCache.path }).getByRole('button', { name: 'Проверить очистку' }).click()
     const cleanupPlan = page.getByLabel('Предпросмотр очистки', { exact: true })

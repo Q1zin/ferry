@@ -32,6 +32,7 @@ const deviceError = computed(() => device.value
 const validDays = computed(() => typeof days.value === 'number' && Number.isInteger(days.value) && days.value >= 0 && days.value <= 36500)
 const categories = computed(() => (Object.keys(kinds) as StorageKind[]).filter(key => report.value?.categories[key] !== undefined))
 const toFree = computed(() => preview.value?.report.candidates.reduce((total, entry) => total + entry.bytes, 0) ?? 0)
+const scanIncomplete = (result: StorageReport) => result.scan_complete === false || result.scan_truncated === true
 
 async function scan() {
   if (busy.value || deviceError.value) return
@@ -118,11 +119,16 @@ watch(days, () => { preview.value = null })
     </ul>
 
     <template v-if="report">
-      <p><strong>{{ formatBytes(report.logical_bytes) }}</strong> занимают файлы Ferry и рабочие копии</p>
+      <p v-if="kind">{{ kinds[kind] }} · <strong>{{ formatBytes(report.categories[kind] ?? 0, scanIncomplete(report)) }}</strong></p>
+      <p v-else><strong>{{ formatBytes(report.logical_bytes, scanIncomplete(report)) }}</strong> занимают файлы Ferry и рабочие копии</p>
+      <p v-if="scanIncomplete(report)" class="warning">
+        Сканирование неполное. Размеры показывают только подсчитанные файлы.
+        <template v-if="!kind">Выбери категорию, чтобы сузить поиск.</template>
+      </p>
       <ul v-if="!kind && categories.length" class="storage-categories">
         <li v-for="category in categories" :key="category">
           <button :disabled="busy" @click="kind = category">{{ kinds[category] }}</button>
-          <span class="muted">{{ formatBytes(report.categories[category] ?? 0) }}</span>
+          <span class="muted">{{ formatBytes(report.categories[category] ?? 0, scanIncomplete(report)) }}</span>
         </li>
       </ul>
       <div v-if="kind && !readOnly.has(kind) && report.entries.length" class="row storage-options">
@@ -135,14 +141,17 @@ watch(days, () => { preview.value = null })
 
     <div v-if="preview" class="cleanup-plan" aria-label="Предпросмотр очистки">
       <h3>Предпросмотр очистки</h3>
-      <p v-if="!preview.report.candidates.length" class="muted">Нет подходящих файлов для очистки.</p>
+      <p v-if="!preview.report.candidates.length" class="muted">
+        {{ scanIncomplete(preview.report) ? 'В проверенной части нет файлов для очистки.' : 'Нет подходящих файлов для очистки.' }}
+      </p>
       <template v-else>
         <p>{{ preview.report.candidates.length }} позиций · {{ formatBytes(toFree) }}</p>
         <p v-if="preview.request.kind === 'caches'" class="muted">Перед удалением кеша останови сборки, запущенные вне Ferry.</p>
         <ul class="cleanup-candidates">
           <li v-for="candidate in preview.report.candidates" :key="candidate.id"><code>{{ candidate.path }}</code> · {{ formatBytes(candidate.bytes) }}</li>
         </ul>
-        <p v-if="preview.report.more_candidates" class="muted">В эту очистку войдут только перечисленные позиции.</p>
+        <p v-if="scanIncomplete(preview.report)" class="warning">Сканирование неполное. Удалить можно только проверенные позиции из списка.</p>
+        <p v-else-if="preview.report.more_candidates" class="muted">В эту очистку войдут только перечисленные позиции.</p>
       </template>
       <div class="row">
         <button v-if="preview.report.candidates.length" class="danger" :disabled="busy || !!deviceError" @click="apply">Удалить выбранные файлы</button>
@@ -151,19 +160,26 @@ watch(days, () => { preview.value = null })
     </div>
 
     <template v-if="report">
-      <p v-if="!report.entries.length && !busy" class="muted">Файлов в этой категории нет.</p>
+      <p v-if="!report.entries.length && !busy" class="muted">
+        {{ scanIncomplete(report) ? 'В проверенной части файлы не найдены.' : 'Файлов в этой категории нет.' }}
+      </p>
       <ul v-else-if="report.entries.length" class="storage-entries">
         <li v-for="entry in report.entries.slice(0, limit)" :key="entry.id">
           <code>{{ entry.path }}</code>
           <div class="row">
-            <span class="muted">{{ kinds[entry.kind] }} · {{ formatBytes(entry.bytes) }} · файлов {{ entry.files }}</span>
-            <button v-if="!entry.protected && !readOnly.has(entry.kind)" :disabled="busy || !!deviceError" @click="plan(entry.kind, entry.id)">Проверить очистку</button>
+            <span class="muted">
+              {{ kinds[entry.kind] }} · {{ formatBytes(entry.bytes, entry.measurement_complete === false) }}
+              · файлов {{ entry.measurement_complete === false ? 'не менее ' : '' }}{{ entry.files }}
+            </span>
+            <button v-if="entry.measurement_complete !== false && !entry.protected && !readOnly.has(entry.kind)" :disabled="busy || !!deviceError" @click="plan(entry.kind, entry.id)">Проверить очистку</button>
           </div>
           <p v-if="entry.protected" class="muted">{{ entry.protected }}</p>
         </li>
       </ul>
       <button v-if="report.entries.length > limit" class="more-files" @click="limit += 40">Показать ещё файлы</button>
-      <p v-if="report.entries_truncated" class="muted">Показана часть из {{ report.entry_count }} позиций. Выбери категорию, чтобы сузить список.</p>
+      <p v-if="report.entries_truncated" class="muted">
+        Показана часть из {{ report.entry_count }} найденных позиций. <template v-if="!kind && !scanIncomplete(report)">Выбери категорию, чтобы сузить список.</template>
+      </p>
     </template>
   </section>
 </template>

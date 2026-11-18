@@ -24,6 +24,7 @@ function reason(peer: PeerView) {
 }
 
 const inspected = computed(() => source.value?.path === path.value.trim() ? source.value?.inspected : null)
+const available = computed(() => props.peers.filter(peer => !reason(peer)))
 const target = computed(() => props.peers.find(peer => peer.id === deviceId.value))
 const targetError = computed(() => target.value ? reason(target.value) : '')
 const launch = computed(() => command.value.trim())
@@ -32,6 +33,9 @@ const beginDisabled = computed(() => !!busy.value || !inspected.value || !target
 const receiptKey = (receipt: ProjectReceipt) => receipt.direction + ':' + receipt.id
 
 watch(() => props.incoming, incoming => { tab.value = incoming ? 'incoming' : 'outgoing' })
+watch(available, peers => {
+  if (!deviceId.value && peers.length === 1) deviceId.value = peers[0].id
+}, { immediate: true })
 watch(() => target.value?.status?.os, () => { shell.value = 'default' })
 watch(path, () => { source.value = null; error.value = '' })
 

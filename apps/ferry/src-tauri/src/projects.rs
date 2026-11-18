@@ -227,11 +227,11 @@ pub async fn project_transfer(agent: State<'_, Agent>, request: Request) -> Repl
                     row.state = Phase::Interrupted;
                     row.error = Some("Ferry перезапустился до подтверждения результата".into());
                 }
-                if row.direction == Direction::Incoming && row.state == Phase::Starting && row.run.is_none() {
-                    if let Ok(Some(started)) = execution::lookup(&state, &row.id) {
-                        row.run = Some(started);
-                        row.state = Phase::Started;
-                    }
+                if row.direction == Direction::Incoming && row.state == Phase::Starting && row.run.is_none()
+                    && let Ok(Some(started)) = execution::lookup(&state, &row.id)
+                {
+                    row.run = Some(started);
+                    row.state = Phase::Started;
                 }
             }
             Ok(json!({"transfers":rows}))

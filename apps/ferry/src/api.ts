@@ -93,9 +93,11 @@ type ProjectReplies = {
 export type ProjectFiles = { directory: string; entries: { name: string; path: string; bytes: number | null; directory: boolean }[]; truncated: boolean }
 export type StorageKind = 'shots' | 'observations' | 'recordings' | 'checks' | 'diagnostics' | 'outputs' | 'caches' | 'runners' | 'questions' | 'projects' | 'workspaces' | 'jobs' | 'archives'
 export type StorageRequest = { kind?: StorageKind; only?: string; older_than_days?: number; max_bytes?: number; apply?: string }
-export type StorageEntry = { id: string; kind: StorageKind; path: string; bytes: number; files: number; protected: string | null }
+export type StorageEntry = { id: string; kind: StorageKind; path: string; bytes: number; files: number; protected: string | null; measurement_complete?: boolean }
 export type StorageReport = {
   logical_bytes: number
+  scan_complete?: boolean
+  scan_truncated?: boolean
   categories: Partial<Record<StorageKind, number>>
   entries: StorageEntry[]
   entry_count: number
