@@ -868,11 +868,17 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Resul
                 Some(region.map(i64::from))
             }
             Area::Window(name) => {
-                match ask(Request::ShotWindowInfo {
-                    device: device.into(),
-                    file: path.clone(),
-                    name: name.into(),
-                })? {
+                let capture =
+                    if ferry_core::device::version::at_least(&snapshot.me.version, "0.1.26") {
+                        ask(Request::ShotWindowInfo {
+                            device: device.into(),
+                            file: path.clone(),
+                            name: name.into(),
+                        })?
+                    } else {
+                        Response::Done
+                    };
+                match capture {
                     Response::Report(info) => {
                         let window: ferry_core::screen::Window =
                             serde_json::from_str(&info).map_err(Fail::new)?;
@@ -902,7 +908,7 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Resul
                             file: path.clone(),
                             name: name.into(),
                         })?;
-                        printer.line("ferry: старый узел вернул координаты до снимка; проверь положение окна перед вводом", true);
+                        printer.line("ferry: совместимый режим вернул координаты до снимка; проверь положение окна перед вводом", true);
                         Some(region)
                     }
                     _ => return Err(unexpected()),
