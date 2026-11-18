@@ -76,6 +76,23 @@ const fixtures = {
   update_all: 'win-10: ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
   install_update: 'ferry 0.1.0 → 0.1.1: ставлю и перезапускаюсь',
 }
+const projectSource = { project: 'sample-project', commit: 'b'.repeat(40), tree: 'a'.repeat(40), workspace: 'sample-project-gui-1' }
+const storageCache = { id: 's-cached', kind: 'caches', path: 'C:\\ferry\\sample-project\\target', bytes: 4096, files: 2, protected: null }
+fixtures.project = {
+  inspection: { project: 'sample-project', root: '/Users/a1/work/пример с пробелом', prefix: 'app/src/', extras: ['.env'], caches: ['target', 'node_modules'] },
+  incoming: { id: 'gui-in', direction: 'incoming', peer_id: WIN, project: 'received-project', state: 'ready', created: 1792335600, updated: 1792335610, source: { ...projectSource, project: 'received-project', workspace: 'received-project-gui-in' }, cwd: '/home/a1/ferry/received-project' },
+  outgoing: { id: 'gui-out', direction: 'outgoing', peer_id: WIN, project: 'sample-project', state: 'started', created: 1792335700, updated: 1792335750, source: projectSource, cwd: 'C:\\ferry\\sample-project\\app\\src', run: { name: 'build', run_id: 'run-77', request_id: 'gui-out', state: 'running' } },
+  result: { state: 'succeeded', exit_code: 0, log: 'all tests passed <script>literal</script>', run_id: 'run-77' },
+  files: { directory: '', entries: [{ name: 'target', path: 'target', bytes: 4096, directory: true }, { name: 'Cargo.lock', path: 'Cargo.lock', bytes: 2048, directory: false }], truncated: false },
+  storage: {
+    logical_bytes: 15360, categories: { projects: 10240, caches: 5120 }, entries: [
+      { id: 's-project', kind: 'projects', path: 'C:\\ferry\\sample-project', bytes: 10240, files: 12, protected: 'исходники не удаляются' },
+      storageCache,
+      { id: 's-active', kind: 'caches', path: 'C:\\ferry\\sample-project\\node_modules', bytes: 1024, files: 1, protected: 'использует активная задача' },
+    ],
+    entry_count: 3, entries_truncated: false, candidates: [], more_candidates: false, preview_token: 'preview-99', freed_bytes: 0, errors: [],
+  },
+}
 
 const runBase = { id: 'check-first', profile: 'smoke', created: 1792335600, finished_at: 1792335641, duration_seconds: 41, state: 'succeeded', worker_active: false, total: 1, succeeded: 1, devices: [{device:'win-10',state:'succeeded'}], summary:{tests:3,passed:3,failed:0,errors:0,skipped:0,artifacts:1} }
 const report = { ...runBase, results: [{device:'win-10',state:'succeeded',phases:[{name:'test',job:'test',run_id:'run-one',started:1792335600,finished_seen:1792335641,result:{exit_code:0,stdout:'<script>literal output</script>'}}],tests:runBase.summary,artifacts:[{id:'junit-1',name:'junit.xml',bytes:1024}],test_cases:{count:3,complete:true,preview:{cases:[{suite:['smoke'],class:'connection',name:'execution',state:'passed',duration_seconds:0.1}],more:2,complete:true}}}] }
@@ -127,6 +144,8 @@ try {
       ]
       let adminWindow = null
       let approvedController = null
+      const projectHistory = [fx.project.incoming]
+      let cacheRemoved = false
       let next = 0
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
       window.__TAURI_INTERNALS__ = {
@@ -174,6 +193,39 @@ try {
               return { ...fx.adminShot, window }
             }
             return null
+          }
+          if (cmd === 'project_transfer') {
+            switch (args.request.action) {
+              case 'inspect': return fx.project.inspection
+              case 'history': return { transfers: [...projectHistory] }
+              case 'begin': {
+                const receipt = args.request.command
+                  ? fx.project.outgoing
+                  : { ...fx.project.outgoing, id: 'gui-sync', state: 'ready', run: null }
+                projectHistory.unshift(receipt)
+                return receipt
+              }
+              case 'result': return fx.project.result
+            }
+          }
+          if (cmd === 'project_files') {
+            if (args.directory === 'target') return { directory: 'target', entries: [], truncated: false }
+            return fx.project.files
+          }
+          if (cmd === 'project_storage') {
+            const { request } = args
+            const { storage } = fx.project
+            if (request.apply) cacheRemoved = true
+            const entries = storage.entries.filter(entry =>
+              (!request.kind || request.kind === entry.kind)
+              && (!cacheRemoved || entry.id !== 's-cached')
+              && (!request.only || request.only === entry.id)
+            )
+            return {
+              ...storage, entries, entry_count: entries.length,
+              candidates: request.older_than_days != null ? entries.filter(entry => !entry.protected) : [],
+              freed_bytes: request.apply ? 4096 : 0,
+            }
           }
           if (cmd === 'dashboard') {
             if (args.request.action === 'run') {
@@ -573,6 +625,87 @@ try {
     await page.getByRole('button',{name:'Запустить проверку',exact:true}).click()
     await page.waitForFunction(()=>window.__calls.some(([c,a])=>c==='dashboard' && a.request.action==='setup_smoke' && a.request.value==='win-10'))
     await fits('онбординг'); await shot('onboarding')
+
+    // Передача локальной копии и запуск используют конкретного получателя и исходную папку.
+    await emit('state', snapshot)
+    await page.getByRole('button', { name: 'Проекты', exact: true }).click()
+    await page.getByLabel('Локальная папка').fill(fixtures.project.inspection.root)
+    await page.getByRole('button', { name: 'Проверить папку', exact: true }).click()
+    await page.getByText('.env', { exact: true }).waitFor()
+    const sendProject = page.getByRole('button', { name: 'Синхронизировать и запустить', exact: true })
+    assert.ok(await page.getByRole('button', { name: 'Синхронизировать', exact: true }).isDisabled())
+    const legacyTarget = page.getByLabel('Устройство назначения').locator('option').filter({ hasText: 'win-10' })
+    assert.deepEqual(await legacyTarget.evaluate(option => [option.textContent.trim(), option.disabled]), ['win-10 · Нужна Ferry 0.1.31 или новее.', true])
+    const projectPeer = { ...snapshot.peers[0], status: { ...win, version: '0.1.31' } }
+    await emit('state', { ...snapshot, peers: [projectPeer] })
+    await page.getByLabel('Устройство назначения').selectOption(WIN)
+    await page.getByLabel('Команда после синхронизации').fill('cargo test')
+    await page.getByLabel('Оболочка').selectOption('powershell')
+    assert.ok(!(await calls()).some(([c, arg]) => c === 'project_transfer' && arg.request.action === 'begin'))
+    await sendProject.click()
+    const outgoing = page.locator('.transfer').filter({ hasText: 'sample-project' })
+    await outgoing.locator('summary').click()
+    assert.deepEqual((await calls()).find(([c, arg]) => c === 'project_transfer' && arg.request.action === 'begin'), [
+      'project_transfer', { request: { action: 'begin', path: fixtures.project.inspection.root, device: WIN, shell: 'powershell', command: 'cargo test' } },
+    ])
+    await outgoing.getByRole('button', { name: 'Посмотреть результат', exact: true }).click()
+    await outgoing.getByText('Код выхода 0', { exact: true }).waitFor()
+    await outgoing.getByText('all tests passed <script>literal</script>', { exact: true }).waitFor()
+    assert.equal(await outgoing.locator('script').count(), 0)
+    assert.deepEqual((await calls()).find(([c, arg]) => c === 'project_transfer' && arg.request.action === 'result'), [
+      'project_transfer', { request: { action: 'result', id: 'gui-out', direction: 'outgoing' } },
+    ])
+    await outgoing.getByRole('button', { name: 'Файлы рабочей копии', exact: true }).click()
+    await outgoing.getByText('2 КиБ', { exact: true }).waitFor()
+    assert.deepEqual((await calls()).find(([c]) => c === 'project_files'), ['project_files', { id: WIN, source: projectSource, directory: '' }])
+    await outgoing.getByRole('button', { name: 'target', exact: true }).click()
+    await outgoing.getByText('Папка пуста.', { exact: true }).waitFor()
+    await outgoing.getByRole('button', { name: 'На уровень выше', exact: true }).click()
+    await outgoing.getByText('Cargo.lock', { exact: true }).waitFor()
+    await page.getByLabel('Команда после синхронизации').fill('')
+    await calls()
+    await page.getByRole('button', { name: 'Синхронизировать', exact: true }).click()
+    await page.locator('.transfer summary').filter({ hasText: 'Скопировано' }).waitFor()
+    assert.deepEqual((await calls()).find(([c, arg]) => c === 'project_transfer' && arg.request.action === 'begin'), [
+      'project_transfer', { request: { action: 'begin', path: fixtures.project.inspection.root, device: WIN, shell: 'default' } },
+    ])
+    await fits('отправка проекта')
+
+    // На принимающем устройстве квитанция видна из «Это устройство».
+    await page.locator('nav .node-link', { hasText: 'macbook' }).click()
+    await page.getByRole('button', { name: 'Принятые проекты', exact: true }).click()
+    await page.getByRole('heading', { name: 'Входящие передачи', exact: true }).waitFor()
+    const incoming = page.locator('.transfer').filter({ hasText: 'received-project' })
+    await incoming.locator('summary').click()
+    await incoming.getByText(fixtures.project.incoming.cwd, { exact: true }).waitFor()
+    assert.equal(await page.locator('.transfer').count(), 1)
+    await calls()
+    await incoming.getByRole('button', { name: 'Файлы рабочей копии', exact: true }).click()
+    await incoming.getByText('Cargo.lock', { exact: true }).waitFor()
+    assert.deepEqual((await calls()).find(([c]) => c === 'project_files'), ['project_files', { id: null, source: fixtures.project.incoming.source, directory: '' }])
+
+    // Очистка требует точного подтверждения показанного списка. Исходники и активные кеши защищены.
+    await page.getByRole('button', { name: 'Место на устройствах', exact: true }).click()
+    await page.getByText('15 КиБ', { exact: true }).waitFor()
+    await page.getByLabel('Устройство', { exact: true }).selectOption(WIN)
+    const storageRows = page.locator('.storage-entries > li')
+    await storageRows.first().waitFor()
+    assert.equal(await storageRows.filter({ hasText: 'исходники не удаляются' }).getByRole('button').count(), 0)
+    assert.equal(await storageRows.filter({ hasText: 'использует активная задача' }).getByRole('button').count(), 0)
+    await calls()
+    await storageRows.filter({ hasText: storageCache.path }).getByRole('button', { name: 'Проверить очистку' }).click()
+    const cleanupPlan = page.getByLabel('Предпросмотр очистки', { exact: true })
+    await cleanupPlan.getByText(storageCache.path, { exact: true }).waitFor()
+    assert.deepEqual((await calls()).filter(([c]) => c === 'project_storage'), [
+      ['project_storage', { id: WIN, request: { kind: 'caches', only: 's-cached', older_than_days: 0 } }],
+    ])
+    await cleanupPlan.getByRole('button', { name: 'Удалить выбранные файлы', exact: true }).click()
+    await page.getByText('Освобождено 4 КиБ', { exact: true }).waitFor()
+    assert.deepEqual((await calls()).find(([c, arg]) => c === 'project_storage' && arg.request.apply), [
+      'project_storage', { id: WIN, request: { kind: 'caches', only: 's-cached', older_than_days: 0, apply: 'preview-99' } },
+    ])
+    await storageRows.filter({ hasText: storageCache.path }).waitFor({ state: 'hidden' })
+    await fits('место на устройствах'); await shot('projects-storage')
     await page.close()
   }
 
@@ -590,6 +723,7 @@ try {
     await page.locator('.tile').first().waitFor()
     assert.equal(new URL(page.url()).hash,'','token must leave address bar')
     assert.equal(await page.getByRole('button',{name:'Настройки'}).count(),0)
+    assert.equal(await page.getByRole('button',{name:'Проекты',exact:true}).count(),0)
     await page.getByRole('button',{name:'Прогоны',exact:true}).click()
     await page.locator('.run-row').first().click()
     await page.getByText('Панель открыта для просмотра.',{exact:false}).waitFor()

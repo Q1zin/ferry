@@ -11,6 +11,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 mod dashboard;
 mod human;
+mod projects;
 mod stream;
 mod updates;
 
@@ -1056,7 +1057,10 @@ pub fn run() {
             stream::stop_stream,
             stream::stream_ack,
             stream::control_screen,
-            stream::admin_screen
+            stream::admin_screen,
+            projects::project_transfer,
+            projects::project_storage,
+            projects::project_files
         ])
         .build(tauri::generate_context!())
         .expect("error while building ferry")

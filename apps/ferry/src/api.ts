@@ -60,6 +60,53 @@ export type Detail = { properties: [string, string][]; warnings: string[]; locke
 
 export type JobRow = { name: string; label: string; ago: string; running: boolean; cmd: string }
 
+export type ProjectShell = 'default' | 'bash' | 'powershell' | 'cmd'
+export type TransferDirection = 'incoming' | 'outgoing'
+export type ProjectSource = { project: string; commit: string; tree: string; workspace: string }
+export type ProjectInspection = { project: string; root: string; prefix: string; extras: string[]; caches: string[] }
+export type ProjectReceipt = {
+  id: string
+  direction: TransferDirection
+  peer_id: string
+  project: string
+  state: 'preparing' | 'transferring' | 'ready' | 'starting' | 'started' | 'failed' | 'interrupted'
+  created: number
+  updated: number
+  source?: ProjectSource | null
+  cwd?: string | null
+  run?: { name: string; run_id: string; state: string; request_id: string } | null
+  error?: string | null
+}
+export type ProjectResult = { state: string; exit_code: number | null; log: string; run_id: string }
+type ProjectRequests = {
+  inspect: { path: string }
+  begin: { path: string; device: string; command?: string; shell: ProjectShell }
+  history: Record<string, never>
+  result: { id: string; direction: TransferDirection }
+}
+type ProjectReplies = {
+  inspect: ProjectInspection
+  begin: ProjectReceipt
+  history: { transfers: ProjectReceipt[] }
+  result: ProjectResult
+}
+export type ProjectFiles = { directory: string; entries: { name: string; path: string; bytes: number | null; directory: boolean }[]; truncated: boolean }
+export type StorageKind = 'shots' | 'observations' | 'recordings' | 'checks' | 'diagnostics' | 'outputs' | 'caches' | 'runners' | 'questions' | 'projects' | 'workspaces' | 'jobs' | 'archives'
+export type StorageRequest = { kind?: StorageKind; only?: string; older_than_days?: number; max_bytes?: number; apply?: string }
+export type StorageEntry = { id: string; kind: StorageKind; path: string; bytes: number; files: number; protected: string | null }
+export type StorageReport = {
+  logical_bytes: number
+  categories: Partial<Record<StorageKind, number>>
+  entries: StorageEntry[]
+  entry_count: number
+  entries_truncated: boolean
+  candidates: StorageEntry[]
+  more_candidates: boolean
+  preview_token: string
+  freed_bytes: number
+  errors: { path: string; error: string }[]
+}
+
 /// Что связанное устройство делало на этом: `at` — секунды Unix, `desk` — трогало рабочий стол.
 export type Activity = { at: number; who: string; what: string; desk: boolean }
 
@@ -158,6 +205,12 @@ export const api = {
   adminWindows: (action: 'show' | 'choose' | 'grant' | 'grant_all' | 'revoke', window?: number) =>
     invoke<AdminWindowsState>('admin_windows', { action, window }),
   adminScreen,
+  projectTransfer: <Action extends keyof ProjectRequests>(action: Action, request: ProjectRequests[Action]) =>
+    invoke<ProjectReplies[Action]>('project_transfer', { request: { action, ...request } }),
+  projectStorage: (id: string | null, request: StorageRequest = {}) =>
+    invoke<StorageReport>('project_storage', { id, request }),
+  projectFiles: (id: string | null, source: ProjectSource, directory: string) =>
+    invoke<ProjectFiles>('project_files', { id, source, directory }),
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),
   /// Версия новее этой, если есть в релизах.
@@ -183,6 +236,12 @@ export function blocked(d: DeviceRef, desk = false): string {
   }
   if (desk && d.locked) return 'Экран устройства заблокирован. Просмотр и ввод доступны после разблокировки.'
   return ''
+}
+
+export function supportsProjectFeature(status: Status | null, patch: number): boolean {
+  if (!status) return false
+  const [major, minor, currentPatch] = status.version.split('.').map(Number)
+  return major > 0 || minor > 1 || (minor === 1 && currentPatch >= patch)
 }
 
 export const onState = (cb: (s: Snapshot) => void): Promise<UnlistenFn> =>

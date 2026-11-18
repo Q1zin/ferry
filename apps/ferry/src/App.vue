@@ -21,6 +21,7 @@ import Settings from './components/Settings.vue'
 import HumanQuestions from './components/HumanQuestions.vue'
 import RunCenter from './components/RunCenter.vue'
 import Onboarding from './components/Onboarding.vue'
+import Projects from './components/Projects.vue'
 
 type View =
   | { kind: 'home' }
@@ -30,6 +31,7 @@ type View =
   | { kind: 'permissions' }
   | { kind: 'runs' }
   | { kind: 'onboarding' }
+  | { kind: 'projects'; incoming?: boolean }
 
 const snap = ref<Snapshot | null>(null)
 const view = ref<View>({ kind: 'home' })
@@ -102,6 +104,7 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); clearTimeout(notic
       <div class="primary-nav">
         <button :class="{active:view.kind==='home'}" @click="view={kind:'home'}">Устройства</button>
         <button :class="{active:view.kind==='runs'}" @click="view={kind:'runs'}">Прогоны</button>
+        <button v-if="desktop" :class="{active:view.kind==='projects'}" @click="view={kind:'projects'}">Проекты</button>
         <button :class="{active:view.kind==='onboarding'}" @click="view={kind:'onboarding'}">Подключить агента</button>
       </div>
       <nav v-if="snap && desktop">
@@ -142,6 +145,7 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); clearTimeout(notic
 
     <main>
       <RunCenter v-if="view.kind==='runs'" @say="say" />
+      <Projects v-else-if="desktop && view.kind==='projects'" :peers="snap?.peers ?? []" :incoming="view.incoming" />
       <Onboarding v-else-if="view.kind==='onboarding'" :snap="snap" @say="say" @pair="view={kind:'pairing'}" @permissions="view={kind:'permissions'}" @runs="view={kind:'runs'}" />
       <Device
         v-else-if="desktop && view.kind === 'device' && device"
@@ -151,6 +155,7 @@ onUnmounted(() => { disposed = true; clearTimeout(pollTimer); clearTimeout(notic
         :activity="snap?.activity"
         @say="say"
         @gone="view = { kind: 'home' }"
+        @incoming="view = { kind: 'projects', incoming: true }"
       />
       <Pairing
         v-else-if="view.kind === 'pairing' && snap"

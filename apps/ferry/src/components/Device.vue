@@ -25,7 +25,7 @@ const props = defineProps<{
   /// Журнал этого устройства: что делали связанные.
   activity?: Activity[]
 }>()
-const emit = defineEmits<{ say: [text: string, error?: boolean]; gone: [] }>()
+const emit = defineEmits<{ say: [text: string, error?: boolean]; gone: []; incoming: [] }>()
 
 const busy = ref('')
 const newName = ref('')
@@ -232,6 +232,7 @@ async function forget() {
         </li>
       </ul>
       <p v-else class="muted small">Пока ничего.</p>
+      <button @click="emit('incoming')">Принятые проекты</button>
     </div>
 
     <p v-if="!me && !device.online" class="card muted">
