@@ -36,7 +36,8 @@ mod native {
         GraphicsCaptureSession,
     };
     use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
-    use windows::Win32::Foundation::{HWND, RECT, RPC_E_CHANGED_MODE};
+    use windows::Graphics::SizeInt32;
+    use windows::Win32::Foundation::{ERROR_MOD_NOT_FOUND, HWND, RECT, RPC_E_CHANGED_MODE};
     use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
     use windows::Win32::Graphics::Direct3D11::{
         self as d3d, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -45,6 +46,9 @@ mod native {
         DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
     };
     use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
+    };
     use windows::Win32::System::WinRT::Direct3D11::{
         CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
     };
@@ -53,7 +57,7 @@ mod native {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
     };
-    use windows::core::{IInspectable, Interface, factory};
+    use windows::core::{HRESULT, IInspectable, Interface, factory, w};
 
     use super::{frame_offset, io};
     use crate::screen::{Window, admin, win};
@@ -250,6 +254,25 @@ mod native {
             .ok_or_else(|| io::Error::other("не удалось прочитать пиксели окна"))
     }
 
+    fn frame_size(frame: &Direct3D11CaptureFrame, geometry: &Geometry) -> io::Result<(u32, u32)> {
+        let content = frame.ContentSize().map_err(io::Error::other)?;
+        let size = (content.Width.max(0) as u32, content.Height.max(0) as u32);
+        if frame_offset(geometry.full, geometry.visible, size).is_err() {
+            let [left, top, right, bottom] = geometry.full;
+            let [x1, y1, x2, y2] = geometry.visible;
+            return Err(io::Error::other(format!(
+                "кадр {}×{} не совпал с окном {}×{} или видимой рамкой {}×{}",
+                content.Width,
+                content.Height,
+                right - left,
+                bottom - top,
+                x2 - x1,
+                y2 - y1
+            )));
+        }
+        Ok(size)
+    }
+
     fn surface(hwnd: HWND, geometry: &Geometry) -> io::Result<RgbaImage> {
         let _runtime = WinRt::init()?;
         if !GraphicsCaptureSession::IsSupported().map_err(io::Error::other)? {
@@ -259,12 +282,23 @@ mod native {
             .map_err(io::Error::other)?;
         let item: GraphicsCaptureItem =
             unsafe { interop.CreateForWindow(hwnd) }.map_err(io::Error::other)?;
-        let size = item.Size().map_err(io::Error::other)?;
-        let item_dimensions = (
-            u32::try_from(size.Width).unwrap_or_default(),
-            u32::try_from(size.Height).unwrap_or_default(),
-        );
-        frame_offset(geometry.full, geometry.visible, item_dimensions)?;
+        // On Windows 10 a capture callback can outlive Close and access the unloaded DLL.
+        let mut module = Default::default();
+        if let Err(error) = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_PIN,
+                w!("GraphicsCapture.dll"),
+                &mut module,
+            )
+        } && error.code() != HRESULT::from_win32(ERROR_MOD_NOT_FOUND.0)
+        {
+            return Err(io::Error::other(error));
+        }
+        let [left, top, right, bottom] = geometry.full;
+        let size = SizeInt32 {
+            Width: (right - left) as i32,
+            Height: (bottom - top) as i32,
+        };
         let (device, context, runtime) = device()?;
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &runtime,
@@ -292,21 +326,9 @@ mod native {
                     .recv_timeout(Duration::from_millis(1500))
                     .map_err(|_| io::Error::other("Windows не вернула кадр выбранного окна"))?;
                 let frame = pool.TryGetNextFrame().map_err(io::Error::other)?;
-                let result = (|| {
-                    let current = frame.ContentSize().map_err(io::Error::other)?;
-                    if current != size {
-                        return Err(io::Error::other(
-                            "размер поверхности изменился во время снимка",
-                        ));
-                    }
-                    pixels(
-                        &frame,
-                        &device,
-                        &context,
-                        item_dimensions.0,
-                        item_dimensions.1,
-                    )
-                })();
+                // Pixels outside ContentSize are undefined, even when the texture is larger.
+                let result = frame_size(&frame, geometry)
+                    .and_then(|(width, height)| pixels(&frame, &device, &context, width, height));
                 let _ = frame.Close();
                 result
             })();
