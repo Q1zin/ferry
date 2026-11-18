@@ -88,7 +88,7 @@ export type RunList = { checks: RunSummary[]; next_cursor: string | null; errors
 export type RunPhase = { name: string; job: string; run_id: string | null; started: number; finished_seen?: number | null; result: Record<string, unknown> | null }
 export type RunTarget = { device: string; state: string; duration_seconds?: number | null; phases: RunPhase[]; tests?: TestSummary; test_cases?: {count?: number; complete?: boolean; omitted_cases?: number; error?: string; preview_error?: string; preview?: {cases:{suite:string[];class:string;name:string;state:string;duration_seconds?:number;message?:string;detail?:string}[];more:number;complete:boolean}}; artifacts?: {id: string; name?: string; path?: string; bytes?: number}[]; errors?: string[]; cleanup_pending?: boolean; source?: unknown }
 export type RunReport = { id: string; profile: string; state: string; created?: number; duration_seconds?: number | null; worker_active?: boolean; results: RunTarget[] }
-export type SetupStatus = { agents: { id: 'claude' | 'codex'; available: boolean; skill_installed: boolean; mcp_configured: boolean; command: string | null; config_conflict?: boolean; error?: string | null }[]; cli_available: boolean; app_available: boolean }
+export type SetupStatus = { agents: { id: 'claude' | 'codex'; available: boolean; skill_installed: boolean; skill_state?: 'missing' | 'current' | 'upgrade_available' | 'custom' | 'unreadable'; mcp_configured: boolean; command: string | null; config_conflict?: boolean; error?: string | null }[]; cli_available: boolean; app_available: boolean }
 
 export const api = {
   state: () => desktop ? invoke<Snapshot>('state') : dashboard<Snapshot>({ action: 'snapshot' }),

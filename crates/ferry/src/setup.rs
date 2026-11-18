@@ -1,5 +1,6 @@
 //! Narrow installation for the two supported agents; existing foreign entries are preserved.
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::{self, Write},
@@ -9,6 +10,20 @@ use std::{
 };
 const SKILL: &str = include_str!("../../../skills/ferry/SKILL.md");
 const MARKER: &str = "<!-- Managed by ferry setup. -->\n";
+
+// Exact released training files, including versions installed before the backup existed.
+const RELEASED_SKILLS: &[&str] = &[
+    "4ededb1c376163490a00cb222e8dd94fe09312784407e1baac704bd9c2e667c9",
+    "00cb5edc34b0da079a3ef03e4d01e74d4ccdd9eb5d04382194fcbeb0d5e7e35b",
+    "940afe96b7d7b42c05ab2dae49ca9b1ddd527fc659f0505736b1f33541b522ce",
+    "f59b0a023f3812dd766ac0ea7bf7bd002e3a1cfa68effdd7904c05c94deb7c98",
+    "168edeca0a87543c87141902a34ee7f243b887b9fd710bbacf325e29c768bd58",
+    "172fcefb3b219b32a306b74ac97da523ad4b4358137bc0494f5b70d1a244d6a2",
+    "d44425e6fb3b3953eeffd75d5ca33960b4b9a6d7b3c85a0cc9ebcac233be209b",
+    "ff0da7c9116f548dfcdb8ad8ada5371f6ce54b4c030f19650b09f104e2fe8b16",
+    "f8efe6a11d7234531b11ebf59c03523bf5909ac85761ef9ec2c0f271dd5d5313",
+    "7da80148e3544f336fcade22254d061e379b55fbe8dbb131138e6865016f82cd",
+];
 fn executable(name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect();
@@ -106,17 +121,70 @@ fn ours(command: &str, args: &[String]) -> bool {
             .file_name()
             .is_some_and(|s| s == "ferry" || s == "ferry.exe")
 }
+fn mcp_path_error(command: &str, current: &Path) -> Option<String> {
+    let path = Path::new(command);
+    let reason = if !path.is_absolute() {
+        "MCP запускает ferry через PATH. VS Code, открытый отдельно от терминала, может не найти его."
+    } else if !path.is_file() {
+        "Записанный путь MCP больше не существует."
+    } else if path.canonicalize().ok() != current.canonicalize().ok() {
+        "MCP использует другой бинарник ferry."
+    } else {
+        return None;
+    };
+    Some(format!(
+        "{reason} В настройке MCP укажи абсолютную команду {} с аргументом mcp.",
+        current.display()
+    ))
+}
+
+fn backup(agent: &str) -> io::Result<PathBuf> {
+    Ok(ferry_core::ferry_home()?
+        .join("setup")
+        .join(format!("{agent}-skill.md")))
+}
+
+fn classify_skill(installed: &str, backup: Option<&str>) -> &'static str {
+    if installed == SKILL {
+        return "current";
+    }
+    let normalized = installed.replace("\r\n", "\n");
+    let body = normalized.strip_prefix(MARKER).unwrap_or(&normalized);
+    let hash = format!("{:x}", Sha256::digest(body.as_bytes()));
+    if Some(installed) == backup || body == SKILL || RELEASED_SKILLS.contains(&hash.as_str()) {
+        "upgrade_available"
+    } else {
+        "custom"
+    }
+}
+
+fn skill_state(skill: &Path, backup: &Path) -> io::Result<&'static str> {
+    match fs::read_to_string(skill) {
+        Ok(installed) => Ok(classify_skill(
+            &installed,
+            fs::read_to_string(backup).ok().as_deref(),
+        )),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok("missing"),
+        Err(e) => Err(e),
+    }
+}
 fn status() -> io::Result<Value> {
     let mut agents = Vec::new();
+    let current = std::env::current_exe()?;
     for id in ["claude", "codex"] {
         let exe = executable(id);
         let configuration = config(id, exe.as_deref());
         let (configured, conflict, error) = match configuration {
-            Ok(Some((command, args))) => (ours(&command, &args), !ours(&command, &args), None),
+            Ok(Some((command, args))) if ours(&command, &args) => {
+                let problem = mcp_path_error(&command, &current);
+                (problem.is_none(), false, problem)
+            }
+            Ok(Some(_)) => (false, true, None),
             Ok(None) => (false, false, None),
             Err(e) => (false, false, Some(e.to_string())),
         };
-        agents.push(json!({"id":id,"available":exe.is_some(),"command":exe,"skill_installed":skill_path(id)?.is_file(),"mcp_configured":configured,"config_conflict":conflict,"error":error}));
+        let skill = skill_state(&skill_path(id)?, &backup(id)?).unwrap_or("unreadable");
+        agents.push(json!({"id":id,"available":exe.is_some(),"command":exe,"skill_installed":skill!="missing","skill_state":skill,"mcp_configured":configured,"config_conflict":conflict,"error":error}));
     }
     let app_available = matches!(
         ferry_core::control::call_session_timeout(
@@ -140,28 +208,17 @@ fn install(agent: &str) -> io::Result<Value> {
     let existing = config(agent, Some(&exe))?;
     let current = std::env::current_exe()?;
     if let Some((command, args)) = &existing {
-        let configured = if Path::new(command).is_absolute() {
-            Some(PathBuf::from(command))
-        } else {
-            executable(command)
-        };
-        if !ours(command, args)
-            || configured.and_then(|p| p.canonicalize().ok()) != current.canonicalize().ok()
-        {
+        if !ours(command, args) {
             return Err(io::Error::other(
-                "MCP ferry уже настроен на другой или недоступный путь; запись сохранена. Исправь её через CLI агента перед установкой.",
+                "Имя MCP ferry занято другой конфигурацией. Проверь настройки агента.",
             ));
         }
+        if let Some(problem) = mcp_path_error(command, &current) {
+            return Err(io::Error::other(problem));
+        }
     }
-    let managed = ferry_core::ferry_home()?
-        .join("setup")
-        .join(format!("{agent}-skill.md"));
-    let old = fs::read_to_string(&skill).ok();
-    let preserved = old.as_ref().is_some_and(|old| {
-        old != SKILL
-            && old != &format!("{MARKER}{SKILL}")
-            && fs::read_to_string(&managed).ok().as_ref() != Some(old)
-    });
+    let managed = backup(agent)?;
+    let preserved = skill_state(&skill, &managed)? == "custom";
     if existing.is_none() {
         let executable = current
             .to_str()
@@ -201,9 +258,8 @@ fn install(agent: &str) -> io::Result<Value> {
     if !preserved {
         fs::create_dir_all(skill.parent().unwrap())?;
         fs::create_dir_all(managed.parent().unwrap())?;
-        let contents = format!("{MARKER}{SKILL}");
-        ferry_core::write_private(&skill, &contents)?;
-        ferry_core::write_private(&managed, &contents)?;
+        ferry_core::write_private(&skill, SKILL)?;
+        ferry_core::write_private(&managed, SKILL)?;
     }
     Ok(
         json!({"schema_version":1,"agent":agent,"skill_file":skill,"skill_preserved":preserved,"warning":if preserved{Some("Существующий изменённый скилл сохранён. Новые команды доступны через MCP.")}else{None},"mcp_configured":true,"restart_required":true,"message":"Перезапусти сессию агента, чтобы загрузить инструменты и скилл ferry"}),
@@ -293,6 +349,28 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn skill_updates_only_recognized_contents() {
+        assert!(SKILL.starts_with("---\n"));
+        assert_eq!(classify_skill(SKILL, None), "current");
+        assert_eq!(
+            classify_skill(&format!("{MARKER}{SKILL}"), None),
+            "upgrade_available"
+        );
+        assert_eq!(
+            classify_skill("saved old text", Some("saved old text")),
+            "upgrade_available"
+        );
+        assert_eq!(
+            classify_skill(&format!("{MARKER}{SKILL}custom"), None),
+            "custom"
+        );
+        assert!(
+            mcp_path_error("ferry", Path::new("/apps/ferry"))
+                .unwrap()
+                .contains("PATH")
+        );
+    }
     #[test]
     fn preserves_foreign_server_and_templates_are_valid_json() {
         assert!(ours(
