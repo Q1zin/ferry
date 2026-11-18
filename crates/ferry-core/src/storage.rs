@@ -8,7 +8,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io,
     path::{Path, PathBuf},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -55,6 +55,7 @@ struct Unit {
     modified: u64,
     fingerprint: String,
     protected: Option<String>,
+    measurement_complete: bool,
 }
 #[derive(Default)]
 struct Measure {
@@ -65,14 +66,23 @@ struct Measure {
 }
 struct Scan {
     entries: usize,
-    started: Instant,
+    deadline: Instant,
+    limit: usize,
 }
 impl Scan {
+    fn unit(deadline: Instant) -> Self {
+        Self {
+            entries: 0,
+            deadline: deadline.min(Instant::now() + Duration::from_secs(2)),
+            limit: 100_000,
+        }
+    }
     fn tick(&mut self, depth: usize) -> io::Result<()> {
         self.entries += 1;
-        if self.entries > 1_000_000 || depth > 64 || self.started.elapsed().as_secs() > 30 {
-            return Err(io::Error::other(
-                "storage: предел сканирования (1 млн файлов / 64 уровня / 30 с), ничего не удалено",
+        if self.entries > self.limit || depth > 64 || Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "storage: достигнут предел измерения",
             ));
         }
         Ok(())
@@ -85,7 +95,13 @@ impl Scan {
         metadata.modified()?.hash(&mut m.hash);
         m.modified = m.modified.max(seconds(metadata.modified()?));
         if metadata.is_dir() && !is_link(&metadata) {
-            for child in children(path)? {
+            let mut children = Vec::new();
+            for child in fs::read_dir(path)? {
+                self.tick(depth + 1)?;
+                children.push(child?.path());
+            }
+            children.sort();
+            for child in children {
                 self.measure(&child, m, depth + 1)?;
             }
         } else {
@@ -567,9 +583,9 @@ impl Active {
 }
 fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result<Unit> {
     let mut m = Measure::default();
-    scan.measure(path, &mut m, 0)?;
+    let measurement_complete = scan.measure(path, &mut m, 0).is_ok();
     let mut protected = active.reason(path, kind);
-    if is_link(&fs::symlink_metadata(path)?) {
+    if fs::symlink_metadata(path).is_ok_and(|meta| is_link(&meta)) {
         protected = Some("ссылка: внешние каталоги не обходятся".into());
     }
     if !kind.removable() {
@@ -582,8 +598,10 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
             .into(),
         );
     }
-    if (kind == Kind::Caches
-        || (kind == Kind::Outputs && path.components().any(|c| c.as_os_str() == ".ferry-checks")))
+    if measurement_complete
+        && (kind == Kind::Caches
+            || (kind == Kind::Outputs
+                && path.components().any(|c| c.as_os_str() == ".ferry-checks")))
         && let Some(reason) = source_protection(path, kind)
     {
         protected = Some(reason);
@@ -604,7 +622,8 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
             _ => {}
         }
     }
-    if kind == Kind::Checks
+    if measurement_complete
+        && kind == Kind::Checks
         && path.join("operation.json").exists()
         && children(path)?.iter().all(|p| {
             !p.file_name()
@@ -613,6 +632,11 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
     {
         protected = Some("проверка ещё не получила результаты".into());
     }
+    if !measurement_complete {
+        protected = Some(
+            "размер измерен не полностью (лимит или ошибка чтения); удаление запрещено".into(),
+        );
+    }
     Ok(Unit {
         id: identity(path, kind),
         kind,
@@ -620,8 +644,13 @@ fn unit(scan: &mut Scan, path: &Path, kind: Kind, active: &Active) -> io::Result
         bytes: m.bytes,
         files: m.files,
         modified: m.modified,
-        fingerprint: format!("{:016x}", m.hash.finish()),
+        fingerprint: if measurement_complete {
+            format!("{:016x}", m.hash.finish())
+        } else {
+            "incomplete".into()
+        },
         protected,
+        measurement_complete,
     })
 }
 fn source_protection(path: &Path, kind: Kind) -> Option<String> {
@@ -662,107 +691,230 @@ struct ProjectCaches {
     extras: Vec<String>,
 }
 
-fn project(
-    scan: &mut Scan,
-    root: &Path,
-    active: &Active,
-    units: &mut Vec<Unit>,
-    state: &Path,
-    home: &Path,
-) -> io::Result<()> {
-    if is_link(&fs::symlink_metadata(root)?) {
-        units.push(unit(scan, root, Kind::Projects, active)?);
-        return Ok(());
-    }
-    let kind = if root.join(".git/ferry-workspace.json").exists() {
-        Kind::Workspaces
-    } else {
-        Kind::Projects
-    };
-    let (paths, extras) = workspace_caches(state, home, root)?;
-    let caches = ProjectCaches {
-        root: root.into(),
-        paths,
-        extras,
-    };
-    let mut retained = Measure::default();
-    project_walk(scan, root, active, units, &mut retained, 0, &caches)?;
-    units.push(Unit {
-        id: identity(root, kind),
-        kind,
-        path: root.into(),
-        bytes: retained.bytes,
-        files: retained.files,
-        modified: retained.modified,
-        fingerprint: format!("{:016x}", retained.hash.finish()),
-        protected: Some("исходники не удаляются; caches/outputs учитываются отдельно".into()),
-    });
-    Ok(())
+struct Inventory<'a> {
+    request: &'a Request,
+    active: Active,
+    units: Vec<Unit>,
+    deadline: Instant,
+    truncated: bool,
 }
-fn project_walk(
-    scan: &mut Scan,
-    path: &Path,
-    active: &Active,
-    units: &mut Vec<Unit>,
-    retained: &mut Measure,
-    depth: usize,
-    caches: &ProjectCaches,
-) -> io::Result<()> {
-    scan.tick(depth)?;
-    let meta = fs::symlink_metadata(path)?;
-    if meta.is_dir() && !is_link(&meta) {
-        let parent = path.parent().unwrap_or(path);
-        let name = path.file_name().unwrap_or_default();
-        let cache = (name == "target" && parent.join("Cargo.toml").is_file())
-            || (name == "node_modules" && parent.join("package.json").is_file())
-            || caches.paths.iter().any(|cache| cache == path);
-        if cache {
-            let mut entry = unit(scan, path, Kind::Caches, active)?;
-            let relative = path
-                .strip_prefix(&caches.root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            if caches
-                .extras
+impl Inventory<'_> {
+    fn only_done(&self) -> bool {
+        self.request.only.is_some() && !self.units.is_empty()
+    }
+    fn kind(&self, kind: Kind) -> bool {
+        self.request.kind.is_none_or(|selected| selected == kind)
+    }
+    fn wants(&self, path: &Path, kind: Kind) -> bool {
+        self.kind(kind)
+            && self
+                .request
+                .only
+                .as_ref()
+                .is_none_or(|id| *id == identity(path, kind))
+    }
+    fn add(&mut self, path: &Path, kind: Kind, protection: Option<String>) -> io::Result<()> {
+        if !self.wants(path, kind)
+            || self
+                .units
                 .iter()
-                .any(|extra| crate::project::paths_intersect(&relative, extra))
-            {
-                entry.protected = Some("каталог пересекается с защищённым files проекта".into());
-            }
-            units.push(entry);
-            return Ok(());
-        }
-        if name == ".ferry-checks"
-            || (name == "ferry-inputs"
-                && parent.file_name().is_some_and(|p| p == ".git")
-                && parent.join("ferry-workspace.json").is_file())
+                .any(|unit| unit.kind == kind && unit.path == path)
         {
-            for child in children(path)? {
-                units.push(unit(scan, &child, Kind::Outputs, active)?);
-            }
             return Ok(());
         }
-        for child in children(path)? {
-            project_walk(scan, &child, active, units, retained, depth + 1, caches)?;
+        let mut entry = unit(&mut Scan::unit(self.deadline), path, kind, &self.active)?;
+        self.truncated |= !entry.measurement_complete;
+        if protection.is_some() && entry.measurement_complete {
+            entry.protected = protection;
         }
-    } else {
-        retained.bytes = retained.bytes.saturating_add(meta.len());
-        retained.files += 1;
+        self.units.push(entry);
+        Ok(())
     }
-    retained.modified = retained.modified.max(seconds(meta.modified()?));
-    path.hash(&mut retained.hash);
-    meta.len().hash(&mut retained.hash);
-    meta.modified()?.hash(&mut retained.hash);
-    Ok(())
+    fn project(&mut self, root: &Path, state: &Path, home: &Path) -> io::Result<()> {
+        if Instant::now() >= self.deadline {
+            self.truncated = true;
+            return Ok(());
+        }
+        if is_link(&fs::symlink_metadata(root)?) {
+            return self.add(root, Kind::Projects, None);
+        }
+        let kind = if root.join(".git/ferry-workspace.json").exists() {
+            Kind::Workspaces
+        } else {
+            Kind::Projects
+        };
+        let retain = self.wants(root, kind);
+        if !retain && !self.kind(Kind::Caches) && !self.kind(Kind::Outputs) {
+            return Ok(());
+        }
+        let (paths, extras) = workspace_caches(state, home, root)?;
+        let caches = ProjectCaches {
+            root: root.into(),
+            paths,
+            extras,
+        };
+        for (name, manifest) in [("target", "Cargo.toml"), ("node_modules", "package.json")] {
+            let cache = root.join(name);
+            if cache.is_dir() && root.join(manifest).is_file() {
+                self.cache(&cache, &caches)?;
+                if self.only_done() {
+                    return Ok(());
+                }
+            }
+        }
+        // Точные настроенные пути известны без обхода больших исходников CEF/vendor.
+        for cache in &caches.paths {
+            let inside_builtin = cache
+                .ancestors()
+                .skip(1)
+                .take_while(|path| *path != root)
+                .any(|path| {
+                    let parent = path.parent().unwrap();
+                    (path.file_name().is_some_and(|n| n == "target")
+                        && parent.join("Cargo.toml").is_file())
+                        || (path.file_name().is_some_and(|n| n == "node_modules")
+                            && parent.join("package.json").is_file())
+                });
+            if cache.is_dir() && !inside_builtin {
+                self.cache(cache, &caches)?;
+                if self.only_done() {
+                    return Ok(());
+                }
+            }
+        }
+        let mut retained = Measure::default();
+        let mut discovery = Scan {
+            entries: 0,
+            deadline: self.deadline,
+            limit: 1_000_000,
+        };
+        let complete = self
+            .project_walk(root, &mut retained, &mut discovery, 0, &caches, retain)
+            .is_ok();
+        self.truncated |= !complete;
+        if retain {
+            self.units.push(Unit {
+                id: identity(root, kind),
+                kind,
+                path: root.into(),
+                bytes: retained.bytes,
+                files: retained.files,
+                modified: retained.modified,
+                fingerprint: if complete {
+                    format!("{:016x}", retained.hash.finish())
+                } else {
+                    "incomplete".into()
+                },
+                protected: Some(
+                    if complete {
+                        "исходники не удаляются; caches/outputs учитываются отдельно"
+                    } else {
+                        "размер исходников измерен не полностью; удаление запрещено"
+                    }
+                    .into(),
+                ),
+                measurement_complete: complete,
+            });
+        }
+        Ok(())
+    }
+    fn cache(&mut self, path: &Path, caches: &ProjectCaches) -> io::Result<()> {
+        let relative = path
+            .strip_prefix(&caches.root)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let protected = caches
+            .extras
+            .iter()
+            .any(|extra| crate::project::paths_intersect(&relative, extra))
+            .then(|| "каталог пересекается с защищённым files проекта".into());
+        self.add(path, Kind::Caches, protected)
+    }
+    fn project_walk(
+        &mut self,
+        path: &Path,
+        retained: &mut Measure,
+        scan: &mut Scan,
+        depth: usize,
+        caches: &ProjectCaches,
+        retain: bool,
+    ) -> io::Result<()> {
+        if self.only_done() {
+            return Ok(());
+        }
+        scan.tick(depth)?;
+        let meta = fs::symlink_metadata(path)?;
+        if meta.is_dir() && !is_link(&meta) {
+            let parent = path.parent().unwrap_or(path);
+            let name = path.file_name().unwrap_or_default();
+            let cache = (name == "target" && parent.join("Cargo.toml").is_file())
+                || (name == "node_modules" && parent.join("package.json").is_file())
+                || caches.paths.iter().any(|cache| cache == path);
+            if cache {
+                self.cache(path, caches)?;
+                return Ok(());
+            }
+            if name == ".ferry-checks"
+                || (name == "ferry-inputs"
+                    && parent.file_name().is_some_and(|p| p == ".git")
+                    && parent.join("ferry-workspace.json").is_file())
+            {
+                if self.kind(Kind::Outputs) {
+                    for child in children(path)? {
+                        self.add(&child, Kind::Outputs, None)?;
+                    }
+                }
+                return Ok(());
+            }
+            if !retain && name == ".git" {
+                let inputs = path.join("ferry-inputs");
+                if self.kind(Kind::Outputs) && inputs.is_dir() {
+                    self.project_walk(&inputs, retained, scan, depth + 1, caches, false)?;
+                }
+                return Ok(());
+            }
+            let mut children = Vec::new();
+            for child in fs::read_dir(path)? {
+                scan.tick(depth + 1)?;
+                let child = child?;
+                // Directory enumeration already has type data; source files need no stat for caches.
+                if retain || child.file_type()?.is_dir() {
+                    children.push(child.path());
+                }
+            }
+            children.sort_by_key(|child| {
+                (
+                    child
+                        .file_name()
+                        .is_none_or(|n| n != "target" && n != "node_modules"),
+                    child.clone(),
+                )
+            });
+            for child in children {
+                self.project_walk(&child, retained, scan, depth + 1, caches, retain)?;
+            }
+        } else if retain {
+            retained.bytes = retained.bytes.saturating_add(meta.len());
+            retained.files += 1;
+        }
+        if retain {
+            retained.modified = retained.modified.max(seconds(meta.modified()?));
+            path.hash(&mut retained.hash);
+            meta.len().hash(&mut retained.hash);
+            meta.modified()?.hash(&mut retained.hash);
+        }
+        Ok(())
+    }
 }
-fn inventory(state: &Path, home: &Path) -> io::Result<Vec<Unit>> {
-    let active = Active::collect(state, home)?;
-    let mut scan = Scan {
-        entries: 0,
-        started: Instant::now(),
+fn inventory(state: &Path, home: &Path, request: &Request) -> io::Result<(Vec<Unit>, bool)> {
+    let mut inventory = Inventory {
+        request,
+        active: Active::collect(state, home)?,
+        units: vec![],
+        deadline: Instant::now() + Duration::from_secs(20),
+        truncated: false,
     };
-    let mut units = Vec::new();
     for (folder, kind) in [
         ("shots", Kind::Shots),
         ("observations", Kind::Observations),
@@ -775,31 +927,51 @@ fn inventory(state: &Path, home: &Path) -> io::Result<Vec<Unit>> {
         ("runners", Kind::Runners),
         ("questions", Kind::Questions),
     ] {
+        if !inventory.kind(kind) {
+            continue;
+        }
         let base = state.join(folder);
         if base.exists() && is_link(&fs::symlink_metadata(&base)?) {
-            units.push(unit(&mut scan, &base, kind, &active)?);
+            inventory.add(&base, kind, None)?;
             continue;
         }
         for child in children(&base)? {
-            units.push(unit(&mut scan, &child, kind, &active)?);
+            inventory.add(&child, kind, None)?;
+            if inventory.only_done() {
+                break;
+            }
         }
     }
     for (folder, kind) in [("jobs", Kind::Jobs), ("runs", Kind::Archives)] {
         let base = state.join(folder);
         if base.exists() {
-            units.push(unit(&mut scan, &base, kind, &active)?);
+            inventory.add(&base, kind, None)?;
         }
     }
-    let projects = home.join("ferry");
-    if projects.exists() && is_link(&fs::symlink_metadata(&projects)?) {
-        units.push(unit(&mut scan, &projects, Kind::Projects, &active)?);
-    } else {
-        for root in children(&projects)? {
-            project(&mut scan, &root, &active, &mut units, state, home)?;
+    if !inventory.only_done()
+        && [
+            Kind::Projects,
+            Kind::Workspaces,
+            Kind::Caches,
+            Kind::Outputs,
+        ]
+        .into_iter()
+        .any(|kind| inventory.kind(kind))
+    {
+        let projects = home.join("ferry");
+        if projects.exists() && is_link(&fs::symlink_metadata(&projects)?) {
+            inventory.add(&projects, Kind::Projects, None)?;
+        } else {
+            for root in children(&projects)? {
+                inventory.project(&root, state, home)?;
+                if inventory.only_done() {
+                    break;
+                }
+            }
         }
     }
-    units.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(units)
+    inventory.units.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((inventory.units, inventory.truncated))
 }
 
 pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value> {
@@ -831,7 +1003,7 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
     if request.apply.is_some() && request.kind == Some(Kind::Questions) {
         questions.lock()?;
     }
-    let units = inventory(state, home)?;
+    let (units, scan_truncated) = inventory(state, home, &request)?;
     let mut totals: BTreeMap<Kind, u64> = BTreeMap::new();
     for u in &units {
         *totals.entry(u.kind).or_default() += u.bytes;
@@ -905,10 +1077,7 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
                 if is_link(&meta) {
                     return Err(io::Error::other("каталог заменён ссылкой"));
                 }
-                let mut scan = Scan {
-                    entries: 0,
-                    started: Instant::now(),
-                };
+                let mut scan = Scan::unit(Instant::now() + Duration::from_secs(2));
                 let after = unit(&mut scan, &u.path, u.kind, &current)?;
                 if after.fingerprint != u.fingerprint || after.protected.is_some() {
                     return Err(io::Error::other("кандидат изменился после preview"));
@@ -938,6 +1107,7 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
         })
         .collect();
     let count = entries.len();
+    let scan_truncated = scan_truncated || count > 2000;
     let entries: Vec<_> = entries.into_iter().take(2000).collect();
     let actual_remaining = selected
         .iter()
@@ -945,7 +1115,7 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
         .sum::<u64>()
         .saturating_sub(freed);
     Ok(
-        json!({"measured_at":crate::now(),"scan_complete":true,"logical_bytes":bytes,"categories":totals,"entries":entries,"entry_count":count,"entries_truncated":count>2000,"kind":request.kind,"only":request.only,"candidates":candidates,"more_candidates":more_candidates,"preview_token":token,"planned_remaining_bytes":remaining,"actual_remaining_bytes":actual_remaining,"budget_met":request.max_bytes.is_none_or(|max|if request.apply.is_some(){actual_remaining<=max}else{remaining<=max}),"applied":request.apply.is_some(),"deleted":deleted,"freed_bytes":freed,"errors":errors,"note":"Логические размеры файлов; исходники, архивы pinned и idempotency receipts не удаляются. Файлы моложе минуты и observations моложе 5 минут защищены. Активные задачи ferry защищены; процессы сборки, запущенные вне ferry, не обнаруживаются — перед очисткой их нужно завершить."}),
+        json!({"measured_at":crate::now(),"scan_complete":!scan_truncated,"scan_truncated":scan_truncated,"logical_bytes":bytes,"categories":totals,"entries":entries,"entry_count":count,"entries_truncated":count>2000,"kind":request.kind,"only":request.only,"candidates":candidates,"more_candidates":more_candidates,"preview_token":token,"planned_remaining_bytes":remaining,"actual_remaining_bytes":actual_remaining,"budget_met":!scan_truncated && request.max_bytes.is_none_or(|max|if request.apply.is_some(){actual_remaining<=max}else{remaining<=max}),"applied":request.apply.is_some(),"deleted":deleted,"freed_bytes":freed,"errors":errors,"note":"Логические размеры файлов; исходники, архивы pinned и idempotency receipts не удаляются. Файлы моложе минуты и observations моложе 5 минут защищены. Активные задачи ferry защищены; процессы сборки, запущенные вне ferry, не обнаруживаются — перед очисткой их нужно завершить."}),
     )
 }
 
@@ -982,6 +1152,72 @@ mod tests {
         let prepared = crate::workspace::prepare_local(&home, &project, &source, &[]).unwrap();
         let root = PathBuf::from(prepared["cwd"].as_str().unwrap());
         (temp, state, home, source, root)
+    }
+
+    #[test]
+    fn partial_cache_does_not_block_small_cache_preview_and_only_skips_it() {
+        let (temp, state, home) = fixture();
+        let project = home.join("ferry/app");
+        let large = project.join("target");
+        let mut deep = large.clone();
+        for _ in 0..66 {
+            deep = deep.join("d");
+        }
+        fs::create_dir_all(deep).unwrap();
+        old(&large);
+        fs::write(project.join("package.json"), "{}").unwrap();
+        let small = project.join("node_modules");
+        fs::create_dir(&small).unwrap();
+        fs::write(small.join("object"), "small").unwrap();
+        old(&small);
+        let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
+        assert_eq!(preview["scan_truncated"], true);
+        let incomplete = preview["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["path"] == json!(large))
+            .unwrap();
+        assert_eq!(incomplete["measurement_complete"], false);
+        assert!(incomplete["protected"].is_string());
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(preview["candidates"][0]["path"], json!(small));
+        let mut only = request(Kind::Caches);
+        only.only = Some(identity(&small, Kind::Caches));
+        let exact = execute(&state, &home, only).unwrap();
+        assert_eq!(exact["scan_complete"], true);
+        assert_eq!(exact["entry_count"], 1);
+        assert_eq!(exact["logical_bytes"], 5);
+        let unrelated = execute(&state, &home, request(Kind::Shots)).unwrap();
+        assert_eq!(unrelated["scan_complete"], true);
+        assert_eq!(unrelated["entry_count"], 0);
+        // Неполный fingerprint большого соседа не меняет разрешение удалить точного кандидата.
+        fs::write(large.join("object"), "changed large cache").unwrap();
+        let mut apply = request(Kind::Caches);
+        apply.apply = Some(preview["preview_token"].as_str().unwrap().into());
+        let result = execute(&state, &home, apply).unwrap();
+        assert_eq!(result["deleted"].as_array().unwrap().len(), 1);
+        assert!(large.is_dir());
+        assert!(!small.exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn exact_cache_request_never_measures_unrelated_source_tree() {
+        let (temp, state, home) = fixture();
+        let project = home.join("ferry/app");
+        let mut deep = project.join("vendor");
+        for _ in 0..66 {
+            deep = deep.join("d");
+        }
+        fs::create_dir_all(deep).unwrap();
+        let mut q = request(Kind::Caches);
+        q.only = Some(identity(&project.join("target"), Kind::Caches));
+        let preview = execute(&state, &home, q).unwrap();
+        assert_eq!(preview["scan_complete"], true);
+        assert_eq!(preview["entry_count"], 1);
+        assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
