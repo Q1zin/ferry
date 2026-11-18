@@ -184,7 +184,8 @@ impl Active {
                         {
                             unfinished = true;
                             if let Some(workspace) = value["source"]["workspace"].as_str() {
-                                active.paths.push(home.join("ferry").join(workspace));
+                                let name = crate::workspace::project_name(home, workspace)?;
+                                active.paths.push(home.join("ferry").join(name.as_ref()));
                             }
                         }
                     } else {

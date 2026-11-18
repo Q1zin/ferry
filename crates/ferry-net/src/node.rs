@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferry_core::mode::Mode;
-use ferry_core::{desk, exit_code, info, jobs, screen, sh_quote};
+use ferry_core::{desk, exit_code, info, jobs, screen, sh_quote, workspace};
 use irpc::WithChannels;
 use irpc::channel::mpsc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -127,7 +127,8 @@ impl Node {
         match dir {
             Dir::Home => Ok(self.home.clone()),
             Dir::Project { name, prefix } => {
-                let root = self.home.join("ferry").join(name);
+                let physical = workspace::project_name(&self.home, name)?;
+                let root = self.home.join("ferry").join(physical.as_ref());
                 if !root.join(".git").exists() {
                     let me = self.me.borrow().name.clone();
                     return Err(Fail::new(format!(
@@ -422,9 +423,10 @@ impl Node {
             DeviceMessage::SyncPrepare(WithChannels { inner, tx, .. }) => {
                 let result = async {
                     self.check(false)?;
-                    let script = ferry_core::sync::changes_script(&inner.project, &inner.keep);
+                    let name = workspace::project_name(&self.home, &inner.project)?;
+                    let script = ferry_core::sync::changes_script(&name, &inner.keep);
                     let changes = self.shell(&script, &self.home).await?;
-                    let repo = self.home.join("ferry").join(&inner.project);
+                    let repo = self.home.join("ferry").join(name.as_ref());
                     let head = self
                         .shell("git rev-parse -q --verify HEAD", &repo)
                         .await
@@ -442,7 +444,8 @@ impl Node {
             }) => {
                 let result = async {
                     self.check(false)?;
-                    let repo = self.home.join("ferry").join(&inner.project);
+                    let name = workspace::project_name(&self.home, &inner.project)?;
+                    let repo = self.home.join("ferry").join(name.as_ref());
                     files::recv_file(&mut rx, &repo.join(".git/ferry.bundle")).await?;
                     // Пустой бандл — снимок уже здесь, нужен только checkout поверх правок.
                     let script = format!(

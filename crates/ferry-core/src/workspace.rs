@@ -2,11 +2,15 @@
 use crate::jobs::execution::Source;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+const SHORT_NAME_LEN: usize = 27;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Action {
@@ -19,6 +23,58 @@ pub struct Request {
     pub source: Source,
     pub action: Action,
 }
+
+#[derive(Deserialize, Serialize)]
+struct Claim {
+    #[serde(flatten)]
+    source: Source,
+    #[serde(default)]
+    short: bool,
+}
+
+fn claim_path(home: &Path, workspace: &str) -> PathBuf {
+    home.join(".ferry/workspace-claims")
+        .join(format!("{workspace}.json"))
+}
+
+fn read_claim(path: &Path) -> io::Result<Option<Claim>> {
+    no_link(path)?;
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn short_name(workspace: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(workspace.as_bytes()));
+    format!(".w-{}", &digest[..SHORT_NAME_LEN - 3])
+}
+
+/// Resolve a logical project name without changing the protocol or stored run receipts.
+pub fn project_name<'a>(home: &Path, name: &'a str) -> io::Result<Cow<'a, str>> {
+    if name.len() <= 200
+        && name.contains("--")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+        && let Some(claim) = read_claim(&claim_path(home, name))?
+        && claim.short
+    {
+        if claim.source.workspace != name {
+            return Err(io::Error::other("неверная метка workspace"));
+        }
+        validate(&claim.source)?;
+        let short = short_name(name);
+        let parent = home.join("ferry");
+        no_link(&parent)?;
+        no_link(&parent.join(&short))?;
+        no_link(&parent.join(&short).join(".git"))?;
+        return Ok(Cow::Owned(short));
+    }
+    Ok(Cow::Borrowed(name))
+}
+
 fn component(s: &str) -> io::Result<()> {
     if s.is_empty()
         || s.len() > 120
@@ -89,29 +145,41 @@ fn no_link(path: &Path) -> io::Result<()> {
     }
 }
 pub fn execute(home: &Path, request: Request) -> io::Result<Value> {
+    execute_with_layout(home, request, cfg!(windows))
+}
+
+fn execute_with_layout(home: &Path, request: Request, shorten: bool) -> io::Result<Value> {
     validate(&request.source)?;
+    let workspace = &request.source.workspace;
+    let _guard = lock(&home.join(".ferry"), &format!("claim-{workspace}"))?;
     let parent = home.join("ferry");
-    let root = parent.join(&request.source.workspace);
     no_link(&parent)?;
+    let legacy = parent.join(workspace);
+    let claim = claim_path(home, workspace);
+    let saved = read_claim(&claim)?;
+    let short = if let Some(saved) = &saved {
+        saved.short
+    } else {
+        no_link(&legacy)?;
+        shorten && workspace.len() > SHORT_NAME_LEN && !legacy.exists()
+    };
+    let root = if short {
+        parent.join(short_name(workspace))
+    } else {
+        legacy
+    };
     no_link(&root)?;
     no_link(&root.join(".git"))?;
     let marker = root.join(".git/ferry-workspace.json");
-    let claims = home.join(".ferry/workspace-claims");
-    let _guard = lock(
-        &home.join(".ferry"),
-        &format!("claim-{}", request.source.workspace),
-    )?;
-    let claim = claims.join(format!("{}.json", request.source.workspace));
-    if marker.exists() {
+    if (!short || saved.is_some()) && marker.exists() {
         let saved: Source = serde_json::from_slice(&fs::read(&marker)?)?;
         if saved != request.source {
             return Err(io::Error::other("workspace id уже связан с другим снимком"));
         }
         return Ok(json!({"source":saved,"cwd":root,"ready":true,"reused":true}));
     }
-    let claimed = if claim.exists() {
-        let saved: Source = serde_json::from_slice(&fs::read(&claim)?)?;
-        if saved != request.source {
+    let claimed = if let Some(saved) = saved {
+        if saved.source != request.source {
             return Err(io::Error::other("workspace id уже занят другим снимком"));
         }
         true
@@ -130,8 +198,12 @@ pub fn execute(home: &Path, request: Request) -> io::Result<Value> {
         if !claimed {
             fs::create_dir_all(&parent)?;
             fs::create_dir(&root)?;
-            fs::create_dir_all(&claims)?;
-            crate::write_private(&claim, &serde_json::to_string(&request.source)?)?;
+            fs::create_dir_all(home.join(".ferry/workspace-claims"))?;
+            let saved = Claim {
+                source: request.source.clone(),
+                short,
+            };
+            crate::write_private(&claim, &serde_json::to_string(&saved)?)?;
         } else {
             fs::create_dir_all(&root)?;
         }
@@ -164,8 +236,11 @@ pub fn prepare_local(
     if state["ready"] == true {
         return Ok(state);
     }
-    let dest = home.join("ferry").join(&source.workspace);
-    fs::create_dir_all(&dest)?;
+    let name = project_name(home, &source.workspace)?;
+    let dest = home.join("ferry").join(name.as_ref());
+    let _copy_guard = (name.as_ref() != source.workspace)
+        .then(|| lock(&home.join(".ferry"), name.as_ref()))
+        .transpose()?;
     if !dest.join(".git").exists() {
         git(&dest, &["init", "-q"])?;
     }
@@ -338,6 +413,59 @@ pub fn patch(root: &Path, patch: &Path, apply: Option<&str>) -> io::Result<Value
 mod tests {
     use super::*;
     #[test]
+    fn short_layout_preserves_legacy_and_resolves_distinct_workspaces() {
+        let home = std::env::temp_dir().join(format!(
+            "ferry-workspace-layout-{}",
+            crate::jobs::unique_id()
+        ));
+        let project = "long-project-name".repeat(5);
+        let commit = "a".repeat(40);
+        let tree = "b".repeat(40);
+        let first = source(&project, "first", &commit, &tree).unwrap();
+        let second = source(&project, "second", &commit, &tree).unwrap();
+        let legacy = source(&project, "legacy", &commit, &tree).unwrap();
+        let prepare = |source: &Source, shorten| {
+            execute_with_layout(
+                &home,
+                Request {
+                    source: source.clone(),
+                    action: Action::Prepare,
+                },
+                shorten,
+            )
+            .unwrap()
+        };
+
+        let legacy_root = home.join("ferry").join(&legacy.workspace);
+        let legacy_claim = claim_path(&home, &legacy.workspace);
+        fs::create_dir_all(&legacy_root).unwrap();
+        fs::create_dir_all(legacy_claim.parent().unwrap()).unwrap();
+        fs::write(legacy_claim, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        fs::write(legacy_root.join("keep"), "legacy").unwrap();
+        assert_eq!(prepare(&legacy, true)["cwd"], json!(legacy_root));
+        assert_eq!(
+            project_name(&home, &legacy.workspace).unwrap(),
+            legacy.workspace
+        );
+        assert_eq!(
+            fs::read_to_string(legacy_root.join("keep")).unwrap(),
+            "legacy"
+        );
+
+        let first_state = prepare(&first, true);
+        let second_state = prepare(&second, true);
+        assert_eq!(first_state["source"], json!(first));
+        assert_ne!(first_state["cwd"], second_state["cwd"]);
+        for (source, state) in [(first, first_state), (second, second_state)] {
+            let name = project_name(&home, &source.workspace).unwrap();
+            assert_eq!(name.len(), SHORT_NAME_LEN);
+            assert_eq!(state["cwd"], json!(home.join("ferry").join(name.as_ref())));
+            assert_eq!(prepare(&source, false)["cwd"], state["cwd"]);
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn isolated_copy_is_reused_without_reset_and_patch_requires_fresh_preview() {
         let base =
             std::env::temp_dir().join(format!("ferry-workspace-{}", crate::jobs::unique_id()));
@@ -365,7 +493,7 @@ mod tests {
         let source = source("project", "one", &commit, &tree).unwrap();
         let prepared = prepare_local(&home, &root, &source, &[]).unwrap();
         assert_eq!(prepared["ready"], true);
-        let remote = home.join("ferry").join(&source.workspace);
+        let remote = PathBuf::from(prepared["cwd"].as_str().unwrap());
         fs::write(remote.join("a"), "remote\n").unwrap();
         assert_eq!(
             prepare_local(&home, &root, &source, &[]).unwrap()["reused"],

@@ -1624,6 +1624,7 @@ dependencies = [
  "quick-xml 0.42.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "xcap",
 ]
 

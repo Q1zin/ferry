@@ -455,9 +455,10 @@ async fn answer(
                 Some(who) => agent.device(&who)?.workspace_patch(&source).await?,
                 None => {
                     let home = ferry_core::home()?;
-                    let cwd = home.join("ferry").join(&source.workspace);
+                    let name = ferry_core::workspace::project_name(&home, &source.workspace)?;
+                    let cwd = home.join("ferry").join(name.as_ref());
                     ferry_core::workspace::verify(&cwd, &source)?;
-                    let script = ferry_core::sync::changes_script(&source.workspace, "");
+                    let script = ferry_core::sync::changes_script(&name, "");
                     let output = ferry_core::desk::shell(&script)
                         .current_dir(&home)
                         .output()?;
