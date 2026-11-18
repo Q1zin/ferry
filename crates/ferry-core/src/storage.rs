@@ -706,7 +706,10 @@ mod tests {
         assert_eq!(preview["categories"]["runners"], 18);
         assert_eq!(preview["entry_count"], 2);
         assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
-        assert_eq!(preview["candidates"][0]["path"], json!(stale));
+        assert_eq!(
+            Path::new(preview["candidates"][0]["path"].as_str().unwrap()),
+            stale
+        );
 
         let job = state.join("jobs/live");
         let guard = lock(&job.join("lock")).unwrap();
