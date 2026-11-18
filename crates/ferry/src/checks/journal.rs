@@ -25,6 +25,15 @@ pub(super) struct Operation {
     pub targets: Vec<(Option<String>, Option<Status>)>,
     pub parallel: usize,
     pub created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_base: Option<String>,
+}
+
+impl Operation {
+    pub fn output_dir(&self, index: usize) -> String {
+        let base = self.output_base.as_deref().unwrap_or(".ferry-checks");
+        format!("{base}/{}-{index}", self.id)
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -121,7 +130,7 @@ pub(super) fn target(root: &Path, op: &Operation, index: usize) -> Result<Target
     let device = op.targets[index].0.as_deref().unwrap_or("local");
     Ok(Target {
         state: "pending".into(),
-        row: json!({"device":device,"profile":op.profile_name,"state":"pending","errors":[],"output_directory":format!(".ferry-checks/{}-{index}",op.id)}),
+        row: json!({"device":device,"profile":op.profile_name,"state":"pending","errors":[],"output_directory":op.output_dir(index)}),
         ..Target::default()
     })
 }
@@ -195,6 +204,7 @@ mod tests {
             targets: vec![(None, None)],
             parallel: 1,
             created: 0,
+            output_base: None,
         };
         write(&dir.join("operation.json"), &op).unwrap();
         assert_eq!(report(&dir).unwrap()["state"], "interrupted");

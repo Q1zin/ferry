@@ -329,7 +329,7 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
                 &file,
                 &json!({"profiles":{"smoke":smoke_profile()}}).to_string(),
             )?;
-            return crate::checks::run(&[
+            return crate::checks::run_onboarding(&[
                 "smoke",
                 "--file",
                 &file.to_string_lossy(),

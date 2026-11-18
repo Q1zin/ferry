@@ -269,8 +269,8 @@ mod explain;
 mod export;
 mod history;
 mod journal;
-pub use cli::run;
 pub(crate) use cli::{queue_admit, queue_control, queue_prepare, queue_status};
+pub use cli::{run, run_onboarding};
 
 fn tests_pass(t: &Value) -> bool {
     t["tests"].as_u64().unwrap_or(0) > 0

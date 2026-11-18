@@ -500,6 +500,7 @@ mod tests {
                 targets: vec![(None, None)],
                 parallel: 1,
                 created,
+                output_base: None,
             };
             journal::write(&dir.join("operation.json"), &op).unwrap();
         }

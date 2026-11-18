@@ -106,6 +106,7 @@ fn same_request(a: &Operation, b: &Operation) -> bool {
         && a.profile == b.profile
         && a.cwd == b.cwd
         && a.isolated == b.isolated
+        && a.output_base == b.output_base
         && a.targets
             .iter()
             .map(|(d, _)| d)
@@ -191,6 +192,7 @@ pub(crate) fn queue_prepare(
         targets: Vec::new(),
         parallel: 1,
         created: ferry_core::now(),
+        output_base: None,
     })
     .map_err(Fail::new)
 }
@@ -246,6 +248,14 @@ pub(crate) fn queue_control(id: &str, cancel: bool) -> Result<(), Fail> {
 }
 
 pub fn run(args: &[&str]) -> io::Result<i32> {
+    run_with_output(args, None)
+}
+
+pub fn run_onboarding(args: &[&str]) -> io::Result<i32> {
+    run_with_output(args, Some(".ferry/outputs"))
+}
+
+fn run_with_output(args: &[&str], output_base: Option<&str>) -> io::Result<i32> {
     match args {
         ["list", tail @ ..] => return history::list(tail),
         ["compare", baseline, candidate] => return history::compare(baseline, candidate),
@@ -405,6 +415,7 @@ pub fn run(args: &[&str]) -> io::Result<i32> {
             targets: selected,
             parallel,
             created: ferry_core::now(),
+            output_base: output_base.map(str::to_owned),
         };
         let path = root.join("operation.json");
         if path.exists() {
@@ -445,6 +456,7 @@ mod tests {
             targets: vec![(None, None)],
             parallel: 1,
             created: 1,
+            output_base: None,
         };
         let b = a.clone();
         a.created = 2;

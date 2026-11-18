@@ -81,7 +81,7 @@ impl Run<'_> {
         format!("{}-{}", self.op.id, self.index)
     }
     fn output(&self) -> String {
-        format!(".ferry-checks/{}", self.token())
+        self.op.output_dir(self.index)
     }
     fn expired(&self) -> bool {
         self.target.deadline.is_some_and(|d| ferry_core::now() >= d)
@@ -601,8 +601,7 @@ impl Run<'_> {
                             } else {
                                 "analysis_error"
                             };
-                            self.target.row["junit_analysis"] =
-                                json!({"state":state,"path":path,"artifact_id":id,"error":e.message});
+                            self.target.row["junit_analysis"] = json!({"state":state,"path":path,"artifact_id":id,"error":e.message});
                             error(&mut self.target, format!("JUnit: {e}"));
                         }
                     }
@@ -941,7 +940,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let op=Operation{id:"stable".into(),profile_name:"smoke".into(),profile:serde_json::from_value(json!({"platforms":{"all":{"command":"must-not-run","build":"must-not-build","launch":"must-not-launch"}},"ready_log":"ready"})).unwrap(),cwd:root.clone(),project:None,isolated:false,targets:vec![(None,None)],parallel:1,created:0};
+        let op=Operation{id:"stable".into(),profile_name:"smoke".into(),profile:serde_json::from_value(json!({"platforms":{"all":{"command":"must-not-run","build":"must-not-build","launch":"must-not-launch"}},"ready_log":"ready"})).unwrap(),cwd:root.clone(),project:None,isolated:false,targets:vec![(None,None)],parallel:1,created:0,output_base:None};
         (op, root)
     }
     fn run<'a>(op: &'a Operation, root: &'a Path) -> Run<'a> {
