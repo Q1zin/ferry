@@ -42,16 +42,64 @@ pub fn read(image: &Path, want: &str) -> io::Result<Vec<Text>> {
 fn unique_lines(found: Vec<Text>) -> Vec<Text> {
     let mut kept = Vec::<Text>::new();
     for line in found {
-        // Windows emits user-language lines first. An alternate recognition of the same area
-        // should not replace it or collapse a separate row with the same text.
-        if !kept
-            .iter()
-            .any(|old| old.contains(line.center()) && line.contains(old.center()))
+        if let Some(old) = kept
+            .iter_mut()
+            .find(|old| old.contains(line.center()) && line.contains(old.center()))
         {
+            if clearer_english(&old.text, &line.text) {
+                *old = line;
+            }
+        } else {
             kept.push(line);
         }
     }
     kept
+}
+
+#[cfg(any(windows, test))]
+fn clearer_english(profile: &str, alternate: &str) -> bool {
+    let latin = profile.chars().filter(char::is_ascii_alphabetic).count();
+    let cyrillic = profile
+        .chars()
+        .filter(|&c| ('\u{0400}'..='\u{04ff}').contains(&c) && c.is_alphabetic())
+        .count();
+    if cyrillic == 0
+        || cyrillic > 2 * latin
+        || alternate
+            .chars()
+            .any(|c| c.is_alphabetic() && !c.is_ascii())
+    {
+        return false;
+    }
+    let lookalikes = profile
+        .chars()
+        .flat_map(char::to_uppercase)
+        .map(|c| match c {
+            'А' => 'A',
+            'В' => 'B',
+            'Е' => 'E',
+            'К' => 'K',
+            'М' => 'M',
+            'Н' => 'H',
+            'О' => 'O',
+            'Р' => 'P',
+            'С' => 'C',
+            'Т' => 'T',
+            'У' => 'Y',
+            'Х' => 'X',
+            _ => c,
+        });
+    if lookalikes.eq(alternate.chars().flat_map(char::to_uppercase)) {
+        return false;
+    }
+    // shortcut: Windows OCR gives no confidence; keep the profile result unless a shared Latin word anchors the alternate.
+    profile.split(|c: char| !c.is_alphabetic()).any(|word| {
+        word.len() >= 3
+            && word.chars().all(|c| c.is_ascii_alphabetic())
+            && alternate
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .any(|other| word.eq_ignore_ascii_case(other))
+    })
 }
 
 /// Сколько ждать распознавателя: обычно — секунда-две, а сломанный Vision (видели на бете
@@ -386,6 +434,26 @@ mod tests {
             ]),
             [local, other_row, same_row_elsewhere]
         );
+    }
+
+    #[test]
+    fn windows_line_dedup_uses_latin_context_without_replacing_cyrillic_labels() {
+        let latin = (52, 74, 227, 26);
+        let cyrillic = (50, 142, 298, 34);
+        let mixed = (51, 200, 390, 34);
+        let rows = unique_lines(vec![
+            text(false, latin, "FERRY ОСЕАГЧ"),
+            text(false, cyrillic, "СЕВЕРНЫЙ МОСТ"),
+            text(false, mixed, "FERRY СЕВЕРНЫЙ МОСТ"),
+            text(false, latin, "ferry OCEAN"),
+            text(false, cyrillic, "CEBEPHblN MOCT"),
+            text(false, mixed, "FERRY CEBEPHblN MOCT"),
+        ]);
+        assert_eq!(
+            rows.into_iter().map(|row| row.text).collect::<Vec<_>>(),
+            ["ferry OCEAN", "СЕВЕРНЫЙ МОСТ", "FERRY СЕВЕРНЫЙ МОСТ"]
+        );
+        assert!(!clearer_english("FERRY МОСТ", "FERRY MOCT"));
     }
 
     #[test]
