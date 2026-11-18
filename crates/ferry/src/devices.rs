@@ -711,38 +711,98 @@ pub fn job_result(
 }
 
 /// `ferry doctor <цели>`: готово ли устройство собирать этот проект.
-pub fn doctor(spec: &str) -> io::Result<i32> {
+pub fn doctor(spec: &str, shell: Shell) -> io::Result<i32> {
+    use ferry_core::doctor;
+    let snapshot = match state() {
+        Ok(snapshot) => snapshot,
+        Err(fail) => return finish(Err(fail)),
+    };
     let repo = match sync::repo() {
         Ok(repo) => repo,
         Err(e) => return finish(Err(e.into())),
     };
     each(spec, |device, printer| {
+        let windows = snapshot
+            .find(device)
+            .ok()
+            .and_then(|peer| peer.status.as_ref())
+            .is_some_and(|status| status.os == "windows");
         let repo = repo.as_ref().map(|r| (r.root.as_path(), r.name.as_str()));
-        let checks = ferry_core::doctor::checks(device, repo)?;
-        let script = ferry_core::doctor::script(&checks);
-        let request = Request::Run {
-            device: device.into(),
-            cmd: script,
-            dir: Dir::Home,
-            desk: false,
+        let (checks, profile) = doctor::checks(device, repo, windows)?;
+        if let Some(path) = profile {
+            printer.line(&format!("  профиль проекта: {}", path.display()), false);
+        }
+        let run = |cmd, shell| {
+            let request = if shell == Shell::Default {
+                Request::Run {
+                    device: device.into(),
+                    cmd,
+                    dir: Dir::Home,
+                    desk: false,
+                }
+            } else {
+                Request::RunShell {
+                    device: device.into(),
+                    cmd,
+                    dir: Dir::Home,
+                    desk: false,
+                    shell,
+                }
+            };
+            capture(request)
         };
-        let (output, _) = capture(request)?;
-        let (lines, healthy) = ferry_core::doctor::report(&checks, &output);
+        let output = run(doctor::script(&checks, shell), shell)?;
+        let mut results = doctor::results(&checks, &output, shell);
+        let mut supplemental_failed = false;
+        if (windows || shell == Shell::Cmd)
+            && let Some(script) = doctor::windows_script(&checks, shell, &results)
+        {
+            match run(script, Shell::Powershell) {
+                Ok(output) => results.extend(doctor::results(&checks, &output, Shell::Powershell)),
+                Err(fail) => {
+                    supplemental_failed = true;
+                    printer.line(&format!("  проверка окружения Windows: {fail}"), true);
+                }
+            }
+        }
+        let (lines, healthy) = doctor::report(&checks, &results);
         for line in lines {
             printer.line(&line, false);
         }
-        Ok(if healthy { 0 } else { 1 })
+        Ok(if healthy && !supplemental_failed {
+            0
+        } else {
+            1
+        })
     })
 }
 
-/// stdout команды целиком и её код — для разбора здесь.
-fn capture(request: Request) -> Result<(String, i32), Fail> {
+/// Строки от doctor или первые сообщения оболочки, если скрипт не запустился.
+fn capture(request: Request) -> Result<String, Fail> {
     let mut out = Vec::new();
+    let mut err = Vec::new();
+    const LIMIT: usize = 256 * 1024;
     for response in control::open(request)? {
         match response? {
-            Response::Out(data) => out.extend(data),
-            Response::Err(_) => {}
-            Response::Exit(code) => return Ok((String::from_utf8_lossy(&out).into_owned(), code)),
+            Response::Out(data) => {
+                out.extend(data.into_iter().take(LIMIT.saturating_sub(out.len())))
+            }
+            Response::Err(data) => {
+                err.extend(data.into_iter().take(LIMIT.saturating_sub(err.len())))
+            }
+            Response::Exit(code) => {
+                let output = String::from_utf8_lossy(&out);
+                let output = output.trim_start_matches('\u{feff}');
+                if !output.lines().any(|line| line.starts_with("FERRY_DOCTOR")) {
+                    let err = String::from_utf8_lossy(&err);
+                    let text = err.lines().find(|line| !line.trim().is_empty());
+                    return Err(Fail::new(format!(
+                        "doctor: оболочка не вернула результаты (код {code}){}",
+                        text.map_or(String::new(), |line| format!(": {line}"))
+                    )));
+                }
+                return Ok(output.to_string());
+            }
             Response::Error(fail) => return Err(fail),
             _ => return Err(unexpected()),
         }

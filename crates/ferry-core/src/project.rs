@@ -9,6 +9,7 @@
 
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Project {
@@ -16,14 +17,82 @@ pub struct Project {
     pub files: Vec<String>,
 }
 
-pub fn load(name: &str) -> io::Result<Project> {
-    let path = crate::ferry_home()?
-        .join("projects")
-        .join(format!("{name}.toml"));
-    match fs::read_to_string(&path) {
-        Ok(text) => parse(&text).map_err(|e| io::Error::other(format!("{}: {e}", path.display()))),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Project::default()),
+const BINDING: &str = "ferry-project";
+
+fn profile_path(dir: &Path, name: &str) -> io::Result<PathBuf> {
+    if name.is_empty()
+        || matches!(name, "." | "..")
+        || name.contains(['/', '\\', ':'])
+        || name.chars().any(char::is_control)
+    {
+        return Err(io::Error::other("неверное имя профиля проекта"));
+    }
+    Ok(dir.join(format!("{name}.toml")))
+}
+
+fn read_profile(path: &Path) -> io::Result<Project> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    parse(&text).map_err(|e| io::Error::other(format!("{}: {e}", path.display())))
+}
+
+fn resolve(
+    dir: &Path,
+    git_dir: Option<&Path>,
+    default: &str,
+) -> io::Result<(Option<PathBuf>, Project)> {
+    let bound = git_dir
+        .map(|d| fs::read_to_string(d.join(BINDING)))
+        .transpose();
+    match bound {
+        Ok(Some(name)) => {
+            let path = profile_path(dir, &name)?;
+            let profile = read_profile(&path)?;
+            return Ok((Some(path), profile));
+        }
+        Ok(None) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let path = profile_path(dir, default)?;
+    match read_profile(&path) {
+        Ok(profile) => Ok((Some(path), profile)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((None, Project::default())),
         Err(e) => Err(e),
+    }
+}
+
+pub fn load(name: &str) -> io::Result<Project> {
+    resolve(&crate::ferry_home()?.join("projects"), None, name).map(|(_, project)| project)
+}
+
+pub fn for_checkout(repo: &crate::sync::Repo) -> io::Result<(Option<PathBuf>, Project)> {
+    resolve(
+        &crate::ferry_home()?.join("projects"),
+        Some(&repo.git_dir),
+        &repo.name,
+    )
+}
+
+pub fn for_repo(root: &Path, default: &str) -> io::Result<(Option<PathBuf>, Project)> {
+    let repo = crate::sync::repo_at(root)?;
+    resolve(
+        &crate::ferry_home()?.join("projects"),
+        repo.as_ref()
+            .and_then(|r| (r.root == root).then_some(r.git_dir.as_path())),
+        default,
+    )
+}
+
+pub fn bind(repo: &crate::sync::Repo, name: Option<&str>) -> io::Result<()> {
+    let binding = repo.git_dir.join(BINDING);
+    if let Some(name) = name {
+        read_profile(&profile_path(&crate::ferry_home()?.join("projects"), name)?)?;
+        return crate::write_private(&binding, name);
+    }
+    match fs::remove_file(binding) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -100,5 +169,31 @@ mod tests {
         assert!(parse("tools = [cmake]").is_err());
         assert!(parse("tool = [\"cmake\"]").is_err());
         assert!(parse("tools = [\"cmake\"").is_err());
+    }
+
+    #[test]
+    fn binding_is_local_to_a_checkout_and_never_falls_back_if_missing() {
+        let temp = std::env::temp_dir().join(format!("ferry-profile-{}", crate::jobs::unique_id()));
+        let profiles = temp.join("projects");
+        fs::create_dir_all(&profiles).unwrap();
+        let path = profiles.join("application.toml");
+        fs::write(&path, "tools = [\"cargo\"]\nfiles = [\"fixture.json\"]").unwrap();
+        for name in ["checkout-one", "checkout-two"] {
+            let git = temp.join(name);
+            fs::create_dir(&git).unwrap();
+            fs::write(git.join(BINDING), "application").unwrap();
+            let (selected, project) = resolve(&profiles, Some(&git), name).unwrap();
+            assert_eq!(selected, Some(path.clone()));
+            assert_eq!(project.tools, ["cargo"]);
+            assert_eq!(project.files, ["fixture.json"]);
+        }
+        assert_eq!(
+            resolve(&profiles, Some(&temp), "checkout-one").unwrap().0,
+            None
+        );
+        fs::write(temp.join(BINDING), "missing").unwrap();
+        assert!(resolve(&profiles, Some(&temp), "application").is_err());
+        assert!(profile_path(&profiles, "../application").is_err());
+        fs::remove_dir_all(temp).unwrap();
     }
 }

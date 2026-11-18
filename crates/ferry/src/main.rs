@@ -14,7 +14,10 @@ mod setup;
 mod storage;
 mod workflows;
 
-use ferry_core::mode::{self, Mode};
+use ferry_core::{
+    desk::Shell,
+    mode::{self, Mode},
+};
 use ferry_core::{info, jobs, relay};
 
 const USAGE: &str = "\
@@ -86,7 +89,7 @@ ferry — разработка и тесты на нескольких устр�
                                     --home — в доме устройства, как вне репозитория;
                                     --shell: default, bash, powershell, cmd
   ferry sync <цели>                 рабочее дерево проекта → ~/ferry/<проект> на устройстве
-  ferry doctor <цели>               готово ли устройство собирать этот проект: инструменты,
+  ferry doctor <цели> [--shell <оболочка>]
                                     доступ к git-зависимостям, файлы проекта
   ferry start <цели> <имя> [--no-sync] [--home] [--shell <имя>] [--] <команда>
                                     фоновая задача (приложение, dev-сервер, сборка): живёт
@@ -259,7 +262,10 @@ fn main() {
         ["info", spec] => devices::info(spec, false),
         ["info", spec, "--json"] => devices::info(spec, true),
         ["sync", spec] => devices::sync(spec),
-        ["doctor", spec] => devices::doctor(spec),
+        ["doctor", spec] => devices::doctor(spec, Shell::Default),
+        ["doctor", spec, "--shell", shell] => {
+            shell.parse().and_then(|shell| devices::doctor(spec, shell))
+        }
         ["run", spec, rest @ ..] => run(spec, rest),
         ["pull", device] => devices::pull(device),
         ["put", spec, paths @ ..] if !paths.is_empty() => devices::put(spec, paths),
