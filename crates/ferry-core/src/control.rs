@@ -344,13 +344,13 @@ pub struct Envelope {
     pub session: String,
 }
 
-/// Кто вызвал CLI: `FERRY_AGENT`, иначе сессия Claude Code — ближайший предок `claude` (каждая
-/// сессия — свой процесс, команды — его потомки), иначе пусто — человек в терминале.
+/// `FERRY_AGENT` задаёт сессию явно (пустое значение — терминал). Без переменной проверяем
+/// ближайшего предка Claude Code, иначе возвращаем пустую сессию терминала.
 pub fn session() -> String {
     static SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     SESSION
         .get_or_init(|| match std::env::var("FERRY_AGENT") {
-            Ok(name) if !name.is_empty() => name,
+            Ok(name) => name,
             _ => claude_ancestor().map_or_else(String::new, |pid| format!("claude:{pid}")),
         })
         .clone()

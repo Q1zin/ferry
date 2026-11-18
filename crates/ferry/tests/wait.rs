@@ -38,6 +38,7 @@ async fn ferry(args: &[&str]) -> Output {
         Command::new(FERRY)
             .args(&args)
             .env("HOME", root("ctl"))
+            .env("FERRY_AGENT", "")
             .current_dir(root("ctl"))
             .stdin(Stdio::null())
             .output()
