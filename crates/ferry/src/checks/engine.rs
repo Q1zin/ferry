@@ -18,8 +18,13 @@ fn retryable_result(error: &Fail) -> bool {
             Some(cause) => !["ответ приложения: ", "испорчен ", "нет устройства"]
                 .iter()
                 .any(|prefix| cause.starts_with(prefix)),
-            // Older controllers return the peer lookup error without the transport prefix.
-            None => error.message.ends_with(" не на связи"),
+            // Older controllers return lookup and RPC errors without the transport prefix.
+            None => {
+                error.message.ends_with(" не на связи")
+                    || error.message.starts_with(
+                        "связь с устройством оборвалась — повтори, когда оно снова на связи (",
+                    )
+            }
         }
 }
 
@@ -1161,7 +1166,9 @@ mod tests {
                 assert!(!timeout.is_zero() && timeout <= POLL_TIMEOUT);
                 queries.push(query);
                 if queries.len() == 1 {
-                    Err(Fail::new("WIN-10 не на связи"))
+                    Err(Fail::new(
+                        "связь с устройством оборвалась — повтори, когда оно снова на связи (Oneshot recv error)",
+                    ))
                 } else {
                     Ok(json!({"state":"succeeded"}))
                 }
