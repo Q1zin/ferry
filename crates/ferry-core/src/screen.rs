@@ -18,6 +18,8 @@ pub mod admin;
 pub mod elements;
 pub mod live;
 pub mod observe;
+#[cfg(any(windows, test))]
+mod window_capture;
 static INPUT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Visible windows belonging to an explicitly supplied process family.
@@ -524,6 +526,11 @@ fn screenshot_selected(file: &std::path::Path, window: &Window) -> io::Result<i3
     {
         // PrintWindow с PW_RENDERFULLCONTENT: окно рисует себя в наш bitmap, так снимаются и
         // закрытые окна, и Chromium.
+        if !admin::desktop_available() {
+            return Err(io::Error::other(
+                "рабочий стол Windows заблокирован или защищён",
+            ));
+        }
         let script = r#"
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -565,6 +572,12 @@ $g.Dispose(); $bmp.Dispose()
             .arg(file)
             .args([window.id.to_string(), width.to_string(), height.to_string()])
             .status()?;
+        if status.code() == Some(2) {
+            window_capture::capture(window)?
+                .save_with_format(file, image::ImageFormat::Png)
+                .map_err(io::Error::other)?;
+            return Ok(0);
+        }
         Ok(exit_code(status))
     }
     #[cfg(not(any(windows, target_os = "macos")))]

@@ -77,16 +77,25 @@ pub fn frame(root: &Path, request: &Request, sequence: u64) -> io::Result<Frame>
             ));
         }
         let own = matches[0];
-        let windows = xcap::Window::all().map_err(io::Error::other)?;
-        let window = windows
-            .into_iter()
-            .find(|w| {
-                w.id().ok().map(i64::from) == Some(own.id)
-                    && w.pid().ok().map(i64::from) == Some(own.pid)
-                    && w.title().ok().as_deref() == Some(t.title.as_str())
-            })
-            .ok_or_else(|| io::Error::other("capture: окно исчезло"))?;
-        (window.capture_image().map_err(io::Error::other)?, 0, 0)
+        let captured = xcap::Window::all()
+            .map_err(io::Error::other)
+            .and_then(|windows| {
+                windows
+                    .into_iter()
+                    .find(|w| {
+                        w.id().ok().map(i64::from) == Some(own.id)
+                            && w.pid().ok().map(i64::from) == Some(own.pid)
+                            && w.title().ok().as_deref() == Some(t.title.as_str())
+                    })
+                    .ok_or_else(|| io::Error::other("capture: окно исчезло"))?
+                    .capture_image()
+                    .map_err(io::Error::other)
+            });
+        #[cfg(windows)]
+        let captured = captured.or_else(|_| super::window_capture::capture(own));
+
+        let captured = captured?;
+        (captured, 0, 0)
     } else {
         // Primary monitor only: this matches macOS's existing input coordinate space.
         let monitors = xcap::Monitor::all().map_err(io::Error::other)?;
