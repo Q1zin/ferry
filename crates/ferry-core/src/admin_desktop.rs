@@ -1,4 +1,4 @@
-//! Одно окно с повышенными правами: только локальное UAC, ограниченный IPC и срок жизни.
+//! Административные окна: локальное согласие, ограниченный IPC и срок жизни.
 use crate::screen::admin::{Action, Target};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -53,7 +53,7 @@ use windows_sys::Win32::{
 };
 
 const PREFIX: &str = r"\\.\pipe\ferry-admin-";
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 const MAX_REQUEST: usize = 64 * 1024;
 const MAX_RESPONSE: usize = 64 * 1024;
 const MAX_SECONDS: u64 = 15 * 60;
@@ -222,13 +222,15 @@ fn completion(
     pipe: HANDLE,
     operation: &mut OVERLAPPED,
     peer: HANDLE,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> io::Result<u32> {
     let handles = [operation.hEvent, peer];
-    let millis = deadline
-        .saturating_duration_since(Instant::now())
-        .as_millis()
-        .min(u128::from(u32::MAX - 1)) as u32;
+    let millis = deadline.map_or(u32::MAX, |deadline| {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .min(u128::from(u32::MAX - 1)) as u32
+    });
     let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, millis) };
     let mut bytes = 0;
     if wait == WAIT_OBJECT_0 {
@@ -260,7 +262,7 @@ fn connect(pipe: &OwnedHandle, child: &OwnedHandle, deadline: Instant) -> io::Re
     match io::Error::last_os_error().raw_os_error().map(|v| v as u32) {
         Some(ERROR_PIPE_CONNECTED) => Ok(()),
         Some(ERROR_IO_PENDING) => {
-            completion(raw(pipe), &mut operation, raw(child), deadline).map(|_| ())
+            completion(raw(pipe), &mut operation, raw(child), Some(deadline)).map(|_| ())
         }
         _ => Err(io::Error::last_os_error()),
     }
@@ -270,12 +272,12 @@ fn transfer(
     peer: &OwnedHandle,
     bytes: &mut [u8],
     write: bool,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> io::Result<()> {
     let event = owned(unsafe { CreateEventW(null(), 1, 0, null()) })?;
     let mut at = 0;
     while at < bytes.len() {
-        if Instant::now() >= deadline || !live(raw(peer)) {
+        if expired(deadline) || !live(raw(peer)) {
             return Err(error("admin GUI: канал или разрешение истекли"));
         }
         let mut operation = OVERLAPPED {
@@ -331,7 +333,7 @@ fn receive<T: DeserializeOwned>(
     pipe: &OwnedHandle,
     peer: &OwnedHandle,
     limit: usize,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> io::Result<T> {
     let mut header = [0; 4];
     transfer(pipe, peer, &mut header, false, deadline)?;
@@ -351,8 +353,8 @@ fn send<T: Serialize>(
         return Err(error("admin GUI: ответ слишком большой"));
     }
     let mut header = (bytes.len() as u32).to_le_bytes();
-    transfer(pipe, peer, &mut header, true, deadline)?;
-    transfer(pipe, peer, &mut bytes, true, deadline)
+    transfer(pipe, peer, &mut header, true, Some(deadline))?;
+    transfer(pipe, peer, &mut bytes, true, Some(deadline))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -386,6 +388,7 @@ fn validate_label(label: &str) -> io::Result<()> {
 #[serde(deny_unknown_fields)]
 struct Request {
     sequence: u64,
+    window: Option<i64>,
     action: Action,
 }
 #[derive(Serialize, Deserialize)]
@@ -395,26 +398,49 @@ struct Response {
     result: Result<String, String>,
 }
 
+fn selected_window(scope: i64, requested: Option<i64>) -> io::Result<i64> {
+    match (scope, requested) {
+        (0, Some(window)) if window > 0 => Ok(window),
+        (scope, None) if scope > 0 => Ok(scope),
+        (scope, Some(window)) if scope > 0 && scope == window => Ok(window),
+        _ => Err(error(
+            "admin GUI: укажи окно в пределах выданного разрешения",
+        )),
+    }
+}
+
+fn expired(deadline: Option<Instant>) -> bool {
+    deadline.is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn request_deadline(expires: Option<Instant>) -> Instant {
+    let deadline = Instant::now() + REQUEST_TIME;
+    expires.map_or(deadline, |expires| expires.min(deadline))
+}
+
 pub struct Broker {
     pipe: Option<OwnedHandle>,
     child: OwnedHandle,
-    expires: Instant,
+    expires: Option<Instant>,
     sequence: u64,
+    window: i64,
 }
 impl Broker {
     pub fn is_active(&self) -> bool {
-        self.pipe.is_some() && Instant::now() < self.expires && live(raw(&self.child))
+        self.pipe.is_some() && !expired(self.expires) && live(raw(&self.child))
     }
 
+    /// `window == 0` запрашивает согласие для всех административных окон этого стола.
+    /// Общее разрешение игнорирует duration и живёт до Drop или закрытия Ferry.
     pub fn start(window: i64, duration: Duration, owner_label: &str) -> io::Result<Self> {
         validate_label(owner_label)?;
-        let seconds = duration.as_secs();
-        if window <= 0
-            || duration.is_zero()
-            || seconds == 0
-            || duration > Duration::from_secs(MAX_SECONDS)
+        let seconds = if window == 0 { 0 } else { duration.as_secs() };
+        if window < 0
+            || (window > 0 && (seconds == 0 || duration > Duration::from_secs(MAX_SECONDS)))
         {
-            return Err(error("admin GUI: нужно окно и срок 1..900 секунд"));
+            return Err(error(
+                "admin GUI: нужно окно (0 — все окна) и срок 1..900 секунд",
+            ));
         }
         if elevated(unsafe { GetCurrentProcess() })? {
             return Err(error(
@@ -445,11 +471,12 @@ impl Broker {
         let mut broker = Self {
             pipe: Some(pipe),
             child,
-            expires: Instant::now() + CONFIRM_TIME,
+            expires: Some(Instant::now() + CONFIRM_TIME),
             sequence: 0,
+            window,
         };
         let link = broker.pipe.as_ref().unwrap();
-        let deadline = broker.expires.min(Instant::now() + Duration::from_secs(30));
+        let deadline = Instant::now() + Duration::from_secs(30);
         connect(link, &broker.child, deadline)?;
         let mut pid = 0;
         if unsafe { GetNamedPipeClientProcessId(raw(link), &mut pid) } == 0 {
@@ -474,22 +501,27 @@ impl Broker {
             link,
             &broker.child,
             MAX_REQUEST,
-            Instant::now() + CONFIRM_TIME,
+            Some(Instant::now() + CONFIRM_TIME),
         )?;
         if hello.protocol != PROTOCOL || hello.version != crate::VERSION {
             return Err(error("admin GUI: несовместимая версия помощника"));
         }
         hello.ready.map_err(error)?;
-        broker.expires = Instant::now() + duration;
+        broker.expires = (window > 0).then(|| Instant::now() + duration);
         broker.sequence = 1;
         Ok(broker)
     }
     pub fn execute(&mut self, action: Action) -> io::Result<String> {
+        self.execute_on(None, action)
+    }
+    /// Для общего разрешения каждое действие требует явного HWND.
+    pub fn execute_on(&mut self, window: Option<i64>, action: Action) -> io::Result<String> {
         if !self.is_active() {
             self.stop();
             return Err(error("admin GUI: разрешение завершилось"));
         }
-        let deadline = self.expires.min(Instant::now() + REQUEST_TIME);
+        selected_window(self.window, window)?;
+        let deadline = request_deadline(self.expires);
         let sequence = self.sequence;
         let result = (|| {
             let pipe = self
@@ -499,11 +531,15 @@ impl Broker {
             send(
                 pipe,
                 &self.child,
-                &Request { sequence, action },
+                &Request {
+                    sequence,
+                    window,
+                    action,
+                },
                 MAX_REQUEST,
                 deadline,
             )?;
-            let response: Response = receive(pipe, &self.child, MAX_RESPONSE, deadline)?;
+            let response: Response = receive(pipe, &self.child, MAX_RESPONSE, Some(deadline))?;
             if response.sequence != sequence {
                 return Err(error("admin GUI: ответ другого запроса"));
             }
@@ -563,8 +599,9 @@ impl Arguments {
         };
         if args.parent == 0
             || args.created == 0
-            || args.window <= 0
-            || !(1..=MAX_SECONDS).contains(&args.seconds)
+            || args.window < 0
+            || (args.window == 0 && args.seconds != 0)
+            || (args.window > 0 && !(1..=MAX_SECONDS).contains(&args.seconds))
         {
             return Err(error("admin GUI: неверное окно, процесс или срок"));
         }
@@ -574,27 +611,32 @@ impl Arguments {
 
 struct Monitor {
     stopped: Arc<AtomicBool>,
-    expires: Arc<Mutex<Instant>>,
+    expires: Arc<Mutex<Option<Instant>>>,
 }
 impl Drop for Monitor {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
     }
 }
-fn monitor(parent: &OwnedHandle, pipe: &OwnedHandle, expires: Instant) -> io::Result<Monitor> {
+fn monitor(
+    parent: &OwnedHandle,
+    pipe: &OwnedHandle,
+    expires: Instant,
+    revoke_on_lock: bool,
+) -> io::Result<Monitor> {
     let (parent, pipe) = (duplicate(parent)?, duplicate(pipe)?);
     let stopped = Arc::new(AtomicBool::new(false));
     let done = stopped.clone();
-    let expires = Arc::new(Mutex::new(expires));
+    let expires = Arc::new(Mutex::new(Some(expires)));
     let limit = expires.clone();
     std::thread::Builder::new()
         .name("admin-gui-lifetime".into())
         .spawn(move || {
             while !done.load(Ordering::Acquire) {
                 // Отдельный поток ограничивает жизнь даже зависшего UIA/оконного API.
-                if Instant::now() >= *limit.lock().unwrap()
+                if expired(*limit.lock().unwrap())
                     || !live(raw(&parent))
-                    || !crate::screen::admin::desktop_available()
+                    || (revoke_on_lock && !crate::screen::admin::desktop_available())
                     || unsafe {
                         PeekNamedPipe(
                             raw(&pipe),
@@ -657,19 +699,20 @@ pub fn worker(args: &[&str]) -> io::Result<i32> {
         return Err(error("admin GUI: канал другого процесса"));
     }
     let confirmation_deadline = Instant::now() + CONFIRM_TIME;
-    let monitor = monitor(&parent, &pipe, confirmation_deadline)?;
-    let request: Confirmation = receive(&pipe, &parent, MAX_REQUEST, confirmation_deadline)?;
+    let monitor = monitor(&parent, &pipe, confirmation_deadline, args.window > 0)?;
+    let request: Confirmation = receive(&pipe, &parent, MAX_REQUEST, Some(confirmation_deadline))?;
     if request.protocol != PROTOCOL || request.version != crate::VERSION {
         return Err(error("admin GUI: несовместимая версия исходного Ferry"));
     }
     validate_label(&request.owner_label)?;
-    let mut target = Target::open(args.window);
-    if let Ok(target) = &mut target
-        && let Err(e) = target.confirm(&request.owner_label)
-    {
-        target_confirmation_failed(&pipe, &parent, e, confirmation_deadline)?;
-        return Ok(1);
-    }
+    let target = if args.window == 0 {
+        crate::screen::admin::confirm_desktop(&request.owner_label).map(|()| None)
+    } else {
+        Target::open(args.window).and_then(|target| {
+            target.confirm(&request.owner_label)?;
+            Ok(Some(target))
+        })
+    };
     let hello = Hello {
         protocol: PROTOCOL,
         version: crate::VERSION.into(),
@@ -682,54 +725,43 @@ pub fn worker(args: &[&str]) -> io::Result<i32> {
         MAX_REQUEST,
         confirmation_deadline.min(Instant::now() + Duration::from_secs(10)),
     )?;
-    let target = target.as_mut().map_err(|e| error(e.to_string()))?;
-    let expires = Instant::now() + Duration::from_secs(args.seconds);
+    let target = target?;
+    let expires = (args.window > 0).then(|| Instant::now() + Duration::from_secs(args.seconds));
     *monitor.expires.lock().unwrap() = expires;
     let mut sequence = 1;
-    while Instant::now() < expires {
+    while !expired(expires) {
         let request: Request = receive(&pipe, &parent, MAX_REQUEST, expires)?;
         if request.sequence != sequence {
             return Err(error("admin GUI: неверный порядок запросов"));
         }
-        let result = target.execute(request.action).map_err(|e| e.to_string());
+        let result = selected_window(args.window, request.window)
+            .and_then(|window| match &target {
+                Some(target) => target.execute(request.action),
+                None => Target::open(window)?.execute(request.action),
+            })
+            .map_err(|e| e.to_string());
         send(
             &pipe,
             &parent,
             &Response { sequence, result },
             MAX_RESPONSE,
-            expires.min(Instant::now() + REQUEST_TIME),
+            request_deadline(expires),
         )?;
         sequence += 1;
     }
     Ok(0)
 }
 
-fn target_confirmation_failed(
-    pipe: &OwnedHandle,
-    parent: &OwnedHandle,
-    failure: io::Error,
-    deadline: Instant,
-) -> io::Result<()> {
-    send(
-        pipe,
-        parent,
-        &Hello {
-            protocol: PROTOCOL,
-            version: crate::VERSION.into(),
-            ready: Err(failure.to_string()),
-        },
-        MAX_REQUEST,
-        deadline,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn worker_rejects_external_channels_and_unbounded_lifetime() {
+    fn worker_rejects_external_channels_and_invalid_scope_lifetime() {
         let pipe = format!("{PREFIX}{}", "a".repeat(32));
         assert!(Arguments::parse(&[&pipe, "1", "1", "12", "900"]).is_ok());
+        assert!(Arguments::parse(&[&pipe, "1", "1", "0", "0"]).is_ok());
+        assert!(Arguments::parse(&[&pipe, "1", "1", "0", "60"]).is_err());
+        assert!(Arguments::parse(&[&pipe, "1", "1", "-1", "60"]).is_err());
         for value in ["0", "901", "-1", "garbage"] {
             assert!(Arguments::parse(&[&pipe, "1", "1", "12", value]).is_err());
         }
@@ -737,6 +769,28 @@ mod tests {
             assert!(Arguments::parse(&[value, "1", "1", "12", "60"]).is_err());
         }
         assert!(Arguments::parse(&[&pipe, "0", "1", "12", "60"]).is_err());
+    }
+    #[test]
+    fn persistent_grant_has_no_expiry_but_actions_are_bounded() {
+        assert!(!expired(None));
+        assert!(expired(Some(Instant::now() - Duration::from_secs(1))));
+        assert!(!expired(Some(Instant::now() + Duration::from_secs(1))));
+        let now = Instant::now();
+        assert!(request_deadline(None) >= now + REQUEST_TIME);
+        assert!(request_deadline(None) < now + REQUEST_TIME + Duration::from_secs(1));
+        let soon = now + Duration::from_secs(1);
+        assert_eq!(request_deadline(Some(soon)), soon);
+    }
+    #[test]
+    fn requests_require_a_window_within_the_granted_scope() {
+        assert_eq!(selected_window(12, None).unwrap(), 12);
+        assert_eq!(selected_window(12, Some(12)).unwrap(), 12);
+        assert!(selected_window(12, Some(13)).is_err());
+        assert_eq!(selected_window(0, Some(13)).unwrap(), 13);
+        assert!(selected_window(0, None).is_err());
+        assert!(selected_window(0, Some(0)).is_err());
+        assert!(selected_window(0, Some(-1)).is_err());
+        assert!(selected_window(-1, None).is_err());
     }
     #[test]
     fn frames_are_bounded_before_allocation() {

@@ -1292,6 +1292,24 @@ impl Inner {
         }
     }
 
+    async fn admin_input(
+        self: Arc<Self>,
+        from: EndpointId,
+        session: String,
+        window: Option<i64>,
+        action: ferry_core::screen::admin::Action,
+    ) -> crate::proto::Reply<String> {
+        #[cfg(windows)]
+        return self.execute_admin(from, session, window, action).await;
+        #[cfg(not(windows))]
+        {
+            let _ = (from, session, window, action);
+            Err(Fail::refused(
+                "окна администратора доступны только на Windows",
+            ))
+        }
+    }
+
     async fn handle(self: Arc<Self>, msg: DeviceMessage, from: EndpointId) {
         // Действие на рабочем столе идёт, пока его обрабатываем: `run --desk` — до конца команды.
         let _acting = describe(&msg).and_then(|(what, desk)| {
@@ -1369,15 +1387,17 @@ impl Inner {
                 tx.send(result).await.ok();
             }
             DeviceMessage::AdminInput(WithChannels { tx, inner, .. }) => {
-                #[cfg(windows)]
-                let result = self.clone().execute_admin(from, inner).await;
-                #[cfg(not(windows))]
-                let result = {
-                    let _ = inner;
-                    Err(Fail::refused(
-                        "окна администратора доступны только на Windows",
-                    ))
-                };
+                let result = self
+                    .clone()
+                    .admin_input(from, inner.session, None, inner.action)
+                    .await;
+                tx.send(result).await.ok();
+            }
+            DeviceMessage::AdminInputForWindow(WithChannels { tx, inner, .. }) => {
+                let result = self
+                    .clone()
+                    .admin_input(from, inner.session, Some(inner.window), inner.action)
+                    .await;
                 tx.send(result).await.ok();
             }
             other => self.node.clone().handle(other, from).await,

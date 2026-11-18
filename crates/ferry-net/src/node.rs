@@ -562,7 +562,8 @@ impl Node {
             | DeviceMessage::SetRole(_)
             | DeviceMessage::Rename(_)
             | DeviceMessage::Desk(_)
-            | DeviceMessage::AdminInput(_) => {}
+            | DeviceMessage::AdminInput(_)
+            | DeviceMessage::AdminInputForWindow(_) => {}
             DeviceMessage::Peers(WithChannels { tx, .. }) => {
                 tx.send(()).await.ok();
             }

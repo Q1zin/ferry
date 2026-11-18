@@ -1,4 +1,4 @@
-//! Ввод в одно подтверждённое окно с повышенными правами на Windows.
+//! Подтверждённый ввод в окна приложений с повышенными правами на Windows.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +14,7 @@ pub enum Action {
 }
 
 #[cfg(windows)]
-pub use windows::{Target, candidates, desktop_available};
+pub use windows::{Target, candidates, confirm_desktop, desktop_available};
 
 #[cfg(any(windows, test))]
 fn denied(message: &str) -> std::io::Error {
@@ -455,9 +455,6 @@ mod windows {
         pub fn confirm(&self, owner_label: &str) -> io::Result<()> {
             default_input()?;
             self.check(false)?;
-            if integrity(unsafe { GetCurrentProcess() })? < SECURITY_MANDATORY_HIGH_RID {
-                return Err(denied("подтверждение требует повышенных прав"));
-            }
             let window = self.description()?;
             let label = consent_text(owner_label);
             let process = consent_text(&window.process);
@@ -470,29 +467,8 @@ mod windows {
                  Разрешение действует до 15 минут. Подтверждайте только знакомый запрос.",
                 window.pid, window.id,
             );
-            let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<_>>();
-            let text = wide(&text);
-            let title = wide("ferry — подтверждение управления окном");
-            const IDYES: i32 = 6;
-            const MB_YESNO: u32 = 0x0004;
-            const MB_ICONWARNING: u32 = 0x0030;
-            const MB_DEFBUTTON2: u32 = 0x0100;
-            const MB_SETFOREGROUND: u32 = 0x10000;
-            const MB_TOPMOST: u32 = 0x40000;
-            default_input()?;
             self.check(false)?;
-            let choice = unsafe {
-                MessageBoxW(
-                    0,
-                    text.as_ptr(),
-                    title.as_ptr(),
-                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST,
-                )
-            };
-            if choice != IDYES {
-                return Err(denied("управление окном не подтверждено"));
-            }
-            default_input()?;
+            confirm_locally(&text)?;
             self.check(false)
         }
 
@@ -545,6 +521,48 @@ mod windows {
                 }
             }
         }
+    }
+
+    pub fn confirm_desktop(owner_label: &str) -> io::Result<()> {
+        let label = consent_text(owner_label);
+        confirm_locally(&format!(
+            "Разрешить компьютеру {label:?} управлять всеми окнами приложений, запущенных \
+             от администратора, на этом рабочем столе Windows?\n\n\
+             Разрешение действует для текущей и последующих сессий агента с этого компьютера \
+             при активной брони рабочего стола. Оно распространяется и на окна, которые \
+             откроются позднее, и действует до отзыва или закрытия ferry.\n\n\
+             При блокировке Windows управление недоступно. \
+             Системные окна и защищённый рабочий стол требуют вашего участия. \
+             Подтверждайте, только если доверяете этому компьютеру."
+        ))
+    }
+
+    fn confirm_locally(text: &str) -> io::Result<()> {
+        if integrity(unsafe { GetCurrentProcess() })? < SECURITY_MANDATORY_HIGH_RID {
+            return Err(denied("подтверждение требует повышенных прав"));
+        }
+        let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let text = wide(text);
+        let title = wide("ferry — подтверждение управления Windows");
+        const IDYES: i32 = 6;
+        const MB_YESNO: u32 = 0x0004;
+        const MB_ICONWARNING: u32 = 0x0030;
+        const MB_DEFBUTTON2: u32 = 0x0100;
+        const MB_SETFOREGROUND: u32 = 0x10000;
+        const MB_TOPMOST: u32 = 0x40000;
+        default_input()?;
+        let choice = unsafe {
+            MessageBoxW(
+                0,
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST,
+            )
+        };
+        if choice != IDYES {
+            return Err(denied("управление не подтверждено"));
+        }
+        default_input()
     }
 
     fn cursor() -> io::Result<Point> {

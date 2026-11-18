@@ -6,8 +6,9 @@ pub const DURABLE_START: &str = "0.1.23";
 pub const CHECK: &str = "0.1.23";
 pub const DESK_AWAKE: &str = "0.1.27";
 pub const ADMIN_WINDOW: &str = "0.1.28";
+pub const ADMIN_WINDOWS: &str = "0.1.29";
 
-pub const FEATURES: [(&str, &str); 7] = [
+pub const FEATURES: [(&str, &str); 8] = [
     ("shell", SHELL),
     ("result", RESULT),
     ("desk-note", DESK_NOTE),
@@ -15,6 +16,7 @@ pub const FEATURES: [(&str, &str); 7] = [
     ("check", CHECK),
     ("desk-awake", DESK_AWAKE),
     ("admin-window", ADMIN_WINDOW),
+    ("admin-windows", ADMIN_WINDOWS),
 ];
 
 pub fn parse(value: &str) -> Option<[u32; 3]> {

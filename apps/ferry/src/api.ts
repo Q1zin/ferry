@@ -37,6 +37,8 @@ export type AdminWindow = { id: number; title: string; process: string; pid: num
 export type AdminWindowsState = {
   owner: DeskReservation['owner']
   window: AdminWindow | null
+  all_windows: boolean
+  approved_controller: string | null
   candidates?: AdminWindow[]
 }
 
@@ -126,7 +128,7 @@ export const api = {
   power: (id: string, action: string) => invoke<string>('power', { id, action }),
   deskReservation: (id: string | null, action: 'show' | 'take' | 'free', minutes?: number) =>
     invoke<DeskReservation>('desk_reservation', { id, action, minutes }),
-  adminWindows: (action: 'show' | 'choose' | 'grant' | 'revoke', window?: number) =>
+  adminWindows: (action: 'show' | 'choose' | 'grant' | 'grant_all' | 'revoke', window?: number) =>
     invoke<AdminWindowsState>('admin_windows', { action, window }),
   cli: () => invoke<{ path: string | null; installed: string | null }>('cli'),
   installCli: () => invoke<string>('install_cli'),

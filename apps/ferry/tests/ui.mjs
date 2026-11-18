@@ -115,12 +115,13 @@ try {
       const listeners = {}
       const free = { state: 'free', owner: null, owned: false, keep_awake: false, awake_remaining_seconds: null }
       let reservation = free
-      const adminOwner = { device: 'win-10', session: 'codex:fixture' }
+      let adminOwner = { device: 'win-10', session: 'codex:fixture' }
       const adminCandidates = [
         { id: 84, title: 'Тестовое окно', process: 'first.exe', pid: 505 },
         { id: 101, title: 'Тестовое окно', process: 'second.exe', pid: 506 },
       ]
       let adminWindow = null
+      let approvedController = null
       let next = 0
       window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: () => {} }
       window.__TAURI_INTERNALS__ = {
@@ -137,10 +138,20 @@ try {
             return reservation
           }
           if (cmd === 'admin_windows') {
-            if (args.action === 'choose') return { owner: adminOwner, window: adminWindow, candidates: adminCandidates }
             if (args.action === 'grant') adminWindow = adminCandidates.find((w) => w.id === args.window) ?? null
-            if (args.action === 'revoke') adminWindow = null
-            return { owner: adminOwner, window: adminWindow }
+            if (args.action === 'grant_all') {
+              approvedController = adminOwner.device
+              adminOwner = null
+            }
+            if (args.action === 'revoke') {
+              adminWindow = null
+              approvedController = null
+            }
+            return {
+              owner: adminOwner, window: adminWindow, all_windows: approvedController !== null,
+              approved_controller: approvedController,
+              ...(args.action === 'choose' ? { candidates: adminCandidates } : {}),
+            }
           }
           if (cmd === 'dashboard') {
             if (args.request.action === 'run') {
@@ -330,7 +341,7 @@ try {
     assert.deepEqual((await calls()).find(([c]) => c === 'set_mode'), ['set_mode', { mode: 'no-desktop' }])
     await shot('me')
 
-    // Согласие на повышенное окно выдаётся только с этого Windows-устройства, по конкретному @ID.
+    // Согласие выдаётся с локального Windows-устройства: на выбранное окно или на все.
     const adminHeading = page.getByRole('heading', { name: 'Окно администратора', exact: true })
     assert.equal(await adminHeading.count(), 0)
     await emit('state', { ...snapshot, me: { ...snapshot.me, os: 'windows' } })
@@ -347,6 +358,18 @@ try {
     await fits('окно администратора')
     await page.getByRole('button', { name: 'Отозвать доступ', exact: true }).click()
     await page.getByRole('button', { name: 'Выбрать окно администратора' }).waitFor()
+    assert.ok((await calls()).some(([c, a]) => c === 'admin_windows' && a.action === 'revoke'))
+    const grantAll = page.getByRole('button', { name: 'Разрешить для всех окон администратора', exact: true })
+    await grantAll.click()
+    const allGranted = page.getByRole('status').filter({ hasText: 'Разрешено: все окна администратора' })
+    await allGranted.waitFor()
+    assert.ok((await allGranted.innerText()).includes('пульт win-10'))
+    await page.getByText('Сейчас рабочий стол свободен.', { exact: true }).waitFor()
+    assert.ok((await calls()).some(([c, a]) => c === 'admin_windows' && a.action === 'grant_all' && a.window == null))
+    await page.getByRole('button', { name: 'Отозвать доступ', exact: true }).click()
+    await allGranted.waitFor({ state: 'hidden' })
+    await grantAll.waitFor()
+    assert.ok(await grantAll.isDisabled(), 'выдать доступ всему пульту можно только при текущей брони')
     assert.ok((await calls()).some(([c, a]) => c === 'admin_windows' && a.action === 'revoke'))
     await emit('state', snapshot)
     await adminHeading.waitFor({ state: 'hidden' })

@@ -611,9 +611,22 @@ async fn answer(
             }
             Response::Message(device.input(args).await?)
         }
-        Request::AdminInput { device, action } => {
-            Response::Message(agent.device(&device)?.admin_input(session, action).await?)
-        }
+        Request::AdminInput { device, action } => Response::Message(
+            agent
+                .device(&device)?
+                .admin_input(session, None, action)
+                .await?,
+        ),
+        Request::AdminInputForWindow {
+            device,
+            window,
+            action,
+        } => Response::Message(
+            agent
+                .device(&device)?
+                .admin_input(session, Some(window), action)
+                .await?,
+        ),
         Request::Desk {
             device,
             action,

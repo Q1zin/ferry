@@ -417,21 +417,38 @@ impl Device {
     pub async fn admin_input(
         &self,
         session: &str,
+        window: Option<i64>,
         action: ferry_core::screen::admin::Action,
     ) -> Reply<String> {
+        use ferry_core::device::version::{ADMIN_WINDOW, ADMIN_WINDOWS};
         need(
             &self.name,
             self.version.as_deref(),
-            ferry_core::device::version::ADMIN_WINDOW,
+            if window.is_some() {
+                ADMIN_WINDOWS
+            } else {
+                ADMIN_WINDOW
+            },
             "управление окном администратора",
         )?;
-        tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            self.client.ask(AdminInput {
-                session: session.into(),
-                action,
-            }),
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            if let Some(window) = window {
+                self.client
+                    .ask(AdminInputForWindow {
+                        session: session.into(),
+                        window,
+                        action,
+                    })
+                    .await
+            } else {
+                self.client
+                    .ask(AdminInput {
+                        session: session.into(),
+                        action,
+                    })
+                    .await
+            }
+        })
         .await
         .map_err(|_| Fail::new("ответ окна администратора потерян; проверь окно перед повтором"))?
     }

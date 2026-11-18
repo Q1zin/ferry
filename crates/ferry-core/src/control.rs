@@ -286,6 +286,11 @@ pub enum Request {
         device: String,
         action: crate::screen::admin::Action,
     },
+    AdminInputForWindow {
+        device: String,
+        window: i64,
+        action: crate::screen::admin::Action,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

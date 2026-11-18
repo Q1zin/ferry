@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "ferry"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "base64 0.22.1",
  "ferry-core",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-app"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "base64 0.22.1",
  "ferry-core",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-core"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-net"
-version = "0.1.28"
+version = "0.1.29"
 dependencies = [
  "anyhow",
  "ferry-core",

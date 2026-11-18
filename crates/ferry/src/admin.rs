@@ -30,29 +30,52 @@ fn action(args: &[&str]) -> Option<Action> {
     })
 }
 
-pub fn run(device: &str, args: &[&str]) -> io::Result<i32> {
-    let (session, args) = match args {
-        ["--session", id, rest @ ..] => (crate::execution::session_name(id), rest),
-        _ => (control::session(), args),
-    };
+pub fn run(device: &str, mut args: &[&str]) -> io::Result<i32> {
+    let mut session = None;
+    let mut window = None;
+    loop {
+        args = match args {
+            ["--session", id, rest @ ..] if session.is_none() => {
+                session = Some(crate::execution::session_name(id));
+                rest
+            }
+            ["--window", id, rest @ ..] if window.is_none() => {
+                let Some(id) = window_id(id) else {
+                    return crate::usage();
+                };
+                window = Some(id);
+                rest
+            }
+            _ => break,
+        };
+    }
     let Some(action) = action(args) else {
         return crate::usage();
     };
     crate::devices::finish((|| {
         let state = crate::devices::state()?;
-        if !version::at_least(&state.me.version, version::ADMIN_WINDOW) {
+        let minimum = if window.is_some() {
+            version::ADMIN_WINDOWS
+        } else {
+            version::ADMIN_WINDOW
+        };
+        if !version::at_least(&state.me.version, minimum) {
             return Err(Fail::new(format!(
-                "для окон администратора обнови пульт до ferry {}",
-                version::ADMIN_WINDOW
+                "для окон администратора обнови пульт до ferry {minimum}"
             )));
         }
-        match control::call_session(
-            Request::AdminInput {
+        let request = match window {
+            Some(window) => Request::AdminInputForWindow {
+                device: device.into(),
+                window,
+                action,
+            },
+            None => Request::AdminInput {
                 device: device.into(),
                 action,
             },
-            &session,
-        )? {
+        };
+        match control::call_session(request, &session.unwrap_or_else(control::session))? {
             Response::Message(text) => {
                 if !text.is_empty() {
                     println!("{text}");
@@ -65,12 +88,20 @@ pub fn run(device: &str, args: &[&str]) -> io::Result<i32> {
     })())
 }
 
+fn window_id(value: &str) -> Option<i64> {
+    let id: i64 = value.strip_prefix('@').unwrap_or(value).parse().ok()?;
+    (id > 0).then_some(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn accepts_only_window_actions() {
+        assert_eq!(window_id("@1704708"), Some(1704708));
+        assert_eq!(window_id("0"), None);
+        assert_eq!(window_id("@-1"), None);
         assert!(matches!(
             action(&["click", "100", "25", "right"]),
             Some(Action::Click {

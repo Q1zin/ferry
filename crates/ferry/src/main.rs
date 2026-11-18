@@ -150,7 +150,7 @@ ferry — разработка и тесты на нескольких устр�
                                     терминала) — любое действие само занимает стол на 3 мин, take —
                                     надольше (по умолчанию 30 мин), free — снять, --force — чужую
                                     --keep-awake удерживает систему и экран от сна до конца срока
-  ferry admin <устройство> [--session <id>] status|focus|move X Y|click X Y [right]|scroll N|key КЛАВИША|type ТЕКСТ
+  ferry admin <устройство> [--session <id>] [--window @ID] status|focus|move X Y|click X Y [right]|scroll N|key КЛАВИША|type ТЕКСТ
                                     управление одним окном администратора после подтверждения на Windows
   ferry ask <устройство|local> <вопрос> [--id <id>] [--timeout 600] [--wait 0]
   ferry ask <устройство|local> --poll <id> [--wait 30] | --cancel <id>

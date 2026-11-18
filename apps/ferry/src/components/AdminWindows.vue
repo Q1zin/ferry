@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, type AdminWindow, type AdminWindowsState } from '../api'
 
 type Action = Parameters<typeof api.adminWindows>[0]
@@ -8,6 +8,7 @@ const candidates = ref<AdminWindow[] | null>(null)
 const selected = ref<number | null>(null)
 const busy = ref<Action | null>(null)
 const error = ref<{ action: Action; message: string } | null>(null)
+const granted = computed(() => state.value?.all_windows === true || !!state.value?.window)
 
 function windowName(window: AdminWindow) {
   return [window.title || 'Окно без заголовка', window.process, `PID ${window.pid}`, `@${window.id}`].join(' · ')
@@ -19,7 +20,9 @@ function clearChoice() {
 }
 
 async function run(action: Action) {
-  if (busy.value || (action === 'grant' && (selected.value === null || !state.value?.owner))) return
+  const choosingAccess = action === 'choose' || action === 'grant' || action === 'grant_all'
+  if (busy.value || (choosingAccess && (!state.value?.owner || granted.value))) return
+  if (action === 'grant' && selected.value === null) return
   busy.value = action
   try {
     const previous = state.value?.owner
@@ -52,19 +55,31 @@ onUnmounted(() => window.clearInterval(timer))
   <div class="card admin-windows">
     <h3>Окно администратора</h3>
     <p class="muted small">
-      Подтверди запрос UAC лично за этим компьютером и открой нужное окно. Разрешение действует для одного окна
-      до окончания текущей брони, максимум 15 минут.
+      Доступ ко всем окнам администратора действует для выбранного пульта до отзыва или выхода из Ferry на этом
+      компьютере. Новые сессии агента на том же пульте используют это разрешение. Для управления нужна активная
+      бронь этого пульта и разблокированный экран.
+    </p>
+    <p class="muted small">
+      Если нужен доступ только к одному окну, сначала запусти приложение от имени администратора. Разрешение на одно
+      окно действует до конца текущей брони, максимум 15 минут. Подтверждай запросы Windows лично за этим компьютером.
     </p>
     <p v-if="state?.owner">Бронь у <strong>{{ state.owner.device }}</strong> · сессия <code>{{ state.owner.session }}</code></p>
-    <p v-else-if="state" class="muted">Сначала пульт или агент должен занять рабочий стол.</p>
-    <p v-if="state?.window" role="status">Разрешено: {{ windowName(state.window) }}</p>
+    <p v-else-if="state && !granted" class="muted">Сначала пульт или агент должен занять рабочий стол.</p>
+    <p v-else-if="state" class="muted">Сейчас рабочий стол свободен.</p>
+    <p v-if="state?.all_windows" role="status">
+      Разрешено: все окна администратора · пульт <strong>{{ state.approved_controller }}</strong>
+    </p>
+    <p v-else-if="state?.window" role="status">Разрешено: {{ windowName(state.window) }}</p>
 
     <div class="row wrap">
-      <button v-if="state?.window" class="danger" :disabled="!!busy" @click="run('revoke')">Отозвать доступ</button>
-      <button v-else :disabled="!!busy || !state?.owner" @click="run('choose')">Выбрать окно администратора</button>
+      <button v-if="granted" class="danger" :disabled="!!busy" @click="run('revoke')">Отозвать доступ</button>
+      <template v-else>
+        <button class="primary" :disabled="!!busy || !state?.owner" @click="run('grant_all')">Разрешить для всех окон администратора</button>
+        <button :disabled="!!busy || !state?.owner" @click="run('choose')">Выбрать окно администратора</button>
+      </template>
     </div>
 
-    <template v-if="state?.owner && !state.window && candidates">
+    <template v-if="state?.owner && !granted && candidates">
       <div v-if="candidates.length" class="admin-choice">
         <label>
           Окно

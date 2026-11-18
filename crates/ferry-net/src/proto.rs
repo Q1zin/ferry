@@ -399,11 +399,20 @@ pub enum DeviceProtocol {
     ShotWindowInfo(ShotWindowInfo),
     #[rpc(tx = oneshot::Sender<Reply<String>>)]
     AdminInput(AdminInput),
+    #[rpc(tx = oneshot::Sender<Reply<String>>)]
+    AdminInputForWindow(AdminInputForWindow),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AdminInput {
     pub session: String,
+    pub action: ferry_core::screen::admin::Action,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AdminInputForWindow {
+    pub session: String,
+    pub window: i64,
     pub action: ferry_core::screen::admin::Action,
 }
 
