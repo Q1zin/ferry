@@ -541,14 +541,15 @@ async fn answer(
             name,
             follow,
         } => {
-            let rx = agent.device(&device)?.log(&name, follow).await?;
+            let remote = agent.device(&device)?;
+            let rx = remote.log(&name, follow).await?;
             if !follow {
                 return Ok(Answer::Stream(rx));
             }
-            let (agent, who) = (agent.clone(), device.clone());
+            let (agent, who, endpoint) = (agent.clone(), device, remote.id.to_string());
             let again = move || {
-                let (agent, device, name) = (agent.clone(), device.clone(), name.clone());
-                async move { agent.device(&device)?.log(&name, true).await }
+                let (agent, endpoint, name) = (agent.clone(), endpoint.clone(), name.clone());
+                async move { agent.device(&endpoint)?.log(&name, true).await }
             };
             return Ok(Answer::Stream(resume(who, rx, again)));
         }
