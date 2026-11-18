@@ -48,7 +48,10 @@ pub(crate) fn finish(result: Result<i32, Fail>) -> io::Result<i32> {
 /// Имена устройств по спецификации целей.
 /// `any_role` — и пульты тоже: обновлять нужно всех, а команды пульт не принимает.
 fn targets(spec: &str, any_role: bool) -> Result<Vec<String>, Fail> {
-    let snap = state()?;
+    targets_in(&state()?, spec, any_role)
+}
+
+fn targets_in(snap: &Snapshot, spec: &str, any_role: bool) -> Result<Vec<String>, Fail> {
     let mut names = Vec::new();
     let mut skipped = Vec::new();
     let accepts =
@@ -815,7 +818,11 @@ pub enum Area<'a> {
 }
 
 pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Result<i32> {
-    let names = match targets(spec, false) {
+    let snapshot = match state() {
+        Ok(snapshot) => snapshot,
+        Err(fail) => return finish(Err(fail)),
+    };
+    let names = match targets_in(&snapshot, spec, false) {
         Ok(names) => names,
         Err(fail) => return finish(Err(fail)),
     };
@@ -847,6 +854,12 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Resul
                 None
             }
             Area::Region(region) => {
+                // macOS округляет координаты в точки; узел не возвращает получившуюся область.
+                verified = snapshot
+                    .find(device)
+                    .ok()
+                    .and_then(|p| p.status.as_ref())
+                    .is_some_and(|s| s.os == "windows");
                 ask(Request::ShotArea {
                     device: device.into(),
                     file: path.clone(),
@@ -909,12 +922,16 @@ pub fn shot(spec: &str, file: Option<&str>, area: Area, json: bool) -> io::Resul
         }
         // Клик и ввод ждут координаты всего экрана — к точке на снимке прибавить начало области.
         if let Some([x, y, width, height]) = region {
-            printer.line(
-                &format!(
+            let message = if verified {
+                format!(
                     "ferry: область {x},{y} {width}×{height} — для click прибавь {x},{y} к точке на снимке"
-                ),
-                true,
-            );
+                )
+            } else {
+                format!(
+                    "ferry: запрошенная область {x},{y} {width}×{height}; точное смещение снимка не подтверждено"
+                )
+            };
+            printer.line(&message, true);
         }
         Ok(0)
     })

@@ -1877,7 +1877,12 @@ mod mac {
     }
 
     pub fn focused_window(windows: &[super::Window]) -> Option<&super::Window> {
+        // Диагностика выполняется на рабочем потоке, где нельзя читать свой AppKit через AX.
+        if let Some(front) = windows.iter().find(|w| w.focused) {
+            foreign(front.pid).ok()?;
+        }
         let pid = focused_pid()?;
+        foreign(i64::from(pid)).ok()?;
         let app = unsafe { CFType::wrap_under_create_rule(AXUIElementCreateApplication(pid)) };
         let title = ax_title(&attribute(&app, "AXFocusedWindow")?);
         let mut active = windows.iter().filter(|w| {
@@ -2805,6 +2810,7 @@ mod tests {
         };
         let err = mac::focus(&own).unwrap_err().to_string();
         assert!(err.contains("самого ferry"), "{err}");
+        assert!(mac::focused_window(&[own]).is_none());
     }
 
     #[test]
