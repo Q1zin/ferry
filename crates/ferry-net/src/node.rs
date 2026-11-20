@@ -664,7 +664,7 @@ impl Node {
                 .ancestors()
                 .find(|path| path.is_dir())
                 .ok_or_else(|| std::io::Error::other("нет каталога для защиты файлов"))?;
-            Ok(ferry_core::storage::protect_activity(&state, existing)?)
+            ferry_core::storage::protect_activity(&state, existing)
         })
         .await
     }
