@@ -480,6 +480,8 @@ mod tests {
         let home = base.join("home");
         fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-q"]).unwrap();
+        // This fixture compares exact bytes after git apply, independent of host Git settings.
+        git(&root, &["config", "core.autocrlf", "false"]).unwrap();
         fs::write(root.join("a"), "base\n").unwrap();
         git(&root, &["add", "a"]).unwrap();
         git(

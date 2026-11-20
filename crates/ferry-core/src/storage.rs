@@ -1122,6 +1122,9 @@ pub fn execute(state: &Path, home: &Path, request: Request) -> io::Result<Value>
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn entry_path(entry: &Value) -> &Path {
+        Path::new(entry["path"].as_str().expect("storage entry has a path"))
+    }
     fn fixture() -> (PathBuf, PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("ferry-storage-{}", crate::jobs::unique_id()));
         let state = root.join("state");
@@ -1176,12 +1179,12 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["path"] == json!(large))
-            .unwrap();
+            .find(|entry| entry_path(entry) == large)
+            .unwrap_or_else(|| panic!("missing cache {} in {preview}", large.display()));
         assert_eq!(incomplete["measurement_complete"], false);
         assert!(incomplete["protected"].is_string());
         assert_eq!(preview["candidates"].as_array().unwrap().len(), 1);
-        assert_eq!(preview["candidates"][0]["path"], json!(small));
+        assert_eq!(entry_path(&preview["candidates"][0]), small);
         let mut only = request(Kind::Caches);
         only.only = Some(identity(&small, Kind::Caches));
         let exact = execute(&state, &home, only).unwrap();
@@ -1314,7 +1317,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|entry| entry["path"] == json!(root.join("build")))
+                .any(|entry| entry_path(entry) == root.join("build"))
         );
         save_workspace_caches(&state, &home, &source, &["build".into()], &[".env".into()]).unwrap();
         let preview = execute(&state, &home, request(Kind::Caches)).unwrap();
@@ -1322,7 +1325,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["path"] == json!(root.join("build")))
+            .find(|entry| entry_path(entry) == root.join("build"))
             .unwrap();
         let mut q = request(Kind::Caches);
         q.only = Some(candidate["id"].as_str().unwrap().into());
@@ -1370,7 +1373,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["path"] == json!(root.join("target")))
+            .find(|entry| entry_path(entry) == root.join("target"))
             .unwrap();
         assert!(entry["protected"].as_str().unwrap().contains("files"));
         save_workspace_caches(&state, &home, &source, &[], &[]).unwrap();
@@ -1381,7 +1384,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["path"] == json!(root.join("target")))
+            .find(|entry| entry_path(entry) == root.join("target"))
             .unwrap();
         assert!(entry["protected"].as_str().unwrap().contains("активной"));
         drop(guard);
