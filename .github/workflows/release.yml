@@ -110,6 +110,8 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
       - run: node apps/ferry/scripts/release.mjs
-      - run: gh release create "$GITHUB_REF_NAME" --draft --title "ferry $VERSION" --generate-notes "target/release-v$VERSION"/*
+        env:
+          FERRY_REQUIRE_ALL: "1"
+      - run: gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "ferry $VERSION" --generate-notes "target/release-v$VERSION"/*
         env:
           GH_TOKEN: ${{ github.token }}

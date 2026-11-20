@@ -1,6 +1,6 @@
 // После `bun run release:mac` и `release:windows`: всё для релиза v<версия> в одном каталоге —
 // установщики, пакеты обновления и latest.json для updater (подписи — из .sig, которые сборка
-// кладёт рядом с пакетами). Публикует релиз человек: gh release create v<версия> <каталог>/*.
+// кладёт рядом с пакетами). CI требует обе платформы и DMG; черновик публикует владелец.
 // FERRY_RELEASE_URL — откуда updater будет качать пакеты; по умолчанию — из этого релиза.
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
@@ -17,6 +17,7 @@ const dmgName = existsSync(dmgDir) && readdirSync(dmgDir).find((f) => f.startsWi
 const dmgArch = dmgName ? dmgName.slice(`ferry_${version}_`.length, -'.dmg'.length) : process.arch
 const arch = { arm64: 'aarch64', aarch64: 'aarch64' }[dmgArch] ?? 'x86_64'
 const win = join(ROOT, 'target/x86_64-pc-windows-gnu/release/bundle')
+const requireAll = process.env.FERRY_REQUIRE_ALL === '1'
 
 // Пакет обновления для мака — без версии в имени: сверяем её по Info.plist, чтобы не взять старый.
 const plist = join(mac, 'macos/ferry.app/Contents/Info.plist')
@@ -24,20 +25,31 @@ const macFresh = existsSync(plist) && readFileSync(plist, 'utf8').includes(`<str
 
 // Платформа updater, пакет обновления, имя в релизе, установщик для новых устройств.
 const builds = [
-  [`darwin-${arch}`, macFresh && join(mac, 'macos/ferry.app.tar.gz'), `ferry_${version}_${arch}.app.tar.gz`, join(mac, `dmg/ferry_${version}_${arch}.dmg`)],
+  [`darwin-${arch}`, macFresh && join(mac, 'macos/ferry.app.tar.gz'), `ferry_${version}_${arch}.app.tar.gz`, dmgName && join(dmgDir, dmgName)],
   ['windows-x86_64', join(win, `nsis/ferry_${version}_x64-setup.exe`), `ferry_${version}_x64-setup.exe`, null],
 ]
+
+if (requireAll && !dmgName) {
+  console.error(`ferry: нет DMG версии ${version}; черновик не создан`)
+  process.exit(1)
+}
 
 mkdirSync(out, { recursive: true })
 const platforms = {}
 for (const [platform, pkg, name, installer] of builds) {
-  if (!pkg || !existsSync(`${pkg}.sig`)) {
+  const signature = pkg && existsSync(pkg) && existsSync(`${pkg}.sig`)
+    ? readFileSync(`${pkg}.sig`, 'utf8').trim() : ''
+  if (!signature) {
     console.log(`ferry: ${platform} — нет подписанной сборки ${version}, пропускаю`)
     continue
   }
   copyFileSync(pkg, join(out, name))
   if (installer && existsSync(installer)) copyFileSync(installer, join(out, basename(installer)))
-  platforms[platform] = { signature: readFileSync(`${pkg}.sig`, 'utf8'), url: `${base}/${name}` }
+  platforms[platform] = { signature, url: `${base}/${name}` }
+}
+if (requireAll && Object.keys(platforms).length !== builds.length) {
+  console.error('ferry: для черновика нужны подписанные сборки macOS и Windows')
+  process.exit(1)
 }
 if (!Object.keys(platforms).length) {
   console.error('ferry: нет ни одной сборки — сначала bun run release:mac или release:windows')
