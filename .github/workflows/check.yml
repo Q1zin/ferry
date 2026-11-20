@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install --component rustfmt,clippy
+      - run: rustup toolchain install
+      - run: rustup component add rustfmt clippy
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
         with:
@@ -49,7 +50,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis libayatana-appindicator3-dev
-      - run: rustup toolchain install --component clippy
+      - run: rustup toolchain install
+      - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
         with:
